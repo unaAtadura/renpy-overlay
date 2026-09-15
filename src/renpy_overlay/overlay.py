@@ -16,10 +16,13 @@
    跟随让位，避免与用户操作“抢方向盘”。进程开启 Per-Monitor DPI 感知后，两边
    坐标都是物理像素，可直接对齐。
 
-4. **锁定态单击翻译**。锁定状态下单击左键，把“最近捕获的游戏原文”（而非窗口当前
-   显示的文本）发给本地 LM Studio（OpenAI 兼容协议）翻译成中文并替换显示；网络
-   请求在守护线程里执行，结果经队列回到主线程；同时只允许一条在途请求，双击
-   （解锁）会强制中止在途翻译（结果作废，不再覆盖界面）。
+4. **锁定态翻译（手动 + 自动）**。锁定状态下单击左键，把“最近捕获的游戏原文”
+   （而非窗口当前显示的文本）发给本地 LM Studio（OpenAI 兼容协议）翻译成中文并
+   替换显示；网络请求在守护线程里执行，结果经队列回到主线程；同时只允许一条
+   在途请求，双击（解锁）会强制中止在途翻译（结果作废，不再覆盖界面）。
+   当 config.json 的 ``auto_translate`` 开启时，锁定状态下还会按轮询间隔（默认
+   3 秒，主线程 after 循环）自动翻译最新的游戏原文 —— 同一原文只自动翻一次，
+   进入锁定后需经过一个完整轮询间隔才会首次触发，解锁即停用并中止在途。
 
 5. **线程模型**。Tk 只能在创建它的线程里操作，因此所有跨线程输入（IPC 回调、
    控制台命令、翻译结果）都先进队列，再由主线程的 ``after`` 定时器统一消费 ——
@@ -34,8 +37,8 @@
 
 标题栏策略：启动时的初始文本不变；之后随交互状态动态更新 —— 新对话显示该条文本
 的前 20 个字符（提醒将被发送的文本）、“翻译中... / 翻译完成 / 翻译失败”反映
-翻译进程、“已锁定，单击启动翻译 / 已解锁，中止翻译”反映锁定状态；控制台的连接
-状态也写入同一位置。
+翻译进程、锁定状态显示“已锁定，单击启动翻译”（自动翻译开启时为“已锁定，开始
+自动翻译”）、“已解锁，中止翻译”；控制台的连接状态也写入同一位置。
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ import threading
 import time
 import tkinter as tk
 
-from . import translator, win32api
+from . import config, translator, win32api
 
 logger = logging.getLogger("renpy_overlay.overlay")
 
@@ -124,6 +127,7 @@ class OverlayWindow:
         alpha: float = 0.85,
         font_family: str = "Microsoft YaHei UI",
         font_size: int = 11,
+        app_config: config.AppConfig | None = None,
         on_quit=None,
     ):
         self.target_pid = target_pid
@@ -134,6 +138,7 @@ class OverlayWindow:
         self.font_family = font_family
         self.font_size = font_size
         self.on_quit = on_quit
+        self._config = app_config or config.AppConfig()
 
         self._queue: queue.Queue = queue.Queue()
         self._root = tk.Tk()
@@ -154,6 +159,9 @@ class OverlayWindow:
         self._last_say: dict | None = None  # 最近一次捕获的游戏原文（翻译请求的输入）
         self._translating = False  # 是否有在途翻译请求（仅主线程读写）
         self._translation_seq = 0  # 翻译世代号：双击中止 / 新请求时递增，作废旧结果
+        self._last_translation_input: str | None = None  # 最近已触发翻译的原文（自动去重）
+        self._lock_started_at = 0.0  # 本次锁定开始时间（自动翻译需等一个完整间隔）
+        self._auto_skip_reason: str | None = None  # 上次自动翻译跳过原因（日志去重）
         self._build()
 
     # ------------------------------------------------------------ 界面构建
@@ -263,6 +271,7 @@ class OverlayWindow:
         """启动 Tk 主循环（阻塞）。返回即代表窗口已销毁。"""
         self._root.after(DRAIN_INTERVAL_MS, self._drain)
         self._root.after(FOLLOW_INTERVAL_MS, self._follow)
+        self._start_auto_translate()
         try:
             self._root.mainloop()
         finally:
@@ -550,10 +559,15 @@ class OverlayWindow:
     def _toggle_lock(self) -> None:
         self._locked = not self._locked
         if self._locked:
-            logger.info("已锁定悬浮窗位置（双击解锁；锁定状态下单击触发翻译）")
-            self._update_header("已锁定，单击启动翻译")
+            self._lock_started_at = time.time()
+            if self._config.auto_translate:
+                logger.info("已锁定悬浮窗位置（自动翻译开启：等一个轮询间隔后开始）")
+                self._update_header("已锁定，开始自动翻译")
+            else:
+                logger.info("已锁定悬浮窗位置（双击解锁；锁定状态下单击触发翻译）")
+                self._update_header("已锁定，单击启动翻译")
         else:
-            logger.info("已解锁悬浮窗位置（恢复鼠标拖动与自动跟随）")
+            logger.info("已解锁悬浮窗位置（恢复鼠标拖动与自动跟随；自动翻译停用）")
             self._update_header("已解锁，中止翻译")
 
     def _schedule_click(self) -> None:
@@ -578,10 +592,11 @@ class OverlayWindow:
         logger.debug("锁定状态下的单击：请求翻译当前对话原文")
         self._start_translation()
 
-    def _start_translation(self) -> None:
+    def _start_translation(self, origin: str = "manual") -> None:
         """发起翻译请求（仅主线程调用）。同一时刻只允许一条在途请求。"""
+        label = "自动触发" if origin == "auto" else "单击触发"
         if self._translating:
-            logger.info("已有翻译请求在途，忽略本次单击")
+            logger.info("已有翻译请求在途，忽略本次%s翻译", label)
             return
         say = self._last_say or {}
         what = str(say.get("what") or "").strip()
@@ -592,7 +607,8 @@ class OverlayWindow:
         self._translating = True
         self._translation_seq += 1
         seq = self._translation_seq
-        logger.info("发起翻译请求（seq=%d，原文 %d 字）：%s", seq, len(what), what[:40])
+        self._last_translation_input = what  # 记录已触发的原文，自动翻译据此去重
+        logger.info("发起翻译请求（%s，seq=%d，原文 %d 字）：%s", label, seq, len(what), what[:40])
         self._update_header("翻译中...")
         thread = threading.Thread(
             target=self._translate_worker,
@@ -640,3 +656,58 @@ class OverlayWindow:
         self._translation_seq += 1
         self._translating = False
         logger.info("已中止在途翻译（%s）：结果作废，界面保持当前状态", reason)
+
+    # -- 自动翻译（config.json: auto_translate / auto_translate_interval）
+
+    def _start_auto_translate(self) -> None:
+        """启动自动翻译轮询（仅在配置开启时）。"""
+        if not self._config.auto_translate:
+            logger.info("自动翻译未启用（config.json: auto_translate=false）")
+            return
+        interval_ms = self._auto_interval_ms()
+        logger.info("自动翻译已启用：每 %.1f 秒轮询一次（仅锁定状态生效）", interval_ms / 1000.0)
+        self._root.after(interval_ms, self._auto_translate_tick)
+
+    def _auto_interval_ms(self) -> int:
+        return max(200, int(self._config.auto_translate_interval * 1000))
+
+    def _auto_translate_tick(self) -> None:
+        """自动翻译轮询（主线程 after 循环，与 _drain/_follow 同模式）。"""
+        if self._closed:
+            return
+        try:
+            self._auto_translate_check()
+        except Exception:  # pragma: no cover - 轮询异常不应终止循环
+            logger.exception("自动翻译轮询出错")
+        if not self._closed:
+            self._root.after(self._auto_interval_ms(), self._auto_translate_tick)
+
+    def _auto_translate_check(self) -> None:
+        """条件全部满足时自动发起一次翻译；任一不满足则跳过（原因去重记日志）。"""
+        if not self._config.auto_translate:
+            return
+        if not self._locked:
+            self._auto_note_skip("未锁定")
+            return
+        if time.time() - self._lock_started_at < self._config.auto_translate_interval:
+            self._auto_note_skip("刚进入锁定，等待一个完整轮询间隔")
+            return
+        say = self._last_say or {}
+        what = str(say.get("what") or "").strip()
+        if not what:
+            self._auto_note_skip("暂无可翻译的捕获文本")
+            return
+        if what == self._last_translation_input:
+            self._auto_note_skip("该条原文已翻译过")
+            return
+        if self._translating:
+            self._auto_note_skip("已有翻译请求在途")
+            return
+        self._auto_skip_reason = None
+        self._start_translation(origin="auto")
+
+    def _auto_note_skip(self, reason: str) -> None:
+        if reason == self._auto_skip_reason:
+            return
+        self._auto_skip_reason = reason
+        logger.debug("自动翻译跳过：%s", reason)

@@ -22,7 +22,7 @@ import time
 
 import psutil
 
-from . import discovery, logs, picker, win32api
+from . import config, discovery, logs, picker, win32api
 from .discovery import Candidate
 from .injector import InjectionError, Injector
 from .ipc import DialogueLink, PeerState
@@ -46,6 +46,7 @@ EPILOG = """\
   拖动窗口    按住悬浮窗任意区域（对话文本 / 状态栏）用左键拖动，松开后位置锁定
   双击锁定    双击锁定 / 解锁位置；锁定后不再响应拖动，位置固定不被跟随拉回
   单击翻译    锁定状态下单击，把对话原文发给本地 LM Studio 翻译成中文并替换显示
+  自动翻译    config.json 开启（auto_translate: true）后，锁定状态按间隔自动翻译最新对话
   查看全文    窗口只显示最新一条对话；内容较长时可用滚轮或滚动条查看全文
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
@@ -199,6 +200,7 @@ class Session:
             height=args.height,
             alpha=args.alpha,
             font_size=args.font_size,
+            app_config=config.load_config(),  # 本地 config.json（自动翻译开关 / 轮询间隔）
             on_quit=self._request_stop,
         )
         self.overlay.set_status(self._status_text("等待游戏端上报…"))
