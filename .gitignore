@@ -1,0 +1,17 @@
+# Python 字节码与构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# 虚拟环境与工具缓存
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# 运行期日志（工具运行时自动生成）
+logs/
+
+# IDE 工作目录
+.qoder/

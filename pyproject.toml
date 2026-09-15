@@ -1,0 +1,54 @@
+[project]
+name = "renpy-overlay"
+version = "0.1.0"
+description = "Inject a dialogue-capture agent into a running Ren'Py game and render the text in a draggable floating overlay window."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    # 进程枚举 / 目标存活检测
+    "psutil>=6.1",
+    # 窗口枚举、窗口样式、窗口定位（仅 Windows）
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.scripts]
+renpy-overlay = "renpy_overlay.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+# 默认走国内镜像源：pypi.org 在本机下载大体积 wheel（pywin32/ruff）时不稳定
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/renpy_overlay"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 注入到目标进程内执行的代码必须兼容 Python 2.7（Ren'Py 7.x），
+# 因此不能套用针对 Python 3.10+ 的现代化规则。
+"src/renpy_overlay/payload/*.py" = ["UP", "B", "E", "W", "F", "I"]
