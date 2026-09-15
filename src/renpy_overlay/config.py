@@ -8,7 +8,8 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
 
     {
       "auto_translate": false,            # 自动翻译开关（仅悬浮窗锁定状态生效）
-      "auto_translate_interval": 3.0      # 自动翻译轮询间隔（秒）
+      "auto_translate_interval": 3.0,     # 自动翻译轮询间隔（秒）
+      "show_original_text": true          # 悬浮窗正文区是否随对话显示游戏原文
     }
 """
 
@@ -25,16 +26,18 @@ CONFIG_FILENAME = "config.json"
 
 DEFAULT_AUTO_TRANSLATE = False
 DEFAULT_AUTO_TRANSLATE_INTERVAL = 3.0
+DEFAULT_SHOW_ORIGINAL_TEXT = True
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
 
 
 @dataclass(frozen=True)
 class AppConfig:
-    """config.json 的解析结果（目前只承载自动翻译相关的两项）。"""
+    """config.json 的解析结果（自动翻译两项 + 正文原文显示开关）。"""
 
     auto_translate: bool = DEFAULT_AUTO_TRANSLATE
     auto_translate_interval: float = DEFAULT_AUTO_TRANSLATE_INTERVAL
+    show_original_text: bool = DEFAULT_SHOW_ORIGINAL_TEXT
 
 
 def default_path() -> Path:
@@ -54,6 +57,7 @@ def _write_defaults(target: Path) -> None:
     payload = {
         "auto_translate": DEFAULT_AUTO_TRANSLATE,
         "auto_translate_interval": DEFAULT_AUTO_TRANSLATE_INTERVAL,
+        "show_original_text": DEFAULT_SHOW_ORIGINAL_TEXT,
     }
     try:
         target.write_text(
@@ -72,6 +76,18 @@ def _read_auto_translate(raw: dict) -> bool:
             "auto_translate 不是布尔值（%r），回退默认 %s", value, DEFAULT_AUTO_TRANSLATE
         )
         return DEFAULT_AUTO_TRANSLATE
+    return value
+
+
+def _read_show_original_text(raw: dict) -> bool:
+    value = raw.get("show_original_text", DEFAULT_SHOW_ORIGINAL_TEXT)
+    if not isinstance(value, bool):
+        logger.warning(
+            "show_original_text 不是布尔值（%r），回退默认 %s",
+            value,
+            DEFAULT_SHOW_ORIGINAL_TEXT,
+        )
+        return DEFAULT_SHOW_ORIGINAL_TEXT
     return value
 
 
@@ -114,11 +130,13 @@ def load_config(path: Path | None = None) -> AppConfig:
     app_config = AppConfig(
         auto_translate=_read_auto_translate(raw),
         auto_translate_interval=_read_interval(raw),
+        show_original_text=_read_show_original_text(raw),
     )
     logger.info(
-        "配置已加载：auto_translate=%s，interval=%.1fs（%s）",
+        "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s（%s）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
+        app_config.show_original_text,
         target,
     )
     return app_config

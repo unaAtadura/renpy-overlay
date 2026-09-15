@@ -164,13 +164,17 @@ uv run renpy-overlay --pid 12345
   ```json
   {
     "auto_translate": false,          // 改为 true 开启自动翻译
-    "auto_translate_interval": 3.0    // 轮询间隔（秒）
+    "auto_translate_interval": 3.0,   // 轮询间隔（秒）
+    "show_original_text": true        // 正文区是否随对话显示游戏原文（默认开启）
   }
   ```
 
   开启后：悬浮窗**锁定**状态下按间隔轮询最新捕获的对话原文并自动翻译（同一原文
   只自动翻一次；刚进入锁定需等一个完整间隔；解锁即停用并中止在途；手动单击不受影响）。
   配置读取失败或内容非法时回退默认值并记日志，不会导致程序崩溃；
+- **原文显示开关**：`show_original_text` 为 `false` 时，正文区不再随对话刷新原文
+  （上一条内容保持不动）；对话仍照常捕获、写入日志，并作为翻译请求的唯一输入，
+  标题栏的原文前 20 字提示与翻译替换显示均不受影响。
 - 未启动 LM Studio 时请求会失败并记录日志，界面保持原样，不影响其它功能。
 
 ### 卸载与查询
@@ -228,7 +232,8 @@ uv run ruff check .    # 静态检查
   注解 / nonlocal 等一律禁止）、引导模板占位符与 base64 嵌入内容往返校验；
 - `tests/test_translator.py`：用本地 HTTP 桩验证翻译客户端（OpenAI 兼容协议往返、
   空文本拒绝、协议缺字段报错、服务不可达收敛为 TranslationError）；
-- `tests/test_config.py`：本地配置首建默认值、非法 JSON / 类型错误逐项回退、坏文件不覆盖。
+- `tests/test_config.py`：本地配置首建默认值、非法 JSON / 类型错误逐项回退、坏文件不覆盖、
+  `show_original_text` 默认 / 合法读取 / 缺失与非法回退。
 
 端到端自测（需要真实游戏）：用 Ren'Py SDK 的 *The Question* 或任一发行版游戏，
 按"快速开始"注入后确认：对话实时上屏且只保留最新一条（旧对话不累积）、拖动悬浮窗

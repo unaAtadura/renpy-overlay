@@ -34,6 +34,8 @@
 
 显示策略：窗口只展示当前（最新一条）对话 —— 新对话到来时直接替换上一轮内容，
 不累积历史、也不做行数裁剪；内容较长时可用滚轮 / 滚动条查看全文。
+``config.json`` 的 ``show_original_text=false`` 时正文区不随对话刷新原文（仅影响
+显示，不影响采集、标题栏提示与翻译链路）。
 
 标题栏策略：启动时的初始文本不变；之后随交互状态动态更新 —— 新对话显示该条文本
 的前 20 个字符（提醒将被发送的文本）、“翻译中... / 翻译完成 / 翻译失败”反映
@@ -309,11 +311,19 @@ class OverlayWindow:
                     who = str(payload.get("who") or "")
                     what = str(payload.get("what") or "")
                     self._last_say = {"who": who, "what": what}
-                    self._append_say(payload)
                     preview = what.strip()[:20]
                     if preview:
-                        # 标题栏提醒：这条对话就是翻译时将发送的文本
+                        # 标题栏提醒：这条对话就是翻译时将发送的文本（不受显示开关影响）
                         self._update_header(preview)
+                    if self._config.show_original_text:
+                        self._append_say(payload)
+                    else:
+                        # 正文区不刷新，但原文已记录，翻译/自动翻译链路不受影响
+                        logger.debug(
+                            "已捕获对话（show_original_text=false，正文区不更新）：[%s] %s",
+                            who or "-",
+                            what[:60],
+                        )
                 elif kind == "hint":
                     self._append_dim(payload)
                 elif kind == "status":

@@ -13,20 +13,40 @@ def test_missing_file_creates_defaults(tmp_path):
     assert loaded == config.AppConfig()
     assert loaded.auto_translate is False
     assert loaded.auto_translate_interval == 3.0
+    assert loaded.show_original_text is True
     assert target.is_file(), "首次运行应自动创建配置文件"
     written = json.loads(target.read_text(encoding="utf-8"))
-    assert written == {"auto_translate": False, "auto_translate_interval": 3.0}
+    assert written == {
+        "auto_translate": False,
+        "auto_translate_interval": 3.0,
+        "show_original_text": True,
+    }
 
 
 def test_valid_values_loaded(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(
-        json.dumps({"auto_translate": True, "auto_translate_interval": 1.5}),
+        json.dumps(
+            {"auto_translate": True, "auto_translate_interval": 1.5, "show_original_text": False}
+        ),
         encoding="utf-8",
     )
     loaded = config.load_config(target)
     assert loaded.auto_translate is True
     assert loaded.auto_translate_interval == 1.5
+    assert loaded.show_original_text is False
+
+
+def test_show_original_text_missing_defaults_to_true(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"auto_translate": True}), encoding="utf-8")
+    assert config.load_config(target).show_original_text is True
+
+
+def test_show_original_text_invalid_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"show_original_text": "no"}), encoding="utf-8")
+    assert config.load_config(target).show_original_text is True
 
 
 def test_extra_keys_are_ignored(tmp_path):
