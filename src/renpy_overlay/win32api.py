@@ -585,6 +585,18 @@ def move_window(
     gui.SetWindowPos(hwnd, insert_after, int(x), int(y), int(width), int(height), flags)
 
 
+def set_topmost(hwnd: int) -> None:
+    """重申窗口的 TOPMOST 层级（不改位置/尺寸/焦点）。
+
+    独占全屏的游戏窗口被激活/获得前台焦点后，可能盖住其它 topmost 窗口；
+    必须在之后重新执行一次 ``SetWindowPos(HWND_TOPMOST)`` 才能恢复置顶。
+    """
+    gui = _win32gui()
+    con = _win32con()
+    flags = con.SWP_NOMOVE | con.SWP_NOSIZE | con.SWP_NOACTIVATE
+    gui.SetWindowPos(hwnd, con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+
+
 def enable_dpi_awareness() -> str:
     """开启 Per-Monitor DPI 感知，保证 GetWindowRect 拿到物理像素、与游戏窗口对齐。"""
     if not _IS_WINDOWS:  # pragma: no cover

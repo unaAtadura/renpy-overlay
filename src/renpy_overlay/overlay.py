@@ -13,8 +13,10 @@
 
 3. **跟随游戏窗口**。定时读取目标窗口的 ``GetWindowRect`` 并用 ``SetWindowPos``
    把悬浮窗贴到游戏窗口内部（默认顶部居中），游戏最小化时自动隐藏；拖动/锁定期间
-   跟随让位，避免与用户操作“抢方向盘”。进程开启 Per-Monitor DPI 感知后，两边
-   坐标都是物理像素，可直接对齐。
+   跟随即位不移动窗口，但锁定态仍会**周期性重申 TOPMOST**（独占全屏的游戏窗口
+   被激活时会盖住其它 topmost 窗口，解锁态靠每轮定位顺带恢复置顶，锁定态必须
+   显式补上这次重申）。进程开启 Per-Monitor DPI 感知后，两边坐标都是物理像素，
+   可直接对齐。
 
 4. **锁定态翻译（手动 + 自动）**。锁定状态下单击左键，把“最近捕获的游戏原文”
    （而非窗口当前显示的文本）发给本地 LM Studio（OpenAI 兼容协议）翻译成中文并
@@ -155,6 +157,7 @@ class OverlayWindow:
         self._drag_origin = (0, 0)  # 拖动开始时的窗口位置（用于判断是否真的移动过）
         self._user_offset: tuple[int, int] | None = None  # 手动拖动后的相对偏移
         self._locked = False  # 双击锁定位置：锁定后不接受拖动、跟随让位
+        self._last_topmost_log = 0.0  # 锁定态重申置顶日志的节流时间戳
         self._press_pos: tuple[int, int] | None = None  # 左键按下的屏幕坐标（单击判定用）
         self._click_after_id: str | None = None  # 挂起的延迟单击任务
         self._click_suppress_until = 0.0  # 双击后的短窗口内不再调度单击
@@ -450,7 +453,12 @@ class OverlayWindow:
         if not self._visible:
             self._set_visible(True)
         if self._locked or self._dragging:
-            # 位置已锁定 / 拖动中：由用户操作主导，跟随逻辑让位
+            # 位置已锁定 / 拖动中：跟随逻辑不移动窗口。
+            # 但锁定态必须周期性重申 TOPMOST：独占全屏的游戏窗口被激活时会盖住
+            # 其它 topmost 窗口，解锁态靠每 200ms 的定位 + HWND_TOPMOST 自动恢复，
+            # 锁定态跳过了定位，若不显式重申就会一直丢失置顶。
+            if self._locked and not self._dragging:
+                self._reassert_topmost()
             return
 
         rect = win32api.window_rect(hwnd)
@@ -458,6 +466,17 @@ class OverlayWindow:
             rect, (self.width, self.height), self.dock, self._user_offset
         )
         win32api.move_window(self._hwnd, x, y, width, height, topmost=True)
+
+    def _reassert_topmost(self) -> None:
+        """把悬浮窗重新压回最顶层（不改位置/尺寸/焦点）；日志节流避免刷屏。"""
+        try:
+            win32api.set_topmost(self._hwnd)
+        except Exception:  # pragma: no cover - pywin32 缺失等
+            return
+        now = time.time()
+        if now - self._last_topmost_log > 10.0:
+            self._last_topmost_log = now
+            logger.debug("锁定态周期性重申置顶（应对独占全屏被激活时的覆盖）")
 
     # ------------------------------------------------------------ 鼠标拖动
 
