@@ -175,6 +175,10 @@ uv run renpy-overlay --pid 12345
 - **原文显示开关**：`show_original_text` 为 `false` 时，正文区不再随对话刷新原文
   （上一条内容保持不动）；对话仍照常捕获、写入日志，并作为翻译请求的唯一输入，
   标题栏的原文前 20 字提示与翻译替换显示均不受影响。
+- **翻译缓存（自动翻译专用）**：内存中按「原文 → 译文」缓存翻译结果（上限 256KB，
+  key+value 的 UTF-8 字节数合计，写入超限时按最旧优先 FIFO 淘汰）；自动翻译命中
+  缓存时直接上屏、不发起请求；单击翻译固定调用 API（不读缓存），成功后写入缓存；
+  缓存不落盘，随窗口退出释放。
 - 未启动 LM Studio 时请求会失败并记录日志，界面保持原样，不影响其它功能。
 
 ### 卸载与查询
@@ -233,7 +237,9 @@ uv run ruff check .    # 静态检查
 - `tests/test_translator.py`：用本地 HTTP 桩验证翻译客户端（OpenAI 兼容协议往返、
   空文本拒绝、协议缺字段报错、服务不可达收敛为 TranslationError）；
 - `tests/test_config.py`：本地配置首建默认值、非法 JSON / 类型错误逐项回退、坏文件不覆盖、
-  `show_original_text` 默认 / 合法读取 / 缺失与非法回退。
+  `show_original_text` 默认 / 合法读取 / 缺失与非法回退；
+- `tests/test_translation_cache.py`：缓存命中/未命中、UTF-8 字节计量、覆盖刷新淘汰顺序、
+  256KB 上限下的 FIFO 淘汰与单条超限拒绝。
 
 端到端自测（需要真实游戏）：用 Ren'Py SDK 的 *The Question* 或任一发行版游戏，
 按"快速开始"注入后确认：对话实时上屏且只保留最新一条（旧对话不累积）、拖动悬浮窗
@@ -261,6 +267,7 @@ renpygameread/
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
 │  ├─ overlay.py               # 悬浮窗（单条显示、可拖动、双击锁定、单击翻译）
 │  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib）
+│  ├─ translation_cache.py     # 翻译内存缓存（原文→译文，256KB FIFO，仅主线程读写）
 │  ├─ config.py                # 本地配置加载（config.json：自动翻译开关 / 轮询间隔）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown

@@ -39,6 +39,11 @@
 ``config.json`` 的 ``show_original_text=false`` 时正文区不随对话刷新原文（仅影响
 显示，不影响采集、标题栏提示与翻译链路）。
 
+翻译缓存：内存中的「原文 → 译文」缓存（上限 256KB、FIFO 淘汰，见
+``translation_cache`` 模块）。自动翻译先查缓存，命中直接上屏、不发起网络请求；
+未命中走 LM Studio，成功（手动与自动一致）后写入/覆盖缓存；手动单击翻译
+固定调用 API、只写不读。缓存读写只在 Tk 主线程内进行。
+
 标题栏策略：启动时的初始文本不变；之后随交互状态动态更新 —— 新对话显示该条文本
 的前 20 个字符（提醒将被发送的文本）、“翻译中... / 翻译完成 / 翻译失败”反映
 翻译进程、锁定状态显示“已锁定，单击启动翻译”（自动翻译开启时为“已锁定，开始
@@ -54,6 +59,7 @@ import time
 import tkinter as tk
 
 from . import config, translator, win32api
+from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.overlay")
 
@@ -164,6 +170,7 @@ class OverlayWindow:
         self._last_say: dict | None = None  # 最近一次捕获的游戏原文（翻译请求的输入）
         self._translating = False  # 是否有在途翻译请求（仅主线程读写）
         self._translation_seq = 0  # 翻译世代号：双击中止 / 新请求时递增，作废旧结果
+        self._translation_cache = TranslationCache()  # 译文内存缓存（仅主线程读写）
         self._last_translation_input: str | None = None  # 最近已触发翻译的原文（自动去重）
         self._lock_started_at = 0.0  # 本次锁定开始时间（自动翻译需等一个完整间隔）
         self._auto_skip_reason: str | None = None  # 上次自动翻译跳过原因（日志去重）
@@ -641,20 +648,27 @@ class OverlayWindow:
         self._update_header("翻译中...")
         thread = threading.Thread(
             target=self._translate_worker,
-            args=(seq, who, what),
+            args=(seq, who, what, origin),
             name=f"overlay-translate-{seq}",
             daemon=True,
         )
         thread.start()
 
-    def _translate_worker(self, seq: int, who: str, what: str) -> None:
+    def _translate_worker(self, seq: int, who: str, what: str, origin: str) -> None:
         """后台线程：调用 LM Studio 翻译（输入为捕获的游戏原文），结果只经队列回主线程。"""
         try:
             text = translator.translate_text(what)
-            message = {"seq": seq, "ok": True, "who": who, "what": text}
+            message = {
+                "seq": seq,
+                "ok": True,
+                "who": who,
+                "what": text,
+                "input": what,  # 原文随结果回传，供主线程写缓存
+                "origin": origin,
+            }
         except Exception as exc:  # 网络/协议错误统一收敛为失败结果
             logger.debug("翻译请求失败（seq=%d）：%s", seq, exc)
-            message = {"seq": seq, "ok": False, "who": who, "error": str(exc)}
+            message = {"seq": seq, "ok": False, "who": who, "error": str(exc), "origin": origin}
         self._queue.put(("translation", message))
 
     def _handle_translation(self, item: dict) -> None:
@@ -677,6 +691,18 @@ class OverlayWindow:
         logger.info("翻译完成（seq=%s），已替换为译文（%d 字）", seq, len(text))
         self._display_say(who, text)
         self._update_header("翻译完成")
+        # 成功后写入缓存（手动 / 自动一致）：覆盖旧值视为新写入，超限由缓存模块 FIFO 淘汰
+        input_text = str(item.get("input") or "").strip()
+        if input_text:
+            if self._translation_cache.put(input_text, text):
+                logger.debug(
+                    "翻译缓存已更新（%s触发，占用 %d/%d 字节）",
+                    "自动" if item.get("origin") == "auto" else "手动",
+                    self._translation_cache.size(),
+                    self._translation_cache.max_bytes,
+                )
+        else:  # pragma: no cover - 正常流程必然带原文
+            logger.warning("翻译结果缺少原文，跳过缓存写入")
 
     def _abort_translation(self, reason: str) -> None:
         """作废在途翻译：其网络等待自然结束，但结果不再可能覆盖界面。"""
@@ -722,6 +748,7 @@ class OverlayWindow:
             self._auto_note_skip("刚进入锁定，等待一个完整轮询间隔")
             return
         say = self._last_say or {}
+        who = str(say.get("who") or "").strip()
         what = str(say.get("what") or "").strip()
         if not what:
             self._auto_note_skip("暂无可翻译的捕获文本")
@@ -729,6 +756,21 @@ class OverlayWindow:
         if what == self._last_translation_input:
             self._auto_note_skip("该条原文已翻译过")
             return
+
+        # 缓存命中优先：不发起网络请求，直接上屏并记录“已翻译”避免重复触发
+        cached = self._translation_cache.get(what)
+        if cached is not None:
+            self._auto_skip_reason = None
+            self._last_translation_input = what
+            if self._translating:
+                # 在途请求针对的是旧原文：作废它，避免其结果稍后覆盖本次命中内容
+                self._abort_translation("自动翻译缓存命中")
+            logger.info("自动翻译缓存命中（原文 %d 字）：直接上屏，未发起网络请求", len(what))
+            self._update_header("翻译完成")
+            self._display_say(who, cached)
+            return
+        logger.debug("自动翻译缓存未命中，改走 LM Studio 请求（原文 %d 字）", len(what))
+
         if self._translating:
             self._auto_note_skip("已有翻译请求在途")
             return
