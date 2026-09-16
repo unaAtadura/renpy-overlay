@@ -151,12 +151,25 @@ uv run renpy-overlay --pid 12345
 
 启动工具的终端里另有控制台命令：`h`（显隐）、`d`（恢复自动停靠）、`u`（卸载代理）、`s`（状态）、`q`（退出）。
 
-### 翻译（可选，需要本地 LM Studio）
+### 翻译（可选，OpenAI 兼容服务）
 
-- 启动 [LM Studio](https://lmstudio.ai/) 并加载一个模型，开启本地服务（默认端口 `1234`）；
+- 默认面向本地 [LM Studio](https://lmstudio.ai/)（启动并加载一个模型，开启本地服务
+  即可）；也可通过 `config.json` 切换到 OpenAI / DeepSeek 等任意 OpenAI 兼容平台；
 - 锁定悬浮窗（双击）后单击，会把**注入代理捕获的游戏原文**（而非窗口当前显示的文本）
-  发给 `http://127.0.0.1:1234`，使用 OpenAI 兼容协议（自动读取 `/v1/models` 的第一个
-  已加载模型），译文返回后按现有规则替换显示；
+  发给 `api_base_url`（默认 `http://127.0.0.1:1234`），使用 OpenAI 兼容协议（`model`
+  留空时自动读取 `/v1/models` 的第一个已加载模型），译文返回后按现有规则替换显示；
+- **翻译 API 可外置配置**（`config.json`）：
+
+  | 字段 | 默认值 | 说明 |
+  | --- | --- | --- |
+  | `api_base_url` | `http://127.0.0.1:1234` | API 地址（OpenAI / LM Studio / DeepSeek 等兼容平台） |
+  | `api_timeout` | `20.0` | 请求超时（秒，非正数回退默认） |
+  | `model` | `""` | 模型代号；留空自动读取 `/v1/models` 的第一个已加载模型 |
+  | `system_prompt` | 内置游戏翻译提示词 | 系统提示词，可整个覆盖 |
+  | `api_key` | `""` | 配置后请求附带 `Authorization: Bearer <key>`；留空不带鉴权头 |
+  | `enable_thinking` | `false` | 模型思考（reasoning）模式开关，**默认关闭**。关闭时一并声明 `enable_thinking: false` + `chat_template_kwargs` + `reasoning_effort`：LM Studio 会忽略前两者、需 `reasoning_effort` 才能真正关闭（实测：关闭后单条翻译约 0.5s，开启思考则需 30s+）；vLLM / SGLang 识别 `chat_template_kwargs`、Qwen Cloud 识别顶层 `enable_thinking` |
+  | `reasoning_effort` | `"none"` | 关闭思考时使用的 `reasoning_effort` 取值（LM Studio 等本地服务靠它真正关闭思考）；置空则不发送该字段 |
+
 - 请求在后台线程执行，不阻塞窗口；同一时刻只允许一条在途请求；双击可随时中止；
 - **自动翻译**：项目根目录的 `config.json`（首次运行自动创建、已被 `.gitignore`
   排除）控制自动翻译 ——
@@ -166,7 +179,14 @@ uv run renpy-overlay --pid 12345
     "auto_translate": false,          // 改为 true 开启自动翻译
     "auto_translate_interval": 3.0,   // 轮询间隔（秒）
     "show_original_text": true,       // 正文区是否随对话显示游戏原文（默认开启）
-    "translation_cache_size_kb": 256  // 内存翻译缓存上限（KB，默认 256）
+    "translation_cache_size_kb": 256, // 内存翻译缓存上限（KB，默认 256）
+    "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
+    "api_timeout": 20.0,              // 请求超时（秒）
+    "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个
+    "api_key": "",                     // API Key；空则不携带鉴权头（本地服务通常不需要）
+    "enable_thinking": false,         // 模型思考模式开关，默认关闭
+    "reasoning_effort": "none"         // 关闭思考时的 reasoning_effort 取值
+    // system_prompt 默认使用内置的游戏对话翻译提示词，可按需覆盖（见下表）
   }
   ```
 

@@ -39,7 +39,13 @@ class _StubHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - http.server 约定
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length).decode("utf-8"))
-        type(self).received.append({"path": self.path, "body": body})
+        type(self).received.append(
+            {
+                "path": self.path,
+                "body": body,
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
         if self.path != "/v1/chat/completions":
             self._send(404, {"error": "not found"})
             return
@@ -83,6 +89,75 @@ def test_explicit_model_skips_models_lookup(stub_server):
     translator.translate_text("hi", base_url=base, timeout=5, model="my-model")
     assert len(received) == 1  # 没有额外的 GET /v1/models
     assert received[0]["body"]["model"] == "my-model"
+
+
+def test_custom_options_forwarded(stub_server):
+    base, received = stub_server
+    translator.translate_text(
+        "hi", base_url=base, timeout=5, model="cfg-model", system_prompt="只输出中文"
+    )
+    assert len(received) == 1  # 显式 model：不查 /v1/models
+    body = received[0]["body"]
+    assert body["model"] == "cfg-model"
+    assert body["messages"][0] == {"role": "system", "content": "只输出中文"}
+    assert body["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_empty_system_prompt_skips_system_message(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5, system_prompt="")
+    assert received[0]["body"]["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_thinking_disabled_by_default(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5)
+    body = received[0]["body"]
+    assert body["enable_thinking"] is False
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    # LM Studio 等本地服务忽略 enable_thinking，需同时声明才能真正关闭思考
+    assert body["reasoning_effort"] == "none"
+
+
+def test_enable_thinking_forwarded(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5, enable_thinking=True)
+    body = received[0]["body"]
+    assert body["enable_thinking"] is True
+    assert body["chat_template_kwargs"] == {"enable_thinking": True}
+    assert "reasoning_effort" not in body  # 开启时不干预模型的思考挡位
+
+
+def test_custom_reasoning_effort_forwarded(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5, reasoning_effort="low")
+    assert received[0]["body"]["reasoning_effort"] == "low"
+
+
+def test_empty_reasoning_effort_omits_field(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5, reasoning_effort="")
+    assert "reasoning_effort" not in received[0]["body"]
+
+
+def test_api_key_header_added_when_configured(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5, api_key="sk-test-123")
+    assert received[0]["authorization"] == "Bearer sk-test-123"
+
+
+def test_api_key_header_absent_without_config(stub_server):
+    base, received = stub_server
+    translator.translate_text("hi", base_url=base, timeout=5)
+    assert received[0]["authorization"] is None
+
+
+def test_api_key_forwarded_to_models_lookup(stub_server):
+    base, received = stub_server
+    _StubHandler.models = [{"id": "only-model"}]
+    translator.translate_text("hi", base_url=base, timeout=5, api_key="sk-test-123")
+    # 未显式配置 model 时先查 /v1/models（GET 也应带鉴权头）
+    assert received[0]["body"]["model"] == "only-model"
 
 
 def test_empty_text_rejected_before_any_request(stub_server):

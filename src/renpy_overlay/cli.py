@@ -49,6 +49,7 @@ EPILOG = """\
   自动翻译    config.json 开启（auto_translate: true）后，锁定状态按间隔自动翻译最新对话
   显示原文    config.json 的 show_original_text（默认 true）控制正文区是否随对话显示原文
   缓存大小    config.json 的 translation_cache_size_kb（默认 256KB）控制内存缓存上限
+  API 配置    config.json 的 api_base_url / api_timeout / model / system_prompt / api_key / enable_thinking / reasoning_effort
   查看全文    窗口只显示最新一条对话；内容较长时可用滚轮或滚动条查看全文
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """

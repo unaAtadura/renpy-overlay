@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from renpy_overlay import config
+from renpy_overlay import config, translator
 
 
 def test_missing_file_creates_defaults(tmp_path):
@@ -22,7 +22,110 @@ def test_missing_file_creates_defaults(tmp_path):
         "auto_translate_interval": 3.0,
         "show_original_text": True,
         "translation_cache_size_kb": 256,
+        "api_base_url": "http://127.0.0.1:1234",
+        "api_timeout": 20.0,
+        "model": "",
+        "system_prompt": translator.DEFAULT_SYSTEM_PROMPT,
+        "api_key": "",
+        "enable_thinking": False,
+        "reasoning_effort": "none",
     }
+
+
+def test_api_defaults_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    # 默认值必须与 translator 的模块级常量完全一致（未改配置时零行为变化）
+    assert loaded.api_base_url == translator.DEFAULT_BASE_URL
+    assert loaded.api_timeout == translator.DEFAULT_TIMEOUT
+    assert loaded.system_prompt == translator.DEFAULT_SYSTEM_PROMPT
+    assert loaded.model == ""
+    assert loaded.api_key == ""
+    assert loaded.enable_thinking is False  # 思考模式默认关闭
+    assert loaded.reasoning_effort == "none"  # 与 translator 默认常量一致
+
+
+def test_reasoning_effort_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"reasoning_effort": "low"}), encoding="utf-8")
+    assert config.load_config(target).reasoning_effort == "low"
+
+
+def test_reasoning_effort_invalid_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in (123, True, None, ["low"]):
+        target.write_text(json.dumps({"reasoning_effort": bad}), encoding="utf-8")
+        assert config.load_config(target).reasoning_effort == "none", f"{bad!r}"
+
+
+def test_enable_thinking_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"enable_thinking": True}), encoding="utf-8")
+    assert config.load_config(target).enable_thinking is True
+
+
+def test_enable_thinking_invalid_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in ("yes", 1, "false", None):
+        target.write_text(json.dumps({"enable_thinking": bad}), encoding="utf-8")
+        assert config.load_config(target).enable_thinking is False, f"{bad!r}"
+
+
+def test_api_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url": "https://api.deepseek.com",
+                "api_timeout": 5.5,
+                "system_prompt": "只输出译文",
+                "model": "deepseek-chat",
+                "api_key": "sk-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url == "https://api.deepseek.com"
+    assert loaded.api_timeout == 5.5
+    assert loaded.system_prompt == "只输出译文"
+    assert loaded.model == "deepseek-chat"
+    assert loaded.api_key == "sk-test"
+
+
+def test_api_invalid_types_fall_back_per_field(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url": 123,
+                "api_timeout": True,  # bool 不得当数字
+                "system_prompt": [],
+                "model": 7,
+                "api_key": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url == translator.DEFAULT_BASE_URL
+    assert loaded.api_timeout == translator.DEFAULT_TIMEOUT
+    assert loaded.system_prompt == translator.DEFAULT_SYSTEM_PROMPT
+    assert loaded.model == ""
+    assert loaded.api_key == ""
+
+
+def test_api_base_url_empty_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_base_url": "   "}), encoding="utf-8")
+    assert config.load_config(target).api_base_url == translator.DEFAULT_BASE_URL
+
+
+def test_api_timeout_non_positive_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in (0, -3.5):
+        target.write_text(json.dumps({"api_timeout": bad}), encoding="utf-8")
+        assert config.load_config(target).api_timeout == translator.DEFAULT_TIMEOUT, f"{bad!r}"
 
 
 def test_translation_cache_size_kb_loaded(tmp_path):

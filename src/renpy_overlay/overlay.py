@@ -19,7 +19,8 @@
    可直接对齐。
 
 4. **锁定态翻译（手动 + 自动）**。锁定状态下单击左键，把“最近捕获的游戏原文”
-   （而非窗口当前显示的文本）发给本地 LM Studio（OpenAI 兼容协议）翻译成中文并
+   （而非窗口当前显示的文本）发给 OpenAI 兼容服务（LM Studio / OpenAI / DeepSeek 等，
+   地址 / 超时 / 模型 / 提示词 / API Key 均由 ``config.json`` 配置）翻译成中文并
    替换显示；网络请求在守护线程里执行，结果经队列回到主线程；同时只允许一条
    在途请求，双击（解锁）会强制中止在途翻译（结果作废，不再覆盖界面）。
    当 config.json 的 ``auto_translate`` 开启时，锁定状态下还会按轮询间隔（默认
@@ -657,18 +658,29 @@ class OverlayWindow:
         self._last_translation_input = what  # 记录已触发的原文，自动翻译据此去重
         logger.info("发起翻译请求（%s，seq=%d，原文 %d 字）：%s", label, seq, len(what), what[:40])
         self._update_header("翻译中...")
+        api_options = {  # 连接参数来自 config.json（未配置时为与历史一致的默认值）
+            "base_url": self._config.api_base_url,
+            "timeout": self._config.api_timeout,
+            "model": self._config.model,
+            "system_prompt": self._config.system_prompt,
+            "api_key": self._config.api_key,
+            "enable_thinking": self._config.enable_thinking,
+            "reasoning_effort": self._config.reasoning_effort,
+        }
         thread = threading.Thread(
             target=self._translate_worker,
-            args=(seq, who, what, origin),
+            args=(seq, who, what, origin, api_options),
             name=f"overlay-translate-{seq}",
             daemon=True,
         )
         thread.start()
 
-    def _translate_worker(self, seq: int, who: str, what: str, origin: str) -> None:
-        """后台线程：调用 LM Studio 翻译（输入为捕获的游戏原文），结果只经队列回主线程。"""
+    def _translate_worker(
+        self, seq: int, who: str, what: str, origin: str, api_options: dict
+    ) -> None:
+        """后台线程：调用 OpenAI 兼容 API 翻译（输入为捕获的游戏原文），结果只经队列回主线程。"""
         try:
-            text = translator.translate_text(what)
+            text = translator.translate_text(what, **api_options)
             message = {
                 "seq": seq,
                 "ok": True,
