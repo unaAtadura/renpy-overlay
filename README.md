@@ -118,6 +118,26 @@ uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32）
 修改该配置，或设置环境变量 `UV_DEFAULT_INDEX`（如
 `https://mirrors.aliyun.com/pypi/simple/`）。
 
+## 打包为独立 exe（可选）
+
+不想装 Python 环境时，可以把工具端打成单文件 exe：PyInstaller 只打包运行
+必需的模块（psutil / pywin32 / tkinter，约 13 MB），排除 numpy / PyQt 等无关库：
+
+```bash
+uv run pyinstaller renpy_overlay.spec --noconfirm
+```
+
+产物为 `dist/renpy-overlay.exe`，可复制到任意 Windows 机器直接运行（无需 Python）。
+
+- 首次运行会在 **exe 同目录**自动生成 `config.json`（打包后配置固定跟随 exe，
+  不受启动目录 / 快捷方式影响）；日志默认写入当前工作目录的 `logs/`
+  （双击运行时即 exe 同目录）；
+- 注入、悬浮窗、翻译等行为与 `uv run renpy-overlay` 完全一致，命令行参数相同；
+- 打包配置见 `renpy_overlay.spec`：`payload/agent.py`（注入到游戏进程内执行的
+  源码）作为数据文件随包分发，运行时经 `importlib.resources` 读取；未启用 UPX
+  （避免放大杀软对远程注入工具的误报）；想要启动更快的目录版（onedir），按
+  spec 顶部注释切换即可。
+
 ## 快速开始
 
 ```bash
@@ -280,6 +300,8 @@ uv run ruff check .    # 静态检查
 ```
 renpygameread/
 ├─ pyproject.toml              # uv 项目配置 / 依赖 / 入口脚本
+├─ renpy_overlay.spec          # PyInstaller 打包配置（生成 dist/renpy-overlay.exe）
+├─ pyinstaller_entry.py        # PyInstaller 专用入口（绝对导入）
 ├─ .python-version             # 工具端 Python 版本
 ├─ README.md
 ├─ src/renpy_overlay/

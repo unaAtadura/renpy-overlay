@@ -217,3 +217,23 @@ def test_tiny_interval_falls_back(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"auto_translate_interval": 0.01}), encoding="utf-8")
     assert config.load_config(target).auto_translate_interval == 3.0
+
+
+def test_frozen_default_path_uses_exe_dir(tmp_path, monkeypatch):
+    """PyInstaller 打包后（frozen）配置固定跟随 exe 所在目录。"""
+    monkeypatch.setattr(config.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(config.sys, "executable", str(tmp_path / "renpy-overlay.exe"))
+    assert config.default_path() == tmp_path / "config.json"
+
+
+def test_unfrozen_default_path_falls_back_to_cwd(tmp_path, monkeypatch):
+    """未打包且反推不到项目根（如安装到 site-packages）时回退当前工作目录。"""
+    monkeypatch.setattr(config.sys, "frozen", False, raising=False)
+    # 伪造包文件位置：其上级没有 pyproject.toml，只能回退 cwd
+    monkeypatch.setattr(
+        config, "__file__", str(tmp_path / "site-packages" / "renpy_overlay" / "config.py")
+    )
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    assert config.default_path() == workdir / "config.json"

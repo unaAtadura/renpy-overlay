@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,7 +74,11 @@ def default_path() -> Path:
     以包文件位置反推项目根（src/renpy_overlay/config.py -> 项目根），
     这样无论从哪个工作目录启动工具都会命中同一份配置；包被安装到
     site-packages 等无法反推的场景回退到当前工作目录。
+    PyInstaller 打包后（frozen）包位于临时解包目录，反推无意义，
+    固定使用 exe 所在目录，保证配置与 exe 放在一起。
     """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / CONFIG_FILENAME
     package_root = Path(__file__).resolve().parents[2]
     if (package_root / "pyproject.toml").is_file():
         return package_root / CONFIG_FILENAME
