@@ -57,13 +57,28 @@ def _choose_gui(
 
     state: dict[str, object] = {"result": None, "rows": list(candidates)}
 
+    # 三块区域（选择框 / 信息框 / 按钮区）各占一个独立的弹性容器，用 grid
+    # 行权重分配空间：表格区 weight=3、详情区 weight=1 随窗口拉伸按比例伸缩，
+    # 各自的 minsize 保证缩到最小窗口（760x380）时每块仍完整可见；按钮行权重 0
+    # 固定高度贴底，不会被上方内容挤掉。
     frame = ttk.Frame(root, padding=8)
-    frame.pack(fill="both", expand=True)
+    frame.grid(row=0, column=0, sticky="nsew")
+    root.rowconfigure(0, weight=1)
+    root.columnconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
+    # 表格 : 详情 = 1 : 1 弹性分配拉伸空间；两者的"请求高度"故意设小
+    # （Treeview height=3 行、Text height=2 行），否则 ttk 默认请求高度
+    # （Treeview 10 行 = 600px）会超过窗口空间，grid 退化为按请求比例压缩、
+    # 权重失效；minsize 兜底最小窗口（760x380）下的可见性。
+    frame.rowconfigure(1, weight=1, minsize=120)
+    # 详情行的 minsize 含上下间距（8+6）：保证 Text 本体的最小高度不低于 ~64px
+    frame.rowconfigure(2, weight=1, minsize=80)
 
-    ttk.Label(
+    hint = ttk.Label(
         frame,
         text="选择目标进程后点击「注入」。分数越高越可能是 Ren'Py 游戏，双击表格行可快速注入。",
-    ).pack(anchor="w", pady=(0, 6))
+    )
+    hint.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
     columns = ("pid", "name", "arch", "score", "title")
     headings = {
@@ -74,7 +89,7 @@ def _choose_gui(
         "title": ("窗口标题", 420),
     }
     table_area = ttk.Frame(frame)
-    table_area.pack(side="top", fill="both", expand=True)
+    table_area.grid(row=1, column=0, sticky="nsew")
 
     # 行高放大到当前实际值的 3 倍：Windows 高 DPI 缩放下 ttk 主题的默认行高
     # （约 20px）不会随字号一起放大，9pt 中文字体会被上下裁切；只改行高不动
@@ -88,7 +103,7 @@ def _choose_gui(
         current_row_height = 20  # 主题未显式定义时的实际默认值
     style.configure("Treeview", rowheight=current_row_height * 3)
 
-    tree = ttk.Treeview(table_area, columns=columns, show="headings", selectmode="browse")
+    tree = ttk.Treeview(table_area, columns=columns, show="headings", selectmode="browse", height=3)
     for key, (text, width) in headings.items():
         tree.heading(key, text=text)
         tree.column(key, width=width, anchor="w" if key in ("name", "title") else "center")
@@ -97,12 +112,14 @@ def _choose_gui(
     scrollbar.pack(side="right", fill="y")
     tree.pack(side="left", fill="both", expand=True)
 
-    detail = tk.Text(frame, height=8, wrap="word", relief="solid", borderwidth=1)
+    detail_area = ttk.Frame(frame)
+    detail_area.grid(row=2, column=0, sticky="nsew", pady=(8, 6))
+    detail = tk.Text(detail_area, height=2, wrap="word", relief="solid", borderwidth=1)
     detail.configure(state="disabled", background="#f7f7f9")
-    detail.pack(side="top", fill="x", pady=(8, 6))
+    detail.pack(fill="both", expand=True)
 
     buttons = ttk.Frame(frame)
-    buttons.pack(side="bottom", fill="x")
+    buttons.grid(row=3, column=0, sticky="ew")
     inject_button = ttk.Button(buttons, text="注入选中项")
     cancel_button = ttk.Button(buttons, text="取消")
     refresh_button = ttk.Button(buttons, text="重新扫描")
