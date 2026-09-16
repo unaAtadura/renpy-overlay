@@ -9,7 +9,8 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
     {
       "auto_translate": false,            # 自动翻译开关（仅悬浮窗锁定状态生效）
       "auto_translate_interval": 3.0,     # 自动翻译轮询间隔（秒）
-      "show_original_text": true          # 悬浮窗正文区是否随对话显示游戏原文
+      "show_original_text": true,         # 悬浮窗正文区是否随对话显示游戏原文
+      "translation_cache_size_kb": 256     # 内存翻译缓存上限（KB）
     }
 """
 
@@ -27,17 +28,19 @@ CONFIG_FILENAME = "config.json"
 DEFAULT_AUTO_TRANSLATE = False
 DEFAULT_AUTO_TRANSLATE_INTERVAL = 3.0
 DEFAULT_SHOW_ORIGINAL_TEXT = True
+DEFAULT_TRANSLATION_CACHE_SIZE_KB = 256
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
 
 
 @dataclass(frozen=True)
 class AppConfig:
-    """config.json 的解析结果（自动翻译两项 + 正文原文显示开关）。"""
+    """config.json 的解析结果（自动翻译 + 正文原文显示 + 缓存容量）。"""
 
     auto_translate: bool = DEFAULT_AUTO_TRANSLATE
     auto_translate_interval: float = DEFAULT_AUTO_TRANSLATE_INTERVAL
     show_original_text: bool = DEFAULT_SHOW_ORIGINAL_TEXT
+    translation_cache_size_kb: int = DEFAULT_TRANSLATION_CACHE_SIZE_KB
 
 
 def default_path() -> Path:
@@ -58,6 +61,7 @@ def _write_defaults(target: Path) -> None:
         "auto_translate": DEFAULT_AUTO_TRANSLATE,
         "auto_translate_interval": DEFAULT_AUTO_TRANSLATE_INTERVAL,
         "show_original_text": DEFAULT_SHOW_ORIGINAL_TEXT,
+        "translation_cache_size_kb": DEFAULT_TRANSLATION_CACHE_SIZE_KB,
     }
     try:
         target.write_text(
@@ -89,6 +93,26 @@ def _read_show_original_text(raw: dict) -> bool:
         )
         return DEFAULT_SHOW_ORIGINAL_TEXT
     return value
+
+
+def _read_cache_size_kb(raw: dict) -> int:
+    value = raw.get("translation_cache_size_kb", DEFAULT_TRANSLATION_CACHE_SIZE_KB)
+    # 注意 bool 是 int 的子类，True/False 不算合法数字
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        logger.warning(
+            "translation_cache_size_kb 不是数字（%r），回退默认 %d",
+            value,
+            DEFAULT_TRANSLATION_CACHE_SIZE_KB,
+        )
+        return DEFAULT_TRANSLATION_CACHE_SIZE_KB
+    if value <= 0:
+        logger.warning(
+            "translation_cache_size_kb 非正数（%r），回退默认 %d",
+            value,
+            DEFAULT_TRANSLATION_CACHE_SIZE_KB,
+        )
+        return DEFAULT_TRANSLATION_CACHE_SIZE_KB
+    return int(value)
 
 
 def _read_interval(raw: dict) -> float:
@@ -131,12 +155,15 @@ def load_config(path: Path | None = None) -> AppConfig:
         auto_translate=_read_auto_translate(raw),
         auto_translate_interval=_read_interval(raw),
         show_original_text=_read_show_original_text(raw),
+        translation_cache_size_kb=_read_cache_size_kb(raw),
     )
     logger.info(
-        "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s（%s）",
+        "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
+        "cache_size=%dKB（%s）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
+        app_config.translation_cache_size_kb,
         target,
     )
     return app_config

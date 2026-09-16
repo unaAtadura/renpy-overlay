@@ -39,10 +39,14 @@
 ``config.json`` 的 ``show_original_text=false`` 时正文区不随对话刷新原文（仅影响
 显示，不影响采集、标题栏提示与翻译链路）。
 
-翻译缓存：内存中的「原文 → 译文」缓存（上限 256KB、FIFO 淘汰，见
-``translation_cache`` 模块）。自动翻译先查缓存，命中直接上屏、不发起网络请求；
-未命中走 LM Studio，成功（手动与自动一致）后写入/覆盖缓存；手动单击翻译
-固定调用 API、只写不读。缓存读写只在 Tk 主线程内进行。
+翻译缓存（两级）：内存缓存以**原文哈希**为键、保存（原文, 译文）并用原文校验冲突
+（上限由 ``config.json`` 的 ``translation_cache_size_kb`` 控制，默认 256KB，
+FIFO 淘汰，见 ``translation_cache`` 模块）；SQLite 持久化把翻译记录增量保存在
+**游戏目录**下的 ``renpy_overlay_cache/translations.db``（见 ``translation_store``
+模块，不可写时降级为仅内存）。自动翻译依次查内存 → 数据库，任一级命中则直接
+上屏、不发起网络请求（数据库命中还会计回填内存缓存）；两级均未命中才走 LM Studio，
+成功（手动与自动一致）后同时写入两级；手动单击翻译固定调用 API、只写不读。
+缓存与数据库读写均在 Tk 主线程内进行。
 
 标题栏策略：启动时的初始文本不变；之后随交互状态动态更新 —— 新对话显示该条文本
 的前 20 个字符（提醒将被发送的文本）、“翻译中... / 翻译完成 / 翻译失败”反映
@@ -58,7 +62,7 @@ import threading
 import time
 import tkinter as tk
 
-from . import config, translator, win32api
+from . import config, translation_store, translator, win32api
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.overlay")
@@ -138,6 +142,7 @@ class OverlayWindow:
         font_family: str = "Microsoft YaHei UI",
         font_size: int = 11,
         app_config: config.AppConfig | None = None,
+        game_dir: str = "",
         on_quit=None,
     ):
         self.target_pid = target_pid
@@ -170,7 +175,10 @@ class OverlayWindow:
         self._last_say: dict | None = None  # 最近一次捕获的游戏原文（翻译请求的输入）
         self._translating = False  # 是否有在途翻译请求（仅主线程读写）
         self._translation_seq = 0  # 翻译世代号：双击中止 / 新请求时递增，作废旧结果
-        self._translation_cache = TranslationCache()  # 译文内存缓存（仅主线程读写）
+        self._translation_cache = TranslationCache(
+            max_bytes=self._config.translation_cache_size_kb * 1024
+        )  # 内存缓存（容量来自 config.json，仅主线程读写）
+        self._translation_store = translation_store.open_store(game_dir or None)  # 失败降级 None
         self._last_translation_input: str | None = None  # 最近已触发翻译的原文（自动去重）
         self._lock_started_at = 0.0  # 本次锁定开始时间（自动翻译需等一个完整间隔）
         self._auto_skip_reason: str | None = None  # 上次自动翻译跳过原因（日志去重）
@@ -303,6 +311,9 @@ class OverlayWindow:
         self._closed = True
         self._translation_seq += 1  # 在途翻译的结果作废，不再覆盖界面
         self._cancel_pending_click()
+        if self._translation_store is not None:
+            self._translation_store.close()
+            self._translation_store = None
         try:
             self._root.quit()
             self._root.destroy()
@@ -691,16 +702,19 @@ class OverlayWindow:
         logger.info("翻译完成（seq=%s），已替换为译文（%d 字）", seq, len(text))
         self._display_say(who, text)
         self._update_header("翻译完成")
-        # 成功后写入缓存（手动 / 自动一致）：覆盖旧值视为新写入，超限由缓存模块 FIFO 淘汰
+        # 成功后同步写入两级缓存（手动 / 自动一致）：内存覆盖视为新写入，
+        # 数据库 UPSERT 覆盖同一原文的旧译文；失败由各自模块内部降级并记日志
         input_text = str(item.get("input") or "").strip()
         if input_text:
-            if self._translation_cache.put(input_text, text):
-                logger.debug(
-                    "翻译缓存已更新（%s触发，占用 %d/%d 字节）",
-                    "自动" if item.get("origin") == "auto" else "手动",
-                    self._translation_cache.size(),
-                    self._translation_cache.max_bytes,
-                )
+            self._translation_cache.put(input_text, text)
+            if self._translation_store is not None:
+                self._translation_store.put(input_text, text)
+            logger.debug(
+                "翻译结果已写入缓存（%s触发，内存占用 %d/%d 字节）",
+                "自动" if item.get("origin") == "auto" else "手动",
+                self._translation_cache.size(),
+                self._translation_cache.max_bytes,
+            )
         else:  # pragma: no cover - 正常流程必然带原文
             logger.warning("翻译结果缺少原文，跳过缓存写入")
 
@@ -757,25 +771,36 @@ class OverlayWindow:
             self._auto_note_skip("该条原文已翻译过")
             return
 
-        # 缓存命中优先：不发起网络请求，直接上屏并记录“已翻译”避免重复触发
+        # 缓存命中优先：依次查内存与数据库，任一级命中则直接上屏并记录“已翻译”
         cached = self._translation_cache.get(what)
         if cached is not None:
-            self._auto_skip_reason = None
-            self._last_translation_input = what
-            if self._translating:
-                # 在途请求针对的是旧原文：作废它，避免其结果稍后覆盖本次命中内容
-                self._abort_translation("自动翻译缓存命中")
-            logger.info("自动翻译缓存命中（原文 %d 字）：直接上屏，未发起网络请求", len(what))
-            self._update_header("翻译完成")
-            self._display_say(who, cached)
+            self._auto_use_cached(what, who, cached, "缓存")
             return
-        logger.debug("自动翻译缓存未命中，改走 LM Studio 请求（原文 %d 字）", len(what))
+        logger.debug("自动翻译内存缓存未命中，继续查数据库（原文 %d 字）", len(what))
+        stored = self._translation_store.get(what) if self._translation_store is not None else None
+        if stored is not None:
+            if self._translation_cache.put(what, stored):
+                logger.info("已将数据库译文回填内存缓存（原文 %d 字）", len(what))
+            self._auto_use_cached(what, who, stored, "数据库")
+            return
+        logger.debug("自动翻译两级缓存均未命中，改走 LM Studio 请求（原文 %d 字）", len(what))
 
         if self._translating:
             self._auto_note_skip("已有翻译请求在途")
             return
         self._auto_skip_reason = None
         self._start_translation(origin="auto")
+
+    def _auto_use_cached(self, what: str, who: str, translated: str, source: str) -> None:
+        """自动翻译缓存命中（内存或数据库）：直接上屏，不发起网络请求。"""
+        self._auto_skip_reason = None
+        self._last_translation_input = what
+        if self._translating:
+            # 在途请求针对的是旧原文：作废它，避免其结果稍后覆盖本次命中内容
+            self._abort_translation(f"自动翻译{source}命中")
+        logger.info("自动翻译%s命中（原文 %d 字）：直接上屏，未发起网络请求", source, len(what))
+        self._update_header("翻译完成")
+        self._display_say(who, translated)
 
     def _auto_note_skip(self, reason: str) -> None:
         if reason == self._auto_skip_reason:

@@ -165,7 +165,8 @@ uv run renpy-overlay --pid 12345
   {
     "auto_translate": false,          // 改为 true 开启自动翻译
     "auto_translate_interval": 3.0,   // 轮询间隔（秒）
-    "show_original_text": true        // 正文区是否随对话显示游戏原文（默认开启）
+    "show_original_text": true,       // 正文区是否随对话显示游戏原文（默认开启）
+    "translation_cache_size_kb": 256  // 内存翻译缓存上限（KB，默认 256）
   }
   ```
 
@@ -175,10 +176,16 @@ uv run renpy-overlay --pid 12345
 - **原文显示开关**：`show_original_text` 为 `false` 时，正文区不再随对话刷新原文
   （上一条内容保持不动）；对话仍照常捕获、写入日志，并作为翻译请求的唯一输入，
   标题栏的原文前 20 字提示与翻译替换显示均不受影响。
-- **翻译缓存（自动翻译专用）**：内存中按「原文 → 译文」缓存翻译结果（上限 256KB，
-  key+value 的 UTF-8 字节数合计，写入超限时按最旧优先 FIFO 淘汰）；自动翻译命中
-  缓存时直接上屏、不发起请求；单击翻译固定调用 API（不读缓存），成功后写入缓存；
-  缓存不落盘，随窗口退出释放。
+- **翻译缓存（两级，自动翻译专用）**：内存缓存以**原文哈希**（sha256 前 128 位，
+  跨重启稳定）为键分桶存储 —— 每个哈希对应一个「(原文, 译文) 记录列表」，哈希
+  相同但原文不同的记录可同桶共存，查询时按原文逐一精确匹配；容量由
+  `translation_cache_size_kb` 控制（默认 256KB，哈希+原文+译文的 UTF-8 字节合计，
+  超限按记录粒度的最旧优先 FIFO 淘汰）。SQLite 持久化在**游戏目录**下的
+  `renpy_overlay_cache/translations.db`，以 (哈希, 原文) 为复合主键增量保存记录
+  （与内存分桶语义一致；旧版单主键数据库打开时自动迁移并保留数据；重启后仍可查询；
+  目录/库不可写时自动降级为仅内存缓存）。自动翻译依次查内存 → 数据库，任一级命中
+  直接上屏、不发起请求（数据库命中会回填内存缓存）；两级均未命中才调 API，成功后
+  两级同时写入；单击翻译固定调用 API（不读任何缓存），成功后覆盖写入两级。
 - 未启动 LM Studio 时请求会失败并记录日志，界面保持原样，不影响其它功能。
 
 ### 卸载与查询
@@ -238,8 +245,10 @@ uv run ruff check .    # 静态检查
   空文本拒绝、协议缺字段报错、服务不可达收敛为 TranslationError）；
 - `tests/test_config.py`：本地配置首建默认值、非法 JSON / 类型错误逐项回退、坏文件不覆盖、
   `show_original_text` 默认 / 合法读取 / 缺失与非法回退；
-- `tests/test_translation_cache.py`：缓存命中/未命中、UTF-8 字节计量、覆盖刷新淘汰顺序、
-  256KB 上限下的 FIFO 淘汰与单条超限拒绝。
+- `tests/test_translation_cache.py`：分桶共存（同哈希多原文）、桶内覆盖与顺序刷新、
+  记录级 FIFO 淘汰（不整桶淘汰）、哈希键稳定性、UTF-8 字节计量、单条超限拒绝；
+- `tests/test_translation_store.py`：数据库创建、增量写入、同原文覆盖、同哈希多原文共存、
+  旧版单主键数据库自动迁移、重启持久化、目录不可建时的降级。
 
 端到端自测（需要真实游戏）：用 Ren'Py SDK 的 *The Question* 或任一发行版游戏，
 按"快速开始"注入后确认：对话实时上屏且只保留最新一条（旧对话不累积）、拖动悬浮窗
@@ -267,7 +276,8 @@ renpygameread/
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
 │  ├─ overlay.py               # 悬浮窗（单条显示、可拖动、双击锁定、单击翻译）
 │  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib）
-│  ├─ translation_cache.py     # 翻译内存缓存（原文→译文，256KB FIFO，仅主线程读写）
+│  ├─ translation_cache.py     # 翻译内存缓存（哈希键→(原文,译文)，FIFO，仅主线程读写）
+│  ├─ translation_store.py     # 翻译 SQLite 持久化（游戏目录 renpy_overlay_cache/，可降级）
 │  ├─ config.py                # 本地配置加载（config.json：自动翻译开关 / 轮询间隔）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown

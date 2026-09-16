@@ -14,13 +14,34 @@ def test_missing_file_creates_defaults(tmp_path):
     assert loaded.auto_translate is False
     assert loaded.auto_translate_interval == 3.0
     assert loaded.show_original_text is True
+    assert loaded.translation_cache_size_kb == 256
     assert target.is_file(), "首次运行应自动创建配置文件"
     written = json.loads(target.read_text(encoding="utf-8"))
     assert written == {
         "auto_translate": False,
         "auto_translate_interval": 3.0,
         "show_original_text": True,
+        "translation_cache_size_kb": 256,
     }
+
+
+def test_translation_cache_size_kb_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"translation_cache_size_kb": 128}), encoding="utf-8")
+    assert config.load_config(target).translation_cache_size_kb == 128
+
+
+def test_translation_cache_size_kb_missing_defaults(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"auto_translate": True}), encoding="utf-8")
+    assert config.load_config(target).translation_cache_size_kb == 256
+
+
+def test_translation_cache_size_kb_invalid_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in ("big", 0, -5, True):
+        target.write_text(json.dumps({"translation_cache_size_kb": bad}), encoding="utf-8")
+        assert config.load_config(target).translation_cache_size_kb == 256, f"{bad!r}"
 
 
 def test_valid_values_loaded(tmp_path):
