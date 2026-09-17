@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import psutil
 
@@ -28,6 +29,9 @@ from .injector import InjectionError, Injector
 from .ipc import DialogueLink, PeerState
 from .logs import get_logger, log_from_game
 from .overlay import DOCK_CHOICES, OverlayWindow
+
+if TYPE_CHECKING:
+    from .stream_window import StreamOverlayWindow
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -51,6 +55,14 @@ EPILOG = """\
   缓存大小    config.json 的 translation_cache_size_kb（默认 256KB）控制内存缓存上限
   API 配置    config.json 的 api_base_url / api_timeout / model / system_prompt / api_key / enable_thinking / reasoning_effort
   查看全文    窗口只显示最新一条对话；内容较长时可用滚轮或滚动条查看全文
+  流式悬浮窗  config.json 的 use_stream_window（默认 true）：改用全透明艺术字双窗口 ——
+              标题窗在正文窗上方左对齐整显状态，正文窗打字机流式呈现 API 译文；
+              拖动任一窗口整体联动，滚轮回看全文；PyQt6 缺失时自动回退传统悬浮窗
+  流式窗样式  config.json 的 stream_window_width/height（默认 1760x200，正文窗尺寸）/
+              stream_window_font_size（默认 14）/ stream_window_line_spacing（默认 1.45）/
+              stream_window_title_font_size（默认 8）/ stream_window_title_gap（默认 4）
+  字体特效    config.json 的 disable_text_effects（默认 false）：true 时正文与标题字符
+              以基础纯色直接渲染（无辉光/描边/渐变），false 保持艺术字特效
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
 
@@ -75,8 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument(
         "--dock", choices=DOCK_CHOICES, default="top-center", help="悬浮窗相对游戏窗口的停靠位置"
     )
-    ui.add_argument("--width", type=int, default=880, help="悬浮窗宽度（像素）")
-    ui.add_argument("--height", type=int, default=200, help="悬浮窗高度（像素）")
+    ui.add_argument(
+        "--width",
+        type=int,
+        default=880,
+        help="悬浮窗宽度（像素；仅传统 Tk 悬浮窗，流式窗用 config.json 的 stream_window_width）",
+    )
+    ui.add_argument(
+        "--height",
+        type=int,
+        default=200,
+        help="悬浮窗高度（像素；仅传统 Tk 悬浮窗，流式窗用 config.json 的 stream_window_height）",
+    )
     ui.add_argument("--alpha", type=float, default=0.85, help="悬浮窗不透明度 0.1~1.0")
     ui.add_argument("--font-size", type=int, default=11, help="对话字号")
 
@@ -144,7 +166,7 @@ class Session:
             on_connect=self._on_connect,
             on_disconnect=self._on_disconnect,
         )
-        self.overlay: OverlayWindow | None = None
+        self.overlay: OverlayWindow | StreamOverlayWindow | None = None
         self._stop = threading.Event()
         self._cleaned = False
         self._io_lock = threading.Lock()
@@ -196,22 +218,38 @@ class Session:
 
     def _run_overlay_mode(self) -> int:
         args = self.args
-        self.overlay = OverlayWindow(
-            target_pid=self.target.pid,
-            dock=args.dock,
-            width=args.width,
-            height=args.height,
-            alpha=args.alpha,
-            font_size=args.font_size,
-            app_config=config.load_config(),  # 本地 config.json（自动翻译开关 / 轮询间隔）
-            game_dir=os.path.dirname(self.target.exe) if self.target.exe else "",
-            on_quit=self._request_stop,
-        )
+        app_config = config.load_config()  # 本地 config.json（窗口开关 / 自动翻译 / API）
+        game_dir = os.path.dirname(self.target.exe) if self.target.exe else ""
+        # 流式双窗口与传统 Tk 悬浮窗互斥：开关开启且创建成功时完全替代后者
+        stream_window = None
+        if app_config.use_stream_window:
+            stream_window = self._create_stream_window(app_config, game_dir)
+        if stream_window is not None:
+            self.overlay = stream_window
+            interaction_hint = (
+                "拖动标题或正文任一窗口可整体移动；双击锁定/解锁位置；"
+                "锁定后单击把原文流式翻译成中文；滚轮可回看当前对话全文；"
+            )
+        else:
+            self.overlay = OverlayWindow(
+                target_pid=self.target.pid,
+                dock=args.dock,
+                width=args.width,
+                height=args.height,
+                alpha=args.alpha,
+                font_size=args.font_size,
+                app_config=app_config,
+                game_dir=game_dir,
+                on_quit=self._request_stop,
+            )
+            interaction_hint = (
+                "拖动可调整位置；双击锁定/解锁位置；锁定后单击可用本地 LM Studio 翻译；"
+                "长对话可用滚轮或滚动条查看全文；"
+            )
         self.overlay.set_status(self._status_text("等待游戏端上报…"))
         self.overlay.hint(
             f"已注入 pid={self.target.pid}（{self.target.name}）。"
-            "拖动可调整位置；双击锁定/解锁位置；锁定后单击可用本地 LM Studio 翻译；"
-            "控制台可输入 h/hide、d/dock、u/unload、q/quit。"
+            f"{interaction_hint}控制台可输入 h/hide、d/dock、u/unload、q/quit。"
         )
         self._install_signal_handler()
         try:
@@ -219,6 +257,32 @@ class Session:
         finally:
             self._cleanup(unload=True)
         return EXIT_OK
+
+    def _create_stream_window(
+        self, app_config: config.AppConfig, game_dir: str
+    ) -> StreamOverlayWindow | None:
+        """创建流式悬浮窗；PyQt6 缺失或初始化失败时记日志并返回 None（回退 Tk 浮窗）。"""
+        try:
+            from .stream_window import StreamOverlayWindow  # 惰性导入：缺失时回退
+        except ImportError as exc:
+            self.log.warning(
+                "流式悬浮窗不可用（%s），回退传统悬浮窗；如需启用可执行 uv sync 安装 PyQt6。", exc
+            )
+            return None
+        try:
+            return StreamOverlayWindow(
+                target_pid=self.target.pid,
+                dock=self.args.dock,
+                # 流式正文窗尺寸来自 config.json（--width/--height 仅作用于传统 Tk 悬浮窗）
+                width=app_config.stream_window_width,
+                height=app_config.stream_window_height,
+                app_config=app_config,
+                game_dir=game_dir,
+                on_quit=self._request_stop,
+            )
+        except Exception as exc:  # pragma: no cover - Qt 初始化失败等运行时环境问题
+            self.log.warning("流式悬浮窗初始化失败（%s），回退传统悬浮窗。", exc)
+            return None
 
     def _run_console_mode(self) -> int:
         self.log.info("未启用悬浮窗，对话将直接打印到控制台。按 Ctrl+C 结束。")

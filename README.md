@@ -1,7 +1,8 @@
 # renpy-overlay
 
 向**正在运行的 Ren'Py 游戏进程**注入对话采集代理，并把游戏内对话实时显示在一个
-**无边框、半透明、始终置顶、可鼠标拖动**的独立悬浮窗里。
+**无边框、半透明、始终置顶、可鼠标拖动**的独立悬浮窗里；也可切换为**全透明艺术字
+双窗口**（标题 + 正文），以打字机方式流式呈现 API 译文（默认启用）。
 
 - 工具端（本程序）：负责进程发现、注入、接收数据、渲染悬浮窗、退出清理。
 - 游戏端（注入的 agent）：跑在游戏进程内部，Hook Ren'Py 的对话回调，把文本经
@@ -89,6 +90,31 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   不做行数裁剪）；长对话可用滚轮 / 右侧滚动条查看全文；
 - 显隐与退出走控制台命令（`h` / `q`），不再有全局热键。
 
+#### 流式悬浮窗（默认启用）
+
+`config.json` 的 `use_stream_window: true`（默认）时改用**全透明艺术字双窗口**，
+与传统 Tk 悬浮窗互斥显示（同一时刻只存在其一；PyQt6 缺失或初始化失败时自动回退
+传统悬浮窗并记日志）：
+
+- **正文窗**：完全透明（屏幕上只有文字），每个字符预烘焙为辉光 + 描边的精灵图
+  （正文统一淡蓝色填充，标题保持霓虹渐变），打字机节拍逐字弹出（积压越多消化
+  越快），带出现动画，静止后位置固定；平滑滚动自动跟随最新内容，滚轮上翻可
+  回看当前对话全文、回到底部恢复跟随；显示策略与传统浮窗一致 —— 只保留最新
+  一条对话，`show_original_text` 控制是否随对话刷新原文；
+- **标题窗**：位于正文窗上方、水平左对齐的独立透明窗口，同样使用艺术字渲染，但
+  不做打字机动画 —— 每次状态变化一次性整显完整标题；标题文案沿用传统浮窗的动态
+  状态策略（新对话原文前 20 字、"翻译中... / 翻译完成 / 翻译失败"、锁定状态提示等）；
+- **联动**：拖动任一窗口整体移动；移动 / 显隐 / 跟随 / 锁定态置顶均两窗成对处理；
+- **流式翻译**：锁定态单击 / 自动翻译改走 SSE 流式接口（`stream: true`），译文
+  增量逐块流入正文窗；两级缓存命中时整段喂入（观感一致）；缓存、去重、双击中止
+  等逻辑与传统浮窗完全相同；
+- **正文窗尺寸**：`stream_window_width`（默认 1760）/ `stream_window_height`（默认 200）
+  控制正文窗大小（`--width/--height` 仅作用于传统 Tk 浮窗）；宽度超出游戏窗口时
+  仍按既有规则被钳制；
+- 字号 / 行距 / 标题字号 / 标题间距可经 `config.json` 调整（见下方配置示例）；
+- **字体特效开关**：`disable_text_effects` 默认 `false`（保持辉光 / 描边 / 渐变
+  艺术字）；设为 `true` 时正文与标题字符以基础纯色直接渲染，其余行为不变。
+
 ### 4. 安全与清理
 
 - 通信只监听 `127.0.0.1`，首个报文必须携带工具端每次运行随机生成的 token；
@@ -110,7 +136,7 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
 ## 安装
 
 ```bash
-uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32）
+uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32 / PyQt6）
 ```
 
 默认通过清华 TUNA 镜像下载（写在 `pyproject.toml` 的 `[[tool.uv.index]]` 里，
@@ -120,8 +146,9 @@ uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32）
 
 ## 打包为独立 exe（可选）
 
-不想装 Python 环境时，可以把工具端打成单文件 exe：PyInstaller 只打包运行
-必需的模块（psutil / pywin32 / tkinter，约 13 MB），排除 numpy / PyQt 等无关库：
+不想装 Python 环境时，可以把工具端打成单文件 exe：PyInstaller 打包运行必需的
+模块（psutil / pywin32 / tkinter / PyQt6；包含 Qt DLL 后体积明显增大），排除
+numpy 等无关库：
 
 ```bash
 uv run pyinstaller renpy_overlay.spec --noconfirm
@@ -153,10 +180,12 @@ uv run renpy-overlay --pid 12345
 
 注入成功后：
 
-- 悬浮窗出现在游戏窗口顶部居中位置，随游戏移动、最小化而隐藏；
-- 游戏内每推进一句对话，悬浮窗实时刷新为最新一条（说话人高亮 + 正文），不累积历史；
-- 按住悬浮窗任意区域用鼠标左键拖动即可调整位置；长对话可用滚轮 / 右侧滚动条查看全文；
-- 双击锁定位置后，单击可用本地 LM Studio 翻译当前对话（未锁定不触发）；
+- 默认启用流式悬浮窗：全透明艺术字双窗口（标题在上、正文在下，左对齐），对话以
+  打字机动画逐字弹出，随游戏移动、最小化而隐藏；设 `use_stream_window: false`
+  可回到传统半透明浮窗；
+- 游戏内每推进一句对话，正文窗实时刷新为最新一条（不累积历史）；
+- 按住任一窗口拖动即可整体调整位置；滚轮可回看当前对话全文；
+- 双击锁定位置后，单击会把对话原文流式翻译成中文（未锁定不触发）；
 - 在 `config.json` 中开启 `auto_translate` 后，锁定状态下会自动翻译最新对话。
 
 ### 鼠标操作
@@ -168,6 +197,7 @@ uv run renpy-overlay --pid 12345
 | 锁定状态下单击 | 用本地 LM Studio 翻译当前对话原文并替换显示（未锁定不触发） |
 | 鼠标滚轮（悬浮窗内任意位置） | 查看长对话的其余部分（窗口只显示最新一条） |
 | 拖动右侧滚动条 | 同上，细粒度查看全文 |
+| 按住标题/正文任一窗拖动（流式窗） | 两窗整体联动移动；其余操作同上（流式窗无滚动条，滚轮回看全文） |
 
 启动工具的终端里另有控制台命令：`h`（显隐）、`d`（恢复自动停靠）、`u`（卸载代理）、`s`（状态）、`q`（退出）。
 
@@ -191,6 +221,8 @@ uv run renpy-overlay --pid 12345
   | `reasoning_effort` | `"none"` | 关闭思考时使用的 `reasoning_effort` 取值（LM Studio 等本地服务靠它真正关闭思考）；置空则不发送该字段 |
 
 - 请求在后台线程执行，不阻塞窗口；同一时刻只允许一条在途请求；双击可随时中止；
+- 流式悬浮窗启用时翻译走 SSE 流式接口，译文增量实时逐块流入正文窗（打字机呈现）；
+  传统浮窗仍为一次性返回后替换显示；
 - **自动翻译**：项目根目录的 `config.json`（首次运行自动创建、已被 `.gitignore`
   排除）控制自动翻译 ——
 
@@ -200,12 +232,20 @@ uv run renpy-overlay --pid 12345
     "auto_translate_interval": 3.0,   // 轮询间隔（秒）
     "show_original_text": true,       // 正文区是否随对话显示游戏原文（默认开启）
     "translation_cache_size_kb": 256, // 内存翻译缓存上限（KB，默认 256）
+    "use_stream_window": true,        // 流式悬浮窗开关（默认开启；false 用传统 Tk 浮窗）
+    "stream_window_width": 1760,      // 流式正文窗宽度（像素，最小 240；会被游戏窗口宽度钳制）
+    "stream_window_height": 200,      // 流式正文窗高度（像素，最小 80）
+    "stream_window_font_size": 14,    // 流式正文窗字号（像素，最小 6）
+    "stream_window_line_spacing": 1.45, // 流式正文行距倍数（最小 1.0）
+    "stream_window_title_font_size": 8, // 流式标题窗字号（像素，最小 6）
+    "stream_window_title_gap": 4,     // 标题窗与正文窗间距（像素，非负）
+    "disable_text_effects": false,    // 关闭字体特效：true 时正文/标题以基础纯色渲染（无辉光/描边/渐变）
     "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
     "api_timeout": 20.0,              // 请求超时（秒）
     "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个
     "api_key": "",                     // API Key；空则不携带鉴权头（本地服务通常不需要）
     "enable_thinking": false,         // 模型思考模式开关，默认关闭
-    "reasoning_effort": "none"         // 关闭思考时的 reasoning_effort 取值
+    "reasoning_effort": "none",       // 关闭思考时的 reasoning_effort 取值
     // system_prompt 默认使用内置的游戏对话翻译提示词，可按需覆盖（见下表）
   }
   ```
@@ -250,7 +290,7 @@ uv run renpy-overlay --pid 12345 --status   # 查询代理运行状态
 | `--status` | — | 查询目标进程内代理状态后退出 |
 | `--no-overlay` | — | 不显示悬浮窗，对话打印到控制台 |
 | `--dock POS` | `top-center` | 停靠位置：`top-center/top-left/top-right/bottom-center/bottom-left/bottom-right` |
-| `--width / --height` | `880 / 200` | 悬浮窗尺寸（像素） |
+| `--width / --height` | `880 / 200` | 传统 Tk 悬浮窗尺寸（像素）；流式窗尺寸由 `config.json` 的 `stream_window_width/height`（默认 1760/200）控制 |
 | `--alpha` | `0.85` | 不透明度 `0.1~1.0` |
 | `--font-size` | `11` | 对话字号 |
 | `--port` | `0` | IPC 监听端口（默认由系统分配空闲端口） |
@@ -283,8 +323,12 @@ uv run ruff check .    # 静态检查
   注解 / nonlocal 等一律禁止）、引导模板占位符与 base64 嵌入内容往返校验；
 - `tests/test_translator.py`：用本地 HTTP 桩验证翻译客户端（OpenAI 兼容协议往返、
   空文本拒绝、协议缺字段报错、服务不可达收敛为 TranslationError）；
+- `tests/test_translator_stream.py`：流式翻译客户端（SSE 桩：逐块产出与顺序、
+  `stream: true` 请求体、生成器惰性、错误路径收敛为 TranslationError）；
+- `tests/test_stream_window.py`：流式双窗口的 `pair_layout` 几何（左对齐、上下
+  布局、间距、与停靠 / 拖动偏移几何的组合）；
 - `tests/test_config.py`：本地配置首建默认值、非法 JSON / 类型错误逐项回退、坏文件不覆盖、
-  `show_original_text` 默认 / 合法读取 / 缺失与非法回退；
+  `show_original_text` 与流式窗各配置项的默认 / 合法读取 / 缺失与越界回退；
 - `tests/test_translation_cache.py`：分桶共存（同哈希多原文）、桶内覆盖与顺序刷新、
   记录级 FIFO 淘汰（不整桶淘汰）、哈希键稳定性、UTF-8 字节计量、单条超限拒绝；
 - `tests/test_translation_store.py`：数据库创建、增量写入、同原文覆盖、同哈希多原文共存、
@@ -316,18 +360,26 @@ renpygameread/
 │  ├─ picker.py                # Tkinter 选择窗（失败回退命令行菜单）
 │  ├─ injector.py              # 注入 / 卸载 / 状态查询编排
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
-│  ├─ overlay.py               # 悬浮窗（单条显示、可拖动、双击锁定、单击翻译）
-│  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib）
+│  ├─ overlay.py               # 悬浮窗（Tk：单条显示、可拖动、双击锁定、单击翻译）
+│  ├─ stream_window.py         # 流式悬浮窗（PyQt6 全透明艺术字双窗口，与 overlay 互斥）
+│  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib，支持 SSE 流式）
 │  ├─ translation_cache.py     # 翻译内存缓存（哈希键→(原文,译文)，FIFO，仅主线程读写）
 │  ├─ translation_store.py     # 翻译 SQLite 持久化（游戏目录 renpy_overlay_cache/，可降级）
-│  ├─ config.py                # 本地配置加载（config.json：自动翻译开关 / 轮询间隔）
+│  ├─ config.py                # 本地配置加载（config.json：窗口开关 / 自动翻译 / API）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown
 └─ tests/
    ├─ test_shellcode.py
    ├─ test_pe.py
    ├─ test_ipc.py
-   └─ test_payload.py
+   ├─ test_payload.py
+   ├─ test_translator.py
+   ├─ test_translator_stream.py
+   ├─ test_overlay.py
+   ├─ test_stream_window.py
+   ├─ test_translation_cache.py
+   ├─ test_translation_store.py
+   └─ test_config.py
 ```
 
 `payload/` 下的模块**不会**被工具端 import —— 它们经 `importlib.resources` 读成

@@ -10,7 +10,8 @@
    ``datas``；同时 ``renpy_overlay.payload`` 要进 ``hiddenimports``
    （``files("renpy_overlay.payload")`` 会先 import 该包再定位资源）；
 3. ``excludes`` 只做保险：运行链上真实依赖仅 psutil / pywin32(win32con、
-   win32gui、win32process) / tkinter / sqlite3，其余大体积库一律排除；
+   win32gui、win32process) / tkinter / sqlite3 / PyQt6（流式悬浮窗），
+   其余大体积库一律排除；
 4. 单文件（onefile）模式：EXE 直接收全部 binaries 与 datas。若想要启动更快的
    目录版，把 EXE 的 ``a.binaries`` / ``a.datas`` 换成 ``exclude_binaries=True``，
    并追加 ``COLLECT(exe, a.binaries, a.datas, name="renpy-overlay")`` 即可。
@@ -29,8 +30,8 @@ SRC = os.path.join(ROOT, "src")
 EXCLUDES = [
     # 科学计算 / 图像
     "numpy", "scipy", "pandas", "matplotlib", "sympy", "PIL", "cv2", "torch",
-    # 其它 GUI 框架（悬浮窗 / 选择窗只用 tkinter）
-    "PyQt5", "PyQt6", "PySide2", "PySide6", "wx",
+    # 其它 GUI 框架（悬浮窗 / 选择窗用 tkinter 与 PyQt6；PyQt6 由内置 hook 收集）
+    "PyQt5", "PySide2", "PySide6", "wx",
     # 交互式环境与网络库（翻译走标准库 urllib）
     "IPython", "jupyter", "notebook", "requests", "urllib3", "aiohttp", "httpx",
     "lxml", "bs4",

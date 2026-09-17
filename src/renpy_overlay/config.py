@@ -17,7 +17,15 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "system_prompt": "...",             # 系统提示词（默认见 translator.DEFAULT_SYSTEM_PROMPT）
       "api_key": "",                      # API Key；空 = 不携带鉴权头
       "enable_thinking": false,           # 模型思考（reasoning）模式开关，默认关闭
-      "reasoning_effort": "none"          # 关闭思考时的 reasoning_effort 取值
+      "reasoning_effort": "none",         # 关闭思考时的 reasoning_effort 取值
+      "use_stream_window": true,          # 流式悬浮窗开关；false 时使用传统 Tk 悬浮窗
+      "stream_window_width": 1760,        # 流式正文窗宽度（像素，被游戏窗口宽度钳制）
+      "stream_window_height": 200,        # 流式正文窗高度（像素）
+      "stream_window_font_size": 14,      # 流式正文窗字号（像素）
+      "stream_window_line_spacing": 1.45, # 流式正文行距倍数
+      "stream_window_title_font_size": 8, # 流式标题窗字号（像素）
+      "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
+      "disable_text_effects": false       # 关闭流式窗字体特效（true 时纯色渲染，无辉光/描边/渐变）
     }
 """
 
@@ -47,6 +55,23 @@ DEFAULT_TRANSLATION_CACHE_SIZE_KB = 256
 DEFAULT_MODEL = ""  # 空：自动向 /v1/models 查询第一个已加载模型
 DEFAULT_API_KEY = ""  # 空：不携带 Authorization 头
 DEFAULT_ENABLE_THINKING = False  # 模型思考（reasoning）模式默认关闭
+#: 流式悬浮窗开关（默认开启：开启时用流式双窗口替代传统 Tk 悬浮窗）
+DEFAULT_USE_STREAM_WINDOW = True
+#: 正文窗尺寸：默认宽 = 历史 CLI 默认 880 的 2 倍，高与历史默认一致
+DEFAULT_STREAM_WINDOW_WIDTH = 1760
+DEFAULT_STREAM_WINDOW_HEIGHT = 200
+DEFAULT_STREAM_WINDOW_FONT_SIZE = 14  # 正文窗字号（像素）
+DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.45  # 正文行距倍数（参考艺术字打字机验证值）
+DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 8  # 标题窗字号（像素）
+DEFAULT_STREAM_WINDOW_TITLE_GAP = 4  # 标题窗与正文窗间距（像素）
+#: 字体特效开关：false（默认）保持艺术字特效；true 时字符以基础纯色直接渲染
+DEFAULT_DISABLE_TEXT_EFFECTS = False
+#: 字号下限：再小就不可辨认；行距下限：小于 1.0 会上下行重叠
+MIN_STREAM_FONT_SIZE = 6
+MIN_STREAM_LINE_SPACING = 1.0
+#: 正文窗尺寸下限：过小无法阅读（与 compute_geometry 的最小宽/高对齐）
+MIN_STREAM_WINDOW_WIDTH = 240
+MIN_STREAM_WINDOW_HEIGHT = 80
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
 
@@ -66,6 +91,15 @@ class AppConfig:
     api_key: str = DEFAULT_API_KEY
     enable_thinking: bool = DEFAULT_ENABLE_THINKING
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    # 流式悬浮窗（use_stream_window=false 时完全不创建，保持传统 Tk 悬浮窗）
+    use_stream_window: bool = DEFAULT_USE_STREAM_WINDOW
+    stream_window_width: int = DEFAULT_STREAM_WINDOW_WIDTH
+    stream_window_height: int = DEFAULT_STREAM_WINDOW_HEIGHT
+    stream_window_font_size: int = DEFAULT_STREAM_WINDOW_FONT_SIZE
+    stream_window_line_spacing: float = DEFAULT_STREAM_WINDOW_LINE_SPACING
+    stream_window_title_font_size: int = DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE
+    stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
+    disable_text_effects: bool = DEFAULT_DISABLE_TEXT_EFFECTS
 
 
 def default_path() -> Path:
@@ -98,6 +132,14 @@ def _write_defaults(target: Path) -> None:
         "api_key": DEFAULT_API_KEY,
         "enable_thinking": DEFAULT_ENABLE_THINKING,
         "reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "use_stream_window": DEFAULT_USE_STREAM_WINDOW,
+        "stream_window_width": DEFAULT_STREAM_WINDOW_WIDTH,
+        "stream_window_height": DEFAULT_STREAM_WINDOW_HEIGHT,
+        "stream_window_font_size": DEFAULT_STREAM_WINDOW_FONT_SIZE,
+        "stream_window_line_spacing": DEFAULT_STREAM_WINDOW_LINE_SPACING,
+        "stream_window_title_font_size": DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
+        "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
+        "disable_text_effects": DEFAULT_DISABLE_TEXT_EFFECTS,
     }
     try:
         target.write_text(
@@ -148,6 +190,43 @@ def _read_str(raw: dict, key: str, default: str, allow_empty: bool = True) -> st
         logger.warning("%s 为空字符串，回退默认值 %r", key, default)
         return default
     return value
+
+
+def _read_positive_int(raw: dict, key: str, default: int, minimum: int) -> int:
+    """通用正整数字段校验：类型不对或低于下限 → 回退默认值。"""
+    value = raw.get(key, default)
+    # 注意 bool 是 int 的子类，True/False 不算合法数字
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        logger.warning("%s 不是整数（%r），回退默认 %d", key, value, default)
+        return default
+    if int(value) < minimum:
+        logger.warning("%s 低于下限 %d（%r），回退默认 %d", key, minimum, value, default)
+        return default
+    return int(value)
+
+
+def _read_non_negative_int(raw: dict, key: str, default: int) -> int:
+    """通用非负整数字段校验（间距类配置允许 0）：类型不对或为负 → 回退默认值。"""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        logger.warning("%s 不是整数（%r），回退默认 %d", key, value, default)
+        return default
+    if int(value) < 0:
+        logger.warning("%s 为负数（%r），回退默认 %d", key, value, default)
+        return default
+    return int(value)
+
+
+def _read_positive_float(raw: dict, key: str, default: float, minimum: float) -> float:
+    """通用正数字段校验（行距类配置）：类型不对或低于下限 → 回退默认值。"""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        logger.warning("%s 不是数字（%r），回退默认 %s", key, value, default)
+        return default
+    if value < minimum:
+        logger.warning("%s 低于下限 %s（%r），回退默认 %s", key, minimum, value, default)
+        return default
+    return float(value)
 
 
 def _read_api_timeout(raw: dict) -> float:
@@ -210,11 +289,40 @@ def load_config(path: Path | None = None) -> AppConfig:
         api_key=_read_str(raw, "api_key", DEFAULT_API_KEY),
         enable_thinking=_read_bool(raw, "enable_thinking", DEFAULT_ENABLE_THINKING),
         reasoning_effort=_read_str(raw, "reasoning_effort", DEFAULT_REASONING_EFFORT),
+        use_stream_window=_read_bool(raw, "use_stream_window", DEFAULT_USE_STREAM_WINDOW),
+        stream_window_width=_read_positive_int(
+            raw, "stream_window_width", DEFAULT_STREAM_WINDOW_WIDTH, MIN_STREAM_WINDOW_WIDTH
+        ),
+        stream_window_height=_read_positive_int(
+            raw, "stream_window_height", DEFAULT_STREAM_WINDOW_HEIGHT, MIN_STREAM_WINDOW_HEIGHT
+        ),
+        stream_window_font_size=_read_positive_int(
+            raw, "stream_window_font_size", DEFAULT_STREAM_WINDOW_FONT_SIZE, MIN_STREAM_FONT_SIZE
+        ),
+        stream_window_line_spacing=_read_positive_float(
+            raw,
+            "stream_window_line_spacing",
+            DEFAULT_STREAM_WINDOW_LINE_SPACING,
+            MIN_STREAM_LINE_SPACING,
+        ),
+        stream_window_title_font_size=_read_positive_int(
+            raw,
+            "stream_window_title_font_size",
+            DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
+            MIN_STREAM_FONT_SIZE,
+        ),
+        stream_window_title_gap=_read_non_negative_int(
+            raw, "stream_window_title_gap", DEFAULT_STREAM_WINDOW_TITLE_GAP
+        ),
+        disable_text_effects=_read_bool(
+            raw, "disable_text_effects", DEFAULT_DISABLE_TEXT_EFFECTS
+        ),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
-        "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r（%s）",
+        "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
+        "stream_window=%s（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d，fx_off=%s）（%s）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -226,6 +334,14 @@ def load_config(path: Path | None = None) -> AppConfig:
         "已设置" if app_config.api_key else "未设置",
         app_config.enable_thinking,
         app_config.reasoning_effort,
+        app_config.use_stream_window,
+        app_config.stream_window_width,
+        app_config.stream_window_height,
+        app_config.stream_window_font_size,
+        app_config.stream_window_line_spacing,
+        app_config.stream_window_title_font_size,
+        app_config.stream_window_title_gap,
+        app_config.disable_text_effects,
         target,
     )
     return app_config

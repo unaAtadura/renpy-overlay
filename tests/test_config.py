@@ -29,6 +29,14 @@ def test_missing_file_creates_defaults(tmp_path):
         "api_key": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
+        "use_stream_window": True,
+        "stream_window_width": 1760,
+        "stream_window_height": 200,
+        "stream_window_font_size": 14,
+        "stream_window_line_spacing": 1.45,
+        "stream_window_title_font_size": 8,
+        "stream_window_title_gap": 4,
+        "disable_text_effects": False,
     }
 
 
@@ -179,6 +187,121 @@ def test_extra_keys_are_ignored(tmp_path):
     loaded = config.load_config(target)
     assert loaded.auto_translate is True
     assert loaded.auto_translate_interval == 3.0
+
+
+# ---------------------------------------------------------------- 流式悬浮窗
+
+
+def test_stream_window_defaults(tmp_path):
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    assert loaded.use_stream_window is True  # 开关默认开启
+    assert loaded.stream_window_font_size == 14
+    assert loaded.stream_window_line_spacing == 1.45
+    assert loaded.stream_window_title_font_size == 8
+    assert loaded.stream_window_title_gap == 4
+
+
+def test_stream_window_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "use_stream_window": False,
+                "stream_window_font_size": 18,
+                "stream_window_line_spacing": 1.2,
+                "stream_window_title_font_size": 10,
+                "stream_window_title_gap": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.use_stream_window is False
+    assert loaded.stream_window_font_size == 18
+    assert loaded.stream_window_line_spacing == 1.2
+    assert loaded.stream_window_title_font_size == 10
+    assert loaded.stream_window_title_gap == 0  # 间距允许 0
+
+
+def test_stream_window_integer_float_accepted(tmp_path):
+    """整值浮点（16.0）等价于整数 16；非整数浮点字号回退。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"stream_window_font_size": 16.0}), encoding="utf-8")
+    assert config.load_config(target).stream_window_font_size == 16
+    target.write_text(json.dumps({"stream_window_font_size": 16.5}), encoding="utf-8")
+    assert config.load_config(target).stream_window_font_size == 14
+
+
+def test_stream_window_invalid_types_fall_back_per_field(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "use_stream_window": "yes",
+                "stream_window_font_size": True,  # bool 不得当数字
+                "stream_window_line_spacing": "big",
+                "stream_window_title_font_size": None,
+                "stream_window_title_gap": [2],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.use_stream_window is True
+    assert loaded.stream_window_font_size == 14
+    assert loaded.stream_window_line_spacing == 1.45
+    assert loaded.stream_window_title_font_size == 8
+    assert loaded.stream_window_title_gap == 4
+
+
+def test_stream_window_out_of_range_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "stream_window_font_size": 3,  # 低于下限 6
+                "stream_window_line_spacing": 0.5,  # 低于下限 1.0
+                "stream_window_title_font_size": 0,
+                "stream_window_title_gap": -2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.stream_window_font_size == 14
+    assert loaded.stream_window_line_spacing == 1.45
+    assert loaded.stream_window_title_font_size == 8
+    assert loaded.stream_window_title_gap == 4
+
+
+def test_disable_text_effects_loaded_and_fallback(tmp_path):
+    """字体特效开关：默认 false（保持特效）；合法 true 生效；非布尔回退默认。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"disable_text_effects": True}), encoding="utf-8")
+    assert config.load_config(target).disable_text_effects is True
+    for bad in ("yes", 1, None, []):
+        target.write_text(json.dumps({"disable_text_effects": bad}), encoding="utf-8")
+        assert config.load_config(target).disable_text_effects is False, f"{bad!r}"
+
+
+def test_stream_window_size_loaded_and_fallback(tmp_path):
+    """正文窗尺寸：默认 1760x200；合法值生效；类型不符 / 越界逐项回退。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"stream_window_width": 1000, "stream_window_height": 300}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.stream_window_width == 1000
+    assert loaded.stream_window_height == 300
+    for bad in ("wide", True, 100.5):  # 类型不符（bool 不算数字、非整数浮点）
+        target.write_text(json.dumps({"stream_window_width": bad}), encoding="utf-8")
+        assert config.load_config(target).stream_window_width == 1760, f"{bad!r}"
+    target.write_text(json.dumps({"stream_window_height": 40}), encoding="utf-8")
+    assert config.load_config(target).stream_window_height == 200  # 低于下限 80
+    target.write_text(json.dumps({"stream_window_width": 100}), encoding="utf-8")
+    assert config.load_config(target).stream_window_width == 1760  # 低于下限 240
 
 
 def test_invalid_json_falls_back_without_crash(tmp_path):
