@@ -1,16 +1,18 @@
 """流式悬浮窗的离线几何验证。
 
-双窗口定位的核心是"整体几何 → 标题/正文几何"的纯计算，这里把
-``pair_layout`` 当成数学函数来验证（不实例化 QWidget，无需显示环境）。
+悬浮窗定位的核心是两组纯计算 —— "给定游戏窗口矩形 → 整体几何"的
+``compute_geometry`` 与 "整体几何 → 标题/正文几何"的 ``pair_layout``，
+这里把它们当成数学函数来验证（不实例化 QWidget，无需显示环境）。
 """
 
 from __future__ import annotations
 
-from renpy_overlay.overlay import MARGIN, compute_geometry
 from renpy_overlay.stream_window import (
+    MARGIN,
     MASK_PAD_X,
     MASK_PAD_Y,
     body_mask_bands,
+    compute_geometry,
     pair_layout,
     pair_offset_from_body,
 )
@@ -20,6 +22,48 @@ TITLE_H = 26
 GAP = 4
 BODY = (880, 200)
 TOTAL_SIZE = (BODY[0], BODY[1] + TITLE_H + GAP)
+
+
+# ---- compute_geometry：整体几何（停靠 / 偏移 / 钳制） -----------------------
+
+
+def test_dock_top_center():
+    x, y, width, height = compute_geometry(GAME, BODY, "top-center")
+    assert (width, height) == BODY
+    assert y == GAME[1] + MARGIN
+    assert x == GAME[0] + (1200 - 880) // 2
+
+
+def test_dock_bottom_left():
+    x, y, width, height = compute_geometry(GAME, BODY, "bottom-left")
+    assert (width, height) == BODY
+    assert x == GAME[0] + MARGIN
+    assert y == GAME[3] - height - MARGIN
+
+
+def test_user_offset_overrides_dock():
+    """手动拖动过（存在 user_offset）时，位置不再由 dock 决定。"""
+    x, y, width, height = compute_geometry(GAME, BODY, "bottom-right", (33, 44))
+    assert (x, y) == (GAME[0] + 33, GAME[1] + 44)
+    assert (width, height) == BODY
+
+
+def test_user_offset_follows_game_window_move():
+    """游戏窗口整体移动时，悬浮窗保持相对偏移。"""
+    moved = (500, 600, 1700, 1300)
+    x, y, _width, _height = compute_geometry(moved, BODY, "top-center", (33, 44))
+    assert (x, y) == (moved[0] + 33, moved[1] + 44)
+
+
+def test_size_clamped_to_game_window():
+    tiny = (0, 0, 300, 160)
+    _x, y, width, height = compute_geometry(tiny, BODY, "top-center")
+    assert width == 300 - 2 * MARGIN
+    assert height == 80  # 160 // 2 = 80，恰好等于下限
+    assert y == MARGIN
+
+
+# ---- pair_layout / pair_offset_from_body：两窗拆分与拖动参照系 --------------
 
 
 def test_pair_layout_left_aligned_and_stacked():

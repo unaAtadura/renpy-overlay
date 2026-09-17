@@ -1,28 +1,24 @@
-"""流式输出悬浮窗：全透明艺术字双窗口（标题 + 正文），流式呈现 API 译文。
+"""流式输出悬浮窗：全透明双窗口（标题 + 正文），常规字体流式呈现 API 译文。
 
-与 :mod:`renpy_overlay.overlay` 的传统 Tk 悬浮窗**完全独立**（不共用窗口实例、
-不共享显示状态与生命周期），由 ``config.json`` 的 ``use_stream_window`` 决定
-二选一；CLI 按同一套公开接口多态调用。关键设计：
+唯一的悬浮窗实现（PyQt6 为硬依赖，缺失时启动即报清晰 ImportError）。关键设计：
 
-1. **双窗口，借鉴参考项目"艺术字打字机"的已验证做法**。标题窗与正文窗是两个
-   独立的顶层 QWidget，均使用 ``WA_TranslucentBackground + FramelessWindowHint
-   + WindowStaysOnTopHint + Tool`` 实现屏幕上只可见文字本身；每个字符预先烘焙
-   为多层辉光 + 明亮描边的 QPixmap 精灵（正文统一淡蓝色填充，标题保持霓虹渐变）；
-   config.json 的 ``disable_text_effects`` 开启时跳过全部特效，以基础纯色直接渲染。
-   标题窗在正文窗上方、水平左对齐，一次性整显完整标题（无打字机动画）；正文窗
-   以打字机节拍逐字弹出（积压越多消化越快），带出现动画，平滑滚动自动跟随最新
-   内容，滚轮上翻可回看当前对话全文、回到底部恢复跟随。
+1. **双窗口**。标题窗与正文窗是两个独立的顶层 QWidget，均使用
+   ``WA_TranslucentBackground + FramelessWindowHint + WindowStaysOnTopHint
+   + Tool`` 实现屏幕上只可见文字本身；文字以常规 QFont（Black 字重）+ 统一
+   淡蓝色直接绘制，背后逐行绘制半透明黑色蒙版条带提升对比度。标题窗在正文窗
+   上方、水平左对齐，一次性整显完整标题（无打字机动画）；正文窗以打字机节拍
+   逐字弹出（积压越多消化越快），带出现动画，平滑滚动自动跟随最新内容，滚轮
+   上翻可回看当前对话全文、回到底部恢复跟随。
 
-2. **定位全部走 win32 物理像素**。跟随游戏窗口复用 ``overlay.compute_geometry``
+2. **定位全部走 win32 物理像素**。跟随游戏窗口复用 :func:`compute_geometry`
    （整体高度 = 标题高 + 间距 + 正文高），经 :func:`pair_layout` 拆成两窗后用
    ``move_window`` 成对定位；锁定态周期性对两窗重申 TOPMOST。Qt 侧不做 Qt 坐标
    移动，拖动时把 Qt 鼠标逻辑坐标乘 ``devicePixelRatioF`` 换算回物理像素。
 
-3. **交互与传统浮窗一致**。左键按住标题或正文任一窗口拖动即整体联动；双击
-   切换位置锁定（中止在途翻译）；锁定态单击把最近捕获的对话原文经 SSE 流式
-   接口发给 OpenAI 兼容服务，译文逐块流入正文窗；``auto_translate`` 开启时
-   锁定状态按间隔自动翻译（两级缓存命中直接上屏）。单击/双击用"延迟判定"
-   区分，逻辑与浮窗相同。
+3. **交互**。左键按住标题或正文任一窗口拖动即整体联动；双击切换位置锁定
+   （中止在途翻译）；锁定态单击把最近捕获的对话原文经 SSE 流式接口发给
+   OpenAI 兼容服务，译文逐块流入正文窗；``auto_translate`` 开启时锁定状态
+   按间隔自动翻译（两级缓存命中直接上屏）。单击/双击用"延迟判定"区分。
 
 4. **线程模型**。Qt 只能在创建它的线程里操作，所有跨线程输入（IPC 回调、
    控制台命令、翻译 chunk / 结果）都进队列，由主线程 QTimer（80ms）统一消费；
@@ -38,22 +34,11 @@ import queue
 import threading
 import time
 
-from PyQt6.QtCore import QRectF, Qt, QTimer
-from PyQt6.QtGui import (
-    QBrush,
-    QColor,
-    QFont,
-    QFontMetricsF,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPixmap,
-)
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import config, translation_store, translator, win32api
-from .overlay import DOCK_CHOICES, compute_geometry
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -64,15 +49,15 @@ CLICK_DELAY_MS = win32api.double_click_time_ms() + 60
 CLICK_MOVE_TOLERANCE = 4
 CLICK_SUPPRESS_SECONDS = 0.5
 
-#: 视觉参数：取值沿用参考项目"艺术字打字机"的已验证方案，按对话窗缩小边距
+#: 视觉参数：取值沿用参考项目的已验证方案，按对话窗缩小边距
 BODY_MARGIN = 24.0  # 正文窗文本边距（逻辑像素，参考项目全屏窗用 64）
 SPAWN_DURATION = 0.55  # 单字出现动画时长（秒）
 TYPE_INTERVAL_MS = 16  # 打字机节拍（~60 字/秒，积压越多消化越快）
 RENDER_INTERVAL_MS = 16  # 动画刷新周期
 WHEEL_LINES_PER_NOTCH = 3.0  # 滚轮每格回退/推进的行数
 TITLE_MARGIN_X = 16.0  # 标题文本左起点（逻辑像素）
-TITLE_GLOW_FACTOR = 1.7  # 标题窗高度中为辉光预留的字号倍数（上下各 0.85）
-BODY_FILL_COLOR = "#ADD8E6"  # 正文统一淡蓝色填充（标题窗保持霓虹渐变）
+TITLE_GLOW_FACTOR = 1.7  # 标题窗高度余量的字号倍数（保持既有几何外观）
+BODY_FILL_COLOR = "#ADD8E6"  # 标题与正文统一的淡蓝色填充
 
 #: 文字背后的半透明黑色蒙版（提升游戏画面上的对比度）：仅覆盖有文字的行区域，
 #: 行距区域保持透明；alpha 取 110/255 ≈ 43%（可读性与遮挡感的平衡取值）
@@ -82,13 +67,65 @@ MASK_PAD_X = 6.0  # 条带水平内边距：文字与蒙版边缘不直接贴合
 MASK_PAD_Y = 3.0  # 条带垂直内收：保证相邻两行蒙版之间留出空隙
 MASK_RADIUS = 4.0  # 条带圆角半径
 
-# 三套霓虹渐变配色（仅标题窗使用），按字符轮换（ord(ch) % 3）
-PALETTES: tuple[tuple[tuple[float, str], ...], ...] = (
-    ((0.00, "#FFF7B8"), (0.45, "#FFD54F"), (0.75, "#FF8A3D"), (1.00, "#FF3D77")),
-    ((0.00, "#C7F9FF"), (0.45, "#33E1FF"), (0.75, "#4F7CFF"), (1.00, "#B44BFF")),
-    ((0.00, "#DAFFD6"), (0.45, "#5DFF9E"), (0.75, "#00C2A8"), (1.00, "#2E8BFF")),
+MARGIN = 12
+DOCK_CHOICES = (
+    "top-center",
+    "top-left",
+    "top-right",
+    "bottom-center",
+    "bottom-left",
+    "bottom-right",
 )
-GLOW_COLORS = ("#FF9E2C", "#3FC6FF", "#3DFFC1")
+
+
+def compute_geometry(
+    game_rect: tuple[int, int, int, int],
+    size: tuple[int, int],
+    dock: str,
+    user_offset: tuple[int, int] | None = None,
+    margin: int = MARGIN,
+) -> tuple[int, int, int, int]:
+    """计算悬浮窗的目标几何 ``(x, y, 宽, 高)``（屏幕物理像素）。
+
+    - ``user_offset`` 为 None：按 ``dock`` 贴靠游戏窗口；
+    - ``user_offset`` 存在：用户手动拖动过，位置 = 游戏窗口左上角 + 偏移，
+      尺寸仍按游戏窗口约束缩放 —— 游戏窗口移动/改变大小时悬浮窗跟随，
+      但保持用户设定的相对位置。
+
+    抽成纯函数便于离线验证坐标计算（见 ``tests/test_stream_window.py``）。
+    """
+    left, top, right, bottom = game_rect
+    game_w, game_h = max(1, right - left), max(1, bottom - top)
+    width = max(240, min(size[0], game_w - 2 * margin))
+    height = max(80, min(size[1], game_h // 2))
+
+    if user_offset is not None:
+        return left + user_offset[0], top + user_offset[1], width, height
+
+    if dock.startswith("top"):
+        y = top + margin
+    else:
+        y = bottom - height - margin
+    if dock.endswith("left"):
+        x = left + margin
+    elif dock.endswith("right"):
+        x = right - width - margin
+    else:
+        x = left + (game_w - width) // 2
+    return x, y, width, height
+
+
+def _stream_font(font_px: int) -> QFont:
+    """标题窗与正文窗共用的常规字体：固定家族 + 像素字号 + Black 字重。
+
+    字重与排版度量（advance/height）直接决定换行、截断与蒙版宽度，
+    不得改为更轻的字重。
+    """
+    font = QFont()
+    font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"])
+    font.setPixelSize(font_px)
+    font.setWeight(QFont.Weight.Black)
+    return font
 
 
 def pair_layout(
@@ -156,99 +193,7 @@ def body_mask_bands(
     return bands
 
 
-class _SpriteBaker:
-    """把单个字符烘焙成辉光/填充/描边精灵图并缓存（参考项目的已验证做法）。
-
-    精灵按窗口 DPR 超采样，但显式用"目标矩形 + 完整源矩形"做纯几何缩放，
-    与高 DPI pixmap 的坐标解释解耦；空格不产生精灵（返回 None）。
-    ``fill_color`` 非空时所有字符统一纯色填充（正文淡蓝）；None 保持霓虹
-    渐变轮换（标题窗）。``effects`` 为 False 时跳过辉光/描边/渐变，仅以
-    基础纯色直接渲染（config.json: disable_text_effects）。
-    """
-
-    def __init__(
-        self,
-        font: QFont,
-        font_px: int,
-        dpr_provider,
-        fill_color: str | None = None,
-        effects: bool = True,
-    ) -> None:
-        self._font = font
-        self._font_px = font_px
-        self._dpr_provider = dpr_provider
-        self._fill_color = QColor(fill_color) if fill_color else None
-        self._effects = effects
-        self._fm = QFontMetricsF(font)
-        self._sprites: dict[str, tuple[QPixmap, float, float] | None] = {}
-
-    @property
-    def fm(self) -> QFontMetricsF:
-        return self._fm
-
-    def sprite(self, ch: str) -> tuple[QPixmap, float, float] | None:
-        """返回 ``(精灵图, 逻辑宽, 逻辑高)``；空格返回 None。"""
-        if ch in self._sprites:
-            return self._sprites[ch]
-        if ch == " ":
-            self._sprites[ch] = None
-            return None
-
-        fm = self._fm
-        bake = max(1.0, self._dpr_provider())  # 烘焙超采样倍率
-        pad = self._font_px * 0.85  # 为辉光预留边距
-        advance = max(fm.horizontalAdvance(ch), 1.0)
-        ink_h = fm.height()
-        logical_w = advance + 2 * pad
-        logical_h = ink_h + 2 * pad
-
-        pm = QPixmap(round(logical_w * bake), round(logical_h * bake))
-        pm.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.scale(bake, bake)
-
-        path = QPainterPath()
-        path.addText(pad, pad + fm.ascent(), self._font, ch)
-
-        if not self._effects:
-            # 基础渲染：仅纯色填充，无辉光/描边/渐变；标题无 fill_color 时兜底统一基础色
-            fill = self._fill_color if self._fill_color is not None else QColor(BODY_FILL_COLOR)
-            painter.fillPath(path, QBrush(fill))
-        else:
-            # 1) 辉光：由宽到窄叠画半透明同色描边
-            glow = QColor(GLOW_COLORS[ord(ch) % 3])
-            for pen_width, alpha in (
-                (self._font_px * 0.52, 24),
-                (self._font_px * 0.34, 46),
-                (self._font_px * 0.19, 82),
-            ):
-                pen = QPen(QColor(glow.red(), glow.green(), glow.blue(), alpha), pen_width)
-                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-                painter.strokePath(path, pen)
-
-            # 2) 主体：纯色（正文统一淡蓝）或垂直渐变（标题）填充 + 明亮描边
-            if self._fill_color is not None:
-                painter.setBrush(self._fill_color)
-            else:
-                gradient = QLinearGradient(0.0, pad, 0.0, pad + ink_h)
-                for position, color in PALETTES[ord(ch) % 3]:
-                    gradient.setColorAt(position, QColor(color))
-                painter.setBrush(gradient)
-            outline = QPen(QColor(255, 255, 255, 235), max(1.5, self._font_px * 0.045))
-            outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(outline)
-            painter.drawPath(path)
-        painter.end()
-
-        entry: tuple[QPixmap, float, float] = (pm, logical_w, logical_h)
-        self._sprites[ch] = entry
-        return entry
-
-
-class _ArtWindow(QWidget):
+class _StreamWindowBase(QWidget):
     """标题窗与正文窗的公共底座：全透明无边框置顶 + 鼠标事件转发给宿主。"""
 
     def __init__(self, title: str, font: QFont, host) -> None:
@@ -298,22 +243,18 @@ class _ArtWindow(QWidget):
         event.accept()
 
 
-class ArtTitleWindow(_ArtWindow):
-    """标题窗：艺术字一次性整显完整标题（随交互状态动态更新，但无打字机动画）。"""
+class TitleWindow(_StreamWindowBase):
+    """标题窗：一次性整显完整标题（随交互状态动态更新，但无打字机动画）。"""
 
-    def __init__(self, font_px: int, host, effects: bool = True) -> None:
-        font = QFont()
-        font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"])
-        font.setPixelSize(font_px)
-        font.setWeight(QFont.Weight.Black)
+    def __init__(self, font_px: int, host) -> None:
+        font = _stream_font(font_px)
         super().__init__("renpy-overlay · stream title", font, host)
-        self._baker = _SpriteBaker(font, font_px, self.dpr, effects=effects)
         self._layout: list[tuple[str, float]] = []  # (字符, x 起点)，单行排版
 
     def set_text(self, text: str) -> None:
         """整显一条标题（单行）：超宽或换行后的内容直接截断。"""
         self._layout.clear()
-        fm = self._baker.fm
+        fm = self.fm
         x = TITLE_MARGIN_X
         max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X)
         for ch in text:
@@ -330,10 +271,11 @@ class ArtTitleWindow(_ArtWindow):
         if not self._layout:
             return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        fm = self._baker.fm
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fm = self.fm
         box_h = fm.height()
-        center_y = (self.height() - box_h) / 2.0 + box_h / 2.0  # 单行垂直居中
+        center_y = self.height() / 2.0  # 单行垂直居中
+        baseline_y = (self.height() - box_h) / 2.0 + fm.ascent()
         # 蒙版：覆盖整行文字范围（单行，无相邻行间隙问题），画在字符之下
         first_x = self._layout[0][1]
         last_ch, last_x = self._layout[-1]
@@ -349,17 +291,11 @@ class ArtTitleWindow(_ArtWindow):
             MASK_RADIUS,
         )
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        # 常规字体直绘：统一淡蓝色纯色，基线取"字形盒垂直居中"对应的 ascent 偏移
+        painter.setFont(self._font)
+        painter.setPen(QColor(BODY_FILL_COLOR))
         for ch, x in self._layout:
-            entry = self._baker.sprite(ch)
-            if entry is None:
-                continue
-            sprite, sprite_w, sprite_h = entry
-            center_x = x + fm.horizontalAdvance(ch) / 2.0
-            painter.drawPixmap(
-                QRectF(center_x - sprite_w / 2.0, center_y - sprite_h / 2.0, sprite_w, sprite_h),
-                sprite,
-                QRectF(0.0, 0.0, float(sprite.width()), float(sprite.height())),
-            )
+            painter.drawText(QPointF(x, baseline_y), ch)
 
 
 class _Glyph:
@@ -378,18 +314,12 @@ class _Glyph:
         self.row = row
 
 
-class ArtBodyWindow(_ArtWindow):
-    """正文窗：打字机式逐字弹出的艺术字流式文本，平滑滚动 + 滚轮回看。"""
+class BodyWindow(_StreamWindowBase):
+    """正文窗：打字机式逐字弹出的流式文本，平滑滚动 + 滚轮回看。"""
 
-    def __init__(self, font_px: int, line_spacing: float, host, effects: bool = True) -> None:
-        font = QFont()
-        font.setFamilies(["Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"])
-        font.setPixelSize(font_px)
-        font.setWeight(QFont.Weight.Black)
+    def __init__(self, font_px: int, line_spacing: float, host) -> None:
+        font = _stream_font(font_px)
         super().__init__("renpy-overlay · stream body", font, host)
-        self._baker = _SpriteBaker(
-            font, font_px, self.dpr, fill_color=BODY_FILL_COLOR, effects=effects
-        )
         self._font_px = font_px
         self._line_h = font_px * max(1.0, line_spacing)
 
@@ -450,12 +380,12 @@ class ArtBodyWindow(_ArtWindow):
         if ch == "\n":
             self._newline()
             return
-        width = self._baker.fm.horizontalAdvance(ch)
+        width = self.fm.horizontalAdvance(ch)
         if ch == " " and self._line_empty:
             return  # 行首空格丢弃
         if not self._line_empty and self._line_used + width > self._content_width():
             self._newline()
-        baseline = BODY_MARGIN + self._baker.fm.ascent() + self._line * self._line_h
+        baseline = BODY_MARGIN + self.fm.ascent() + self._line * self._line_h
         self._glyphs.append(
             _Glyph(ch, BODY_MARGIN + self._line_used, baseline, width, self._line)
         )
@@ -495,8 +425,8 @@ class ArtBodyWindow(_ArtWindow):
         painter.translate(0.0, -self._scroll)
 
         # 蒙版：按已排版字符逐行绘制半透明条带（随滚动/拖动同步，行距区域透明），
-        # 画在字符精灵之下；打字机过程中只覆盖已出现字符所在的行
-        fm = self._baker.fm
+        # 画在字符之下；打字机过程中只覆盖已出现字符所在的行
+        fm = self.fm
         spans = [(glyph.row, glyph.x, glyph.advance) for glyph in self._glyphs]
         if spans:
             mask = QColor(MASK_COLOR)
@@ -511,11 +441,8 @@ class ArtBodyWindow(_ArtWindow):
         ascent = fm.ascent()
         height = fm.height()
         c1, c3 = 1.70158, 2.70158  # easeOutBack 参数（弹出时轻微过冲）
+        painter.setFont(self._font)
         for glyph in self._glyphs:
-            entry = self._baker.sprite(glyph.ch)
-            if entry is None:
-                continue
-            sprite, sprite_w, sprite_h = entry
             age = now - glyph.spawn
             p = min(1.0, max(0.0, age / SPAWN_DURATION))
             if p < 1.0:  # 出现动画：放大过冲 + 跳起 + 淡入
@@ -527,18 +454,17 @@ class ArtBodyWindow(_ArtWindow):
             else:  # 静止：位置与外观完全固定（无漂浮动画）
                 scale, dy, alpha = 1.0, 0.0, 1.0
 
+            # 局部原点取"字形盒中心"（与原精灵中心对齐）：drawText 画在
+            # (-advance/2, ascent - height/2)，scale=1/dy=0/alpha=1 时数学上
+            # 等价于直接 drawText(glyph.x, glyph.baseline)
             center_x = glyph.x + glyph.advance / 2.0
             center_y = glyph.baseline - ascent + height / 2.0
             painter.save()
             painter.translate(center_x, center_y + dy)
             painter.scale(scale, scale)
             painter.setOpacity(alpha)
-            # 显式给出"目标逻辑矩形 + 完整源矩形"，纯几何缩放，与 DPR 无关
-            painter.drawPixmap(
-                QRectF(-sprite_w / 2.0, -sprite_h / 2.0, sprite_w, sprite_h),
-                sprite,
-                QRectF(0.0, 0.0, float(sprite.width()), float(sprite.height())),
-            )
+            painter.setPen(QColor(BODY_FILL_COLOR))
+            painter.drawText(QPointF(-glyph.advance / 2.0, ascent - height / 2.0), glyph.ch)
             painter.restore()
 
     # ---- 滚轮回看 ----------------------------------------------------------
@@ -561,7 +487,7 @@ class ArtBodyWindow(_ArtWindow):
 
 
 class StreamOverlayWindow:
-    """流式悬浮窗门面：管理标题 + 正文双窗口，公开接口与 OverlayWindow 一致。"""
+    """流式悬浮窗门面：管理标题 + 正文双窗口，暴露队列化的对外接口。"""
 
     def __init__(
         self,
@@ -569,9 +495,6 @@ class StreamOverlayWindow:
         dock: str = "top-center",
         width: int = config.DEFAULT_STREAM_WINDOW_WIDTH,  # 正文窗尺寸来自 config.json
         height: int = config.DEFAULT_STREAM_WINDOW_HEIGHT,
-        alpha: float = 0.85,  # 与传统浮窗签名一致；全透明窗口下不参与渲染
-        font_family: str = "Microsoft YaHei UI",  # 同上，字体由 config 决定
-        font_size: int = 11,  # 同上，字号由 config 决定
         app_config: config.AppConfig | None = None,
         game_dir: str = "",
         on_quit=None,
@@ -586,22 +509,21 @@ class StreamOverlayWindow:
 
         # QApplication 必须先于任何 QWidget；进程此前可能已创建（复用之）
         self._app = QApplication.instance() or QApplication([])
-        effects = not self._config.disable_text_effects  # config.json: 字体特效开关
-        self._body_window = ArtBodyWindow(
+        self._body_window = BodyWindow(
             self._config.stream_window_font_size,
             self._config.stream_window_line_spacing,
             host=self,
-            effects=effects,
         )
-        self._title_window = ArtTitleWindow(
-            self._config.stream_window_title_font_size, host=self, effects=effects
+        self._title_window = TitleWindow(
+            self._config.stream_window_title_font_size, host=self
         )
         self._body_window.resize(width, height)
         self._title_window.resize(width, 10)  # 真实高度随字体计算后由跟随循环设定
         self._body_window.move(100, 100)
         self._title_window.move(100, 100)
 
-        # 标题窗物理高度：字体盒 + 上下辉光余量，按窗口 DPR 从逻辑像素换算
+        # 标题窗物理高度：字体盒 + 上下余量（TITLE_GLOW_FACTOR，保持既有几何
+        # 外观），按窗口 DPR 从逻辑像素换算
         title_h_logical = self._title_window.fm.height() + TITLE_GLOW_FACTOR * (
             self._config.stream_window_title_font_size
         )
