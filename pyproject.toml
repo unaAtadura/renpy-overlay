@@ -8,6 +8,8 @@ license = { text = "MIT" }
 dependencies = [
     # 进程枚举 / 目标存活检测
     "psutil>=6.1",
+    # 截图与图像处理（ImageGrab 截屏、宽高比约束 / 压缩 / 缩略图，仅 screenshot 模块）
+    "pillow>=10.0",
     # 悬浮窗（唯一 GUI 方案，硬依赖；stream_window 模块；PyQt6 才有逐像素透明窗口）
     "pyqt6>=6.7",
     # 窗口枚举、窗口样式、窗口定位（仅 Windows）

@@ -35,6 +35,8 @@ def test_missing_file_creates_defaults(tmp_path):
         "stream_window_line_spacing": 1.45,
         "stream_window_title_font_size": 8,
         "stream_window_title_gap": 4,
+        "screenshot_compress_percent": 10,
+        "screenshot_model": "",
     }
 
 
@@ -55,6 +57,31 @@ def test_reasoning_effort_loaded(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"reasoning_effort": "low"}), encoding="utf-8")
     assert config.load_config(target).reasoning_effort == "low"
+
+
+def test_screenshot_compress_percent_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"screenshot_compress_percent": 25}), encoding="utf-8")
+    assert config.load_config(target).screenshot_compress_percent == 25
+
+
+def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in (0, 101, -10, True, "10", None):
+        target.write_text(json.dumps({"screenshot_compress_percent": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.screenshot_compress_percent == 10, f"{bad!r} 应回退默认"
+
+
+def test_screenshot_model_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"screenshot_model": "qwen-vl"}), encoding="utf-8")
+    assert config.load_config(target).screenshot_model == "qwen-vl"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（运行时回退 model）
+    assert config.load_config(target).screenshot_model == ""
+    for bad in (123, None, ["vl"]):
+        target.write_text(json.dumps({"screenshot_model": bad}), encoding="utf-8")
+        assert config.load_config(target).screenshot_model == "", f"{bad!r}"
 
 
 def test_reasoning_effort_invalid_falls_back(tmp_path):

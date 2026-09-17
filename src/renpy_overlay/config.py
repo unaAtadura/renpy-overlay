@@ -24,6 +24,8 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "stream_window_line_spacing": 1.45, # 流式正文行距倍数
       "stream_window_title_font_size": 8, # 流式标题窗字号（像素）
       "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
+      "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
+      "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
     }
 """
 
@@ -60,6 +62,10 @@ DEFAULT_STREAM_WINDOW_FONT_SIZE = 14  # 正文窗字号（像素）
 DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.45  # 正文行距倍数（参考项目验证值）
 DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 8  # 标题窗字号（像素）
 DEFAULT_STREAM_WINDOW_TITLE_GAP = 4  # 标题窗与正文窗间距（像素）
+#: 截图翻译：发送 API 前副本等比压缩到的像素面积百分比（默认 10%）
+DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
+#: 截图识别翻译的模型代号；空 = 回退 model（识图需 vision 多模态模型）
+DEFAULT_SCREENSHOT_MODEL = ""
 #: 字号下限：再小就不可辨认；行距下限：小于 1.0 会上下行重叠
 MIN_STREAM_FONT_SIZE = 6
 MIN_STREAM_LINE_SPACING = 1.0
@@ -92,6 +98,9 @@ class AppConfig:
     stream_window_line_spacing: float = DEFAULT_STREAM_WINDOW_LINE_SPACING
     stream_window_title_font_size: int = DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE
     stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
+    # 截图翻译
+    screenshot_compress_percent: int = DEFAULT_SCREENSHOT_COMPRESS_PERCENT
+    screenshot_model: str = DEFAULT_SCREENSHOT_MODEL
 
 
 def default_path() -> Path:
@@ -130,6 +139,8 @@ def _write_defaults(target: Path) -> None:
         "stream_window_line_spacing": DEFAULT_STREAM_WINDOW_LINE_SPACING,
         "stream_window_title_font_size": DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
+        "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
+        "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
     }
     try:
         target.write_text(
@@ -219,6 +230,19 @@ def _read_positive_float(raw: dict, key: str, default: float, minimum: float) ->
     return float(value)
 
 
+def _read_percent(raw: dict, key: str, default: int) -> int:
+    """百分数字段校验（1..100）：类型不对或越界 → 回退默认值。"""
+    value = raw.get(key, default)
+    # 注意 bool 是 int 的子类，True/False 不算合法数字
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        logger.warning("%s 不是整数（%r），回退默认 %d", key, value, default)
+        return default
+    if not 1 <= int(value) <= 100:
+        logger.warning("%s 超出 1..100（%r），回退默认 %d", key, value, default)
+        return default
+    return int(value)
+
+
 def _read_api_timeout(raw: dict) -> float:
     value = raw.get("api_timeout", DEFAULT_TIMEOUT)
     # 注意 bool 是 int 的子类，True/False 不算合法数字
@@ -303,12 +327,17 @@ def load_config(path: Path | None = None) -> AppConfig:
         stream_window_title_gap=_read_non_negative_int(
             raw, "stream_window_title_gap", DEFAULT_STREAM_WINDOW_TITLE_GAP
         ),
+        screenshot_compress_percent=_read_percent(
+            raw, "screenshot_compress_percent", DEFAULT_SCREENSHOT_COMPRESS_PERCENT
+        ),
+        screenshot_model=_read_str(raw, "screenshot_model", DEFAULT_SCREENSHOT_MODEL),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
-        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d）（%s）",
+        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
+        "screenshot（compress=%d%%，model=%s）（%s）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -326,6 +355,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.stream_window_line_spacing,
         app_config.stream_window_title_font_size,
         app_config.stream_window_title_gap,
+        app_config.screenshot_compress_percent,
+        app_config.screenshot_model or "<回退 model>",
         target,
     )
     return app_config
