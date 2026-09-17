@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 
 logger = logging.getLogger("renpy_overlay.translator")
 
@@ -30,16 +32,20 @@ class TranslationError(RuntimeError):
     """翻译请求失败（服务不可达、协议不符、响应缺字段等）。"""
 
 
-def _request_json(url: str, payload: dict | None, timeout: float, api_key: str = "") -> dict:
-    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def _chat_headers(api_key: str) -> dict[str, str]:
+    """OpenAI 兼容请求头；api_key 为空时不附加鉴权头（本地服务无需鉴权）。"""
     headers = {"Content-Type": "application/json"}
     if api_key:
-        # OpenAI 兼容鉴权头；为空时不附加，本地服务（LM Studio 等）无需鉴权
         headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _request_json(url: str, payload: dict | None, timeout: float, api_key: str = "") -> dict:
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=data,
-        headers=headers,
+        headers=_chat_headers(api_key),
         method="POST" if data is not None else "GET",
     )
     try:
@@ -76,6 +82,56 @@ def first_model(
     return model_id
 
 
+def _chat_payload(
+    text: str,
+    model: str,
+    system_prompt: str,
+    enable_thinking: bool,
+    reasoning_effort: str,
+    stream: bool,
+) -> dict:
+    """构造 /v1/chat/completions 请求体（流式与非流式共用同一套字段）。"""
+    messages: list[dict] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": text})
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": stream,
+    }
+    # 思考模式开关（默认关闭）：各兼容平台的参数方言不同，一并声明同一语义 ——
+    #   enable_thinking      ：Qwen Cloud / DashScope / Qwen3.5 兼容端点（顶层字段）
+    #   chat_template_kwargs ：vLLM / SGLang（注入 chat template 变量）
+    #   reasoning_effort     ：LM Studio 等本地服务会忽略 enable_thinking，
+    #                          实测需同时声明 "none" 才能真正关闭思考（参考 renpybox）
+    thinking = bool(enable_thinking)
+    payload["enable_thinking"] = thinking
+    payload["chat_template_kwargs"] = {"enable_thinking": thinking}
+    if not thinking and reasoning_effort:
+        # 取值来自 config.json（默认 "none"）；配置为空串则不发送该字段
+        payload["reasoning_effort"] = reasoning_effort
+    return payload
+
+
+def _open_stream(url: str, payload: dict, timeout: float, api_key: str):
+    """发起流式 POST 并返回未读完的响应对象（SSE 逐行迭代由调用方负责）。"""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={**_chat_headers(api_key), "Accept": "text/event-stream"},
+        method="POST",
+    )
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read()[:200]
+        raise TranslationError(f"HTTP {exc.code}：{detail!r}") from exc
+    except urllib.error.URLError as exc:
+        raise TranslationError(f"无法连接 {url}：{exc.reason}") from exc
+
+
 def translate_text(
     text: str,
     base_url: str = DEFAULT_BASE_URL,
@@ -100,27 +156,7 @@ def translate_text(
         raise ValueError("没有可翻译的文本")
     if not model:
         model = first_model(base_url, timeout, api_key)
-    messages: list[dict] = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": text})
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.2,
-        "stream": False,
-    }
-    # 思考模式开关（默认关闭）：各兼容平台的参数方言不同，一并声明同一语义 ——
-    #   enable_thinking      ：Qwen Cloud / DashScope / Qwen3.5 兼容端点（顶层字段）
-    #   chat_template_kwargs ：vLLM / SGLang（注入 chat template 变量）
-    #   reasoning_effort     ：LM Studio 等本地服务会忽略 enable_thinking，
-    #                          实测需同时声明 "none" 才能真正关闭思考（参考 renpybox）
-    thinking = bool(enable_thinking)
-    payload["enable_thinking"] = thinking
-    payload["chat_template_kwargs"] = {"enable_thinking": thinking}
-    if not thinking and reasoning_effort:
-        # 取值来自 config.json（默认 "none"）；配置为空串则不发送该字段
-        payload["reasoning_effort"] = reasoning_effort
+    payload = _chat_payload(text, model, system_prompt, enable_thinking, reasoning_effort, False)
     data = _request_json(f"{base_url.rstrip('/')}/v1/chat/completions", payload, timeout, api_key)
     try:
         content = data["choices"][0]["message"]["content"]
@@ -130,3 +166,54 @@ def translate_text(
     if not result:
         raise TranslationError("模型返回了空译文")
     return result
+
+
+def translate_text_stream(
+    text: str,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT,
+    model: str = "",
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    api_key: str = "",
+    enable_thinking: bool = False,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+) -> Iterator[str]:
+    """流式版 ``translate_text``：逐块产出模型增量输出（SSE，``stream=True``）。
+
+    返回生成器：首次迭代时才真正发起请求（模型自动发现也在此时进行）；每个
+    ``yield`` 是一段增量译文，迭代正常结束即翻译完整结束。请求体字段与
+    ``translate_text`` 完全一致（含思考模式三方言语义），仅流式开关不同；
+    思考型模型输出的 reasoning 内容不在 ``delta.content`` 中，天然被跳过。
+    空 ``delta`` / 空块 / 非 JSON 行一律跳过；``data: [DONE]`` 结束。连接与
+    协议错误抛 :class:`TranslationError`；迭代中途连接中断同样收敛为该异常。
+    """
+    if not text or not text.strip():
+        raise ValueError("没有可翻译的文本")
+    if not model:
+        model = first_model(base_url, timeout, api_key)
+    payload = _chat_payload(text, model, system_prompt, enable_thinking, reasoning_effort, True)
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    response = _open_stream(url, payload, timeout, api_key)
+    with response:
+        try:
+            for raw in response:  # 按行阻塞读取，每行尽快产出，降低显示延迟
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    yield str(content)
+        except (http.client.HTTPException, OSError) as exc:
+            # URLError / socket.timeout / IncompleteRead 等都归入这一族
+            raise TranslationError(f"流式响应中断：{exc}") from exc
