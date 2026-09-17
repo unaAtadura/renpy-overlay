@@ -29,14 +29,12 @@ def test_missing_file_creates_defaults(tmp_path):
         "api_key": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
-        "use_stream_window": True,
         "stream_window_width": 1760,
         "stream_window_height": 200,
         "stream_window_font_size": 14,
         "stream_window_line_spacing": 1.45,
         "stream_window_title_font_size": 8,
         "stream_window_title_gap": 4,
-        "disable_text_effects": False,
     }
 
 
@@ -195,7 +193,6 @@ def test_extra_keys_are_ignored(tmp_path):
 def test_stream_window_defaults(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
-    assert loaded.use_stream_window is True  # 开关默认开启
     assert loaded.stream_window_font_size == 14
     assert loaded.stream_window_line_spacing == 1.45
     assert loaded.stream_window_title_font_size == 8
@@ -207,7 +204,6 @@ def test_stream_window_values_loaded(tmp_path):
     target.write_text(
         json.dumps(
             {
-                "use_stream_window": False,
                 "stream_window_font_size": 18,
                 "stream_window_line_spacing": 1.2,
                 "stream_window_title_font_size": 10,
@@ -217,7 +213,6 @@ def test_stream_window_values_loaded(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.use_stream_window is False
     assert loaded.stream_window_font_size == 18
     assert loaded.stream_window_line_spacing == 1.2
     assert loaded.stream_window_title_font_size == 10
@@ -238,7 +233,6 @@ def test_stream_window_invalid_types_fall_back_per_field(tmp_path):
     target.write_text(
         json.dumps(
             {
-                "use_stream_window": "yes",
                 "stream_window_font_size": True,  # bool 不得当数字
                 "stream_window_line_spacing": "big",
                 "stream_window_title_font_size": None,
@@ -248,7 +242,6 @@ def test_stream_window_invalid_types_fall_back_per_field(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.use_stream_window is True
     assert loaded.stream_window_font_size == 14
     assert loaded.stream_window_line_spacing == 1.45
     assert loaded.stream_window_title_font_size == 8
@@ -273,16 +266,6 @@ def test_stream_window_out_of_range_falls_back(tmp_path):
     assert loaded.stream_window_line_spacing == 1.45
     assert loaded.stream_window_title_font_size == 8
     assert loaded.stream_window_title_gap == 4
-
-
-def test_disable_text_effects_loaded_and_fallback(tmp_path):
-    """字体特效开关：默认 false（保持特效）；合法 true 生效；非布尔回退默认。"""
-    target = tmp_path / "config.json"
-    target.write_text(json.dumps({"disable_text_effects": True}), encoding="utf-8")
-    assert config.load_config(target).disable_text_effects is True
-    for bad in ("yes", 1, None, []):
-        target.write_text(json.dumps({"disable_text_effects": bad}), encoding="utf-8")
-        assert config.load_config(target).disable_text_effects is False, f"{bad!r}"
 
 
 def test_stream_window_size_loaded_and_fallback(tmp_path):
