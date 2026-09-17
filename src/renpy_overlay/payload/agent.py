@@ -369,18 +369,22 @@ def _menu_captions(items):
     return captions
 
 
-def _publish_choice(items, source="display_menu"):
+def _publish_choice(items, source="exports_menu", force=False):
     """菜单出现：上报选项原文列表与触发该菜单的对话上下文。
 
-    以选项文本组合作指纹去重：display_menu 主 hook 与 choice screen 轮询兜底
-    可能先后看到同一菜单，只报第一次；菜单关闭后由轮询清空指纹，同一菜单
-    再次出现时可重新上报。
+    以选项文本组合作指纹去重：choice screen 轮询兜底 20Hz 重复扫同一屏时
+    只报一次；exports_menu 主 hook 以 ``force=True`` 调用 —— 回退重放、从
+    选项节点存档载入等场景会重新执行 menu 语句，必须视为新的选项事件重新
+    上报（否则工具端停留在重放的旧句上、选项被忽略）。菜单关闭后由轮询
+    清空指纹。实测验证的引擎版本与测试游戏见 _install_now 的 exports_menu 注释。
     """
     if not isinstance(items, (list, tuple)):
         return False
     captions = _menu_captions(items)
     fingerprint = tuple(captions)
-    if not captions or fingerprint == _STATE.get("last_choice_captions"):
+    if not captions:
+        return False
+    if not force and fingerprint == _STATE.get("last_choice_captions"):
         return False
     _STATE["last_menu"] = items  # 原始 items 留给结果匹配（见 _publish_choice_pick）
     _STATE["last_choice_captions"] = fingerprint
@@ -437,11 +441,14 @@ def _exports_menu_wrapper(*args, **kwargs):
     """链式包装 renpy.exports.menu：进入时捕获选项，返回时捕获玩家所选。
 
     捕获逻辑全部包在 try/except 里，绝不干扰原调用；原函数的异常必须
-    原样抛回给游戏（那是游戏自己的流程，不能吞）。
+    原样抛回给游戏（那是游戏自己的流程，不能吞）。实测验证的引擎版本与
+    测试游戏见 _install_now 的 exports_menu 注释。
     """
     try:
         items = args[0] if args else kwargs.get("items")
-        _publish_choice(items)
+        # force=True：主 hook 意味着 menu 语句真的执行了（首次/回退重放/存档载入），
+        # 每次都视为新的选项事件重新上报；轮询兑底的指纹去重不受影响
+        _publish_choice(items, force=True)
     except BaseException as exc:
         _note_error("choice_capture", exc)
     prev = _STATE.get("exports_menu_prev")
@@ -467,9 +474,10 @@ def _restore_exports_menu():
 def _scan_choice_screen():
     """轮询兜底：从 choice screen 的 scope 读取选项并上报。
 
-    覆盖两类场景：display_menu 替换未生效（某些版本的 renpy 命名空间不含
-    该 re-export，或被调用方绕过），以及直接从停在选项节点的存档载入。
-    游戏自定义 choice screen 名时本兜底失效，依赖 display_menu 主 hook。
+    覆盖两类场景：exports_menu 替换未生效（如实测的 Ren'Py 8.2.1 中 renpy
+    命名空间不含 display_menu/menu 的 re-export，或被调用方绕过），以及直接从
+    停在选项节点的存档载入。游戏自定义 choice screen 名时本兜底失效，依赖
+    exports_menu 主 hook。
 
     返回 True 表示菜单当前在屏；不在屏时清空指纹，允许同一菜单下次出现时
     重新上报。同一菜单在屏期间靠 _publish_choice 的指纹去重不重复上报。
@@ -545,11 +553,14 @@ def _install_now():
         except BaseException as exc:
             _note_error("say_arguments_callback", exc)
 
-        # 分支选项：Ren'Py 8.2 实测（Sicae）中 menu 语句经 Menu.execute 调用
-        # renpy.exports.menu(choices, ...)（唯一入口，返回值即所选 value）；
-        # renpy 命名空间无 display_menu/menu 的 re-export，renpy/display/menu.py
-        # 也不存在 —— 因此直接替换 renpy.exports 模块上的 menu；替换未生效或
-        # 被绕过的场景（如从选项节点存档载入）由轮询兑底（_scan_choice_screen）覆盖。
+        # 分支选项：已实测验证读取 —— Ren'Py 8.2.1.24030407（脚本版本 (8, 2, 1)，
+        # 构建于 2025-07-06，Python 3.9.10 / x64），测试游戏 Sicae-Ep.7。该版本中
+        # menu 语句经 Menu.execute 调用 renpy.exports.menu(choices, ...)（唯一入口，
+        # 返回值即所选 value）；renpy 命名空间无 display_menu/menu 的 re-export，
+        # renpy/display/menu.py 也不存在 —— 因此直接替换 renpy.exports 模块上的
+        # menu；替换未生效或被绕过的场景（如从选项节点存档载入）由轮询兜底
+        # （_scan_choice_screen）覆盖。更早/更晚版本未实测，以 Hook 层日志中的
+        # exports_menu 是否存在为准。
         hooked = False
         exports_menu = getattr(renpy.exports, "menu", None)
         if callable(exports_menu):

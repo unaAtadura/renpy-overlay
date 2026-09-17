@@ -12,6 +12,7 @@ from renpy_overlay.stream_window import (
     MASK_PAD_X,
     MASK_PAD_Y,
     body_mask_bands,
+    choice_translation_text,
     compute_geometry,
     pair_layout,
     pair_offset_from_body,
@@ -187,3 +188,15 @@ def test_body_mask_bands_empty_and_streaming_partial():
     assert body_mask_bands([], line_h=20.0, box_h=16.0) == []
     bands = body_mask_bands([(1, 24.0, 8.0)], line_h=20.0, box_h=16.0)
     assert len(bands) == 1  # 仅第 1 行有蒙版，未出现内容的行不提前覆盖
+
+
+def test_choice_translation_text_numbered_lines():
+    """选项翻译输入：与正文一致的编号逐行拼接（决定翻译键 / 缓存键）。"""
+    text = choice_translation_text(["Offer a handshake", "Just welcome her"])
+    assert text == "1. Offer a handshake\n2. Just welcome her"
+    # 同一菜单组合稳定（重放与存档载入可命中两级缓存）
+    assert text == choice_translation_text(["Offer a handshake", "Just welcome her"])
+
+
+def test_choice_translation_text_empty():
+    assert choice_translation_text([]) == ""

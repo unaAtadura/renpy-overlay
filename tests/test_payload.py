@@ -196,6 +196,19 @@ def test_menu_choice_invalid_inputs_ignored(agent_text):
     assert len(module._STATE["queue"]) == 0
 
 
+def test_menu_choice_replay_reports_again_with_force(agent_text):
+    """回退重放/存档载入同一菜单：exports_menu 主 hook（force=True）每次重新
+    上报；choice screen 轮询兜底保持指纹去重。"""
+    module = _fresh_queue_module(agent_text)
+    items = [("Yes", "True", "y"), ("No", "True", "n")]
+    assert module._publish_choice(items, force=True) is True
+    assert module._publish_choice(items, force=True) is True  # 重放：不被指纹拦截
+    assert len(module._STATE["queue"]) == 2
+    # 轮询兜底路径：同一菜单仍在屏时仍按指纹去重
+    assert module._publish_choice(items, source="choice_screen") is False
+    assert len(module._STATE["queue"]) == 2
+
+
 def test_menu_captions_skips_malformed_items(agent_text):
     """items 中的非三元组元素被跳过，不影响其余选项解析。"""
     module = _load_agent_module(agent_text)

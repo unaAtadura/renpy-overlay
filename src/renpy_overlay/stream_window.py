@@ -193,6 +193,15 @@ def body_mask_bands(
     return bands
 
 
+def choice_translation_text(items: list[str]) -> str:
+    """分支选项的翻译输入：编号逐行拼接（与正文里的编号选项列表一致）。
+
+    以它为翻译键 / 缓存键：同一菜单的选项组合稳定，回退重放与存档载入可
+    命中两级缓存；保留序号让模型输出的译文与选项一一对应。空列表返回空串。
+    """
+    return "\n".join(f"{number}. {item}" for number, item in enumerate(items, 1))
+
+
 class _StreamWindowBase(QWidget):
     """标题窗与正文窗的公共底座：全透明无边框置顶 + 鼠标事件转发给宿主。"""
 
@@ -744,11 +753,11 @@ class StreamOverlayWindow:
     def _handle_choice(self, payload: dict) -> None:
         """分支选项出现：正文整段替换为编号选项列表（打字机呈现），标题显示预览。
 
-        同时把翻译输入（_last_say）对齐到当前选项上下文：choice 事件的
-        who/what 来自游戏内对话历史（即菜单上方的那句话），从停在选项节点的
-        存档直接载入时同样正确，避免沿用上一个会话遗留的无关句子；为空
-        （纯分支点/历史禁用）时保留原值，避免把翻译目标置空。选项事件不改
-        变选项列表本身的展示，也不干扰自动翻译的去重与缓存逻辑。
+        翻译目标切换为选项文本本身（编号逐行拼接，与正文展示一致）：菜单上方
+        那句在菜单出现前通常已被自动翻译链路处理过，若以其为翻译输入会永远
+        命中「该条原文已翻译过」节流（实测：选项场景不产出译文）；存档载入
+        场景下它还会把译文覆盖到选项列表上（实测：界面退回旧句）。选项文本
+        是玩家此刻唯一需要理解的新信息，以它为键可正常走两级缓存与去重。
         """
         items = [
             str(item).strip()
@@ -757,8 +766,12 @@ class StreamOverlayWindow:
         ]
         who = str(payload.get("who") or "").strip()
         what = str(payload.get("what") or "").strip()
-        if what:
-            self._last_say = {"who": who, "what": what}
+        choice_text = choice_translation_text(items)
+        if choice_text:
+            self._last_say = {"who": "", "what": choice_text}
+            # 允许自动翻译重新评估该选项文本：同一菜单重放/载入时缓存命中
+            # 直接上屏，首次出现则发起流式翻译（下个轮询间隔内生效）
+            self._last_translation_input = None
         lines = ([what] if what else []) + [
             f"{number}. {item}" for number, item in enumerate(items, 1)
         ]
@@ -769,11 +782,12 @@ class StreamOverlayWindow:
         else:
             self._update_title("出现选项")
         logger.info(
-            "出现分支选项（%d 项）：%s；翻译上下文：[%s] %s",
+            "出现分支选项（%d 项）：%s；上文上下文：[%s] %s；翻译目标=%d 字",
             len(items),
             " / ".join(items) or "<空>",
             who or "-",
             what[:60],
+            len(choice_text),
         )
 
     def _handle_choice_pick(self, payload: dict) -> None:
