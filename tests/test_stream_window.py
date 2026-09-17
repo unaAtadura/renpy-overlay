@@ -7,7 +7,13 @@
 from __future__ import annotations
 
 from renpy_overlay.overlay import MARGIN, compute_geometry
-from renpy_overlay.stream_window import pair_layout, pair_offset_from_body
+from renpy_overlay.stream_window import (
+    MASK_PAD_X,
+    MASK_PAD_Y,
+    body_mask_bands,
+    pair_layout,
+    pair_offset_from_body,
+)
 
 GAME = (100, 200, 1300, 900)  # 1200 x 700
 TITLE_H = 26
@@ -115,3 +121,25 @@ def test_pair_offset_follows_game_move():
     assert (body[0], body[1]) == (733, 844)  # 随游戏窗口平移 (+400, +400)
     assert title[1] + TITLE_H + GAP == body[1]
     assert title[0] == body[0]
+
+
+def test_body_mask_bands_per_row_with_gaps():
+    """蒙版按行聚合：同行字符一条带，相邻行条带之间留出透明空隙。"""
+    spans = [(0, 24.0, 8.0), (0, 32.0, 8.0), (1, 24.0, 8.0)]
+    bands = body_mask_bands(spans, line_h=20.0, box_h=16.0)
+    assert len(bands) == 2
+    (x0, y0, w0, h0), (x1, y1, w1, h1) = bands
+    # 同一行字符聚合为一条带，水平含内边距
+    assert (x0, w0) == (24.0 - MASK_PAD_X, (40.0 - 24.0) + 2 * MASK_PAD_X)
+    assert (x1, w1) == (24.0 - MASK_PAD_X, 8.0 + 2 * MASK_PAD_X)
+    # 条带高度不超过字形盒高，并向内收出垂直内边距
+    assert h0 == h1 == min(16.0, 20.0) - 2 * MASK_PAD_Y
+    # 相邻行蒙版之间留出透明空隙
+    assert y1 - (y0 + h0) >= 2 * MASK_PAD_Y
+
+
+def test_body_mask_bands_empty_and_streaming_partial():
+    """无文字时无蒙版；打字机中途只覆盖已出现字符所在的行。"""
+    assert body_mask_bands([], line_h=20.0, box_h=16.0) == []
+    bands = body_mask_bands([(1, 24.0, 8.0)], line_h=20.0, box_h=16.0)
+    assert len(bands) == 1  # 仅第 1 行有蒙版，未出现内容的行不提前覆盖

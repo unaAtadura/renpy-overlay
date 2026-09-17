@@ -74,6 +74,14 @@ TITLE_MARGIN_X = 16.0  # 标题文本左起点（逻辑像素）
 TITLE_GLOW_FACTOR = 1.7  # 标题窗高度中为辉光预留的字号倍数（上下各 0.85）
 BODY_FILL_COLOR = "#ADD8E6"  # 正文统一淡蓝色填充（标题窗保持霓虹渐变）
 
+#: 文字背后的半透明黑色蒙版（提升游戏画面上的对比度）：仅覆盖有文字的行区域，
+#: 行距区域保持透明；alpha 取 110/255 ≈ 43%（可读性与遮挡感的平衡取值）
+MASK_COLOR = "#000000"
+MASK_ALPHA = 110
+MASK_PAD_X = 6.0  # 条带水平内边距：文字与蒙版边缘不直接贴合
+MASK_PAD_Y = 3.0  # 条带垂直内收：保证相邻两行蒙版之间留出空隙
+MASK_RADIUS = 4.0  # 条带圆角半径
+
 # 三套霓虹渐变配色（仅标题窗使用），按字符轮换（ord(ch) % 3）
 PALETTES: tuple[tuple[tuple[float, str], ...], ...] = (
     ((0.00, "#FFF7B8"), (0.45, "#FFD54F"), (0.75, "#FF8A3D"), (1.00, "#FF3D77")),
@@ -113,6 +121,39 @@ def pair_offset_from_body(
     抽成纯函数便于离线验证两套逻辑参照系一致（见 ``tests/test_stream_window.py``）。
     """
     return (body_xy[0] - game_xy[0], body_xy[1] - title_h - gap - game_xy[1])
+
+
+def body_mask_bands(
+    spans: list[tuple[int, float, float]],
+    line_h: float,
+    box_h: float,
+) -> list[tuple[float, float, float, float]]:
+    """按行聚合已排版字符，返回正文蒙版条带矩形 ``(x, y, w, h)``（内容坐标系）。
+
+    ``spans`` 为 ``(行号, 字符 x 起点, 字符前进宽)`` 列表；条带只覆盖实际有
+    文字的行（打字机过程中天然只盖住已出现的字符），高度基于
+    ``min(字形盒高, 行高)`` 并向内收 ``MASK_PAD_Y``，保证相邻行蒙版之间留出
+    透明空隙。抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
+    """
+    if not spans:
+        return []
+    band_h = max(1.0, min(box_h, line_h) - 2 * MASK_PAD_Y)
+    rows: dict[int, list[float]] = {}
+    for row, x, advance in spans:
+        span = rows.get(row)
+        if span is None:
+            rows[row] = [x, x + advance]
+        else:
+            span[0] = min(span[0], x)
+            span[1] = max(span[1], x + advance)
+    bands: list[tuple[float, float, float, float]] = []
+    for row in sorted(rows):
+        x0, x1 = rows[row]
+        center_y = BODY_MARGIN + row * line_h + box_h / 2.0
+        bands.append(
+            (x0 - MASK_PAD_X, center_y - band_h / 2.0, (x1 - x0) + 2 * MASK_PAD_X, band_h)
+        )
+    return bands
 
 
 class _SpriteBaker:
@@ -293,6 +334,21 @@ class ArtTitleWindow(_ArtWindow):
         fm = self._baker.fm
         box_h = fm.height()
         center_y = (self.height() - box_h) / 2.0 + box_h / 2.0  # 单行垂直居中
+        # 蒙版：覆盖整行文字范围（单行，无相邻行间隙问题），画在字符之下
+        first_x = self._layout[0][1]
+        last_ch, last_x = self._layout[-1]
+        band_w = (last_x + fm.horizontalAdvance(last_ch)) - first_x + 2 * MASK_PAD_X
+        band_h = box_h + 2 * MASK_PAD_Y
+        mask = QColor(MASK_COLOR)
+        mask.setAlpha(MASK_ALPHA)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(mask)
+        painter.drawRoundedRect(
+            QRectF(first_x - MASK_PAD_X, center_y - band_h / 2.0, band_w, band_h),
+            MASK_RADIUS,
+            MASK_RADIUS,
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         for ch, x in self._layout:
             entry = self._baker.sprite(ch)
             if entry is None:
@@ -309,14 +365,17 @@ class ArtTitleWindow(_ArtWindow):
 class _Glyph:
     """一个已排版字符（坐标为窗口内容坐标系，不含滚动偏移）。"""
 
-    __slots__ = ("ch", "x", "baseline", "advance", "spawn")
+    __slots__ = ("ch", "x", "baseline", "advance", "spawn", "row")
 
-    def __init__(self, ch: str, x: float, baseline: float, advance: float) -> None:
+    def __init__(
+        self, ch: str, x: float, baseline: float, advance: float, row: int
+    ) -> None:
         self.ch = ch
         self.x = x
         self.baseline = baseline
         self.advance = advance
         self.spawn = time.monotonic()
+        self.row = row
 
 
 class ArtBodyWindow(_ArtWindow):
@@ -397,7 +456,9 @@ class ArtBodyWindow(_ArtWindow):
         if not self._line_empty and self._line_used + width > self._content_width():
             self._newline()
         baseline = BODY_MARGIN + self._baker.fm.ascent() + self._line * self._line_h
-        self._glyphs.append(_Glyph(ch, BODY_MARGIN + self._line_used, baseline, width))
+        self._glyphs.append(
+            _Glyph(ch, BODY_MARGIN + self._line_used, baseline, width, self._line)
+        )
         self._line_used += width
         self._line_empty = False
 
@@ -433,8 +494,20 @@ class ArtBodyWindow(_ArtWindow):
             self._scroll = self._scroll_target
         painter.translate(0.0, -self._scroll)
 
-        now = time.monotonic()
+        # 蒙版：按已排版字符逐行绘制半透明条带（随滚动/拖动同步，行距区域透明），
+        # 画在字符精灵之下；打字机过程中只覆盖已出现字符所在的行
         fm = self._baker.fm
+        spans = [(glyph.row, glyph.x, glyph.advance) for glyph in self._glyphs]
+        if spans:
+            mask = QColor(MASK_COLOR)
+            mask.setAlpha(MASK_ALPHA)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(mask)
+            for x, y, w, h in body_mask_bands(spans, self._line_h, fm.height()):
+                painter.drawRoundedRect(QRectF(x, y, w, h), MASK_RADIUS, MASK_RADIUS)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        now = time.monotonic()
         ascent = fm.ascent()
         height = fm.height()
         c1, c3 = 1.70158, 2.70158  # easeOutBack 参数（弹出时轻微过冲）
