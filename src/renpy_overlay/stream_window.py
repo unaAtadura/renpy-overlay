@@ -751,13 +751,13 @@ class StreamOverlayWindow:
         self._body_window.feed_text(text)
 
     def _handle_choice(self, payload: dict) -> None:
-        """分支选项出现：正文整段替换为编号选项列表（打字机呈现），标题显示预览。
+        """分支选项出现：标题显示选项预览，翻译目标切换为选项文本本身。
 
-        翻译目标切换为选项文本本身（编号逐行拼接，与正文展示一致）：菜单上方
-        那句在菜单出现前通常已被自动翻译链路处理过，若以其为翻译输入会永远
-        命中「该条原文已翻译过」节流（实测：选项场景不产出译文）；存档载入
-        场景下它还会把译文覆盖到选项列表上（实测：界面退回旧句）。选项文本
-        是玩家此刻唯一需要理解的新信息，以它为键可正常走两级缓存与去重。
+        正文展示与对话原文同受 ``show_original_text`` 约束：为 true 时整段替换
+        为「上文 + 编号选项列表」（打字机呈现）；为 false 时选项原文不刷新到
+        正文（正文保持上一条内容），但标题预览、翻译目标（选项文本编号拼接，
+        兼作缓存键）与去重重置照常进行 —— 玩家仍能拿到选项译文，选择后的
+        「→ 已选择：…」提示也不受影响。
         """
         items = [
             str(item).strip()
@@ -772,15 +772,22 @@ class StreamOverlayWindow:
             # 允许自动翻译重新评估该选项文本：同一菜单重放/载入时缓存命中
             # 直接上屏，首次出现则发起流式翻译（下个轮询间隔内生效）
             self._last_translation_input = None
-        lines = ([what] if what else []) + [
-            f"{number}. {item}" for number, item in enumerate(items, 1)
-        ]
-        if any(line.strip() for line in lines):
-            self._display_text("\n".join(lines) + "\n")
+        if self._config.show_original_text:
+            lines = ([what] if what else []) + [
+                f"{number}. {item}" for number, item in enumerate(items, 1)
+            ]
+            if any(line.strip() for line in lines):
+                self._display_text("\n".join(lines) + "\n")
         if items:
             self._update_title("选项：" + " / ".join(items))
         else:
             self._update_title("出现选项")
+        if not self._config.show_original_text:
+            logger.debug(
+                "已捕获分支选项（show_original_text=false，正文区不更新）："
+                "%s",
+                " / ".join(items) or "<空>",
+            )
         logger.info(
             "出现分支选项（%d 项）：%s；上文上下文：[%s] %s；翻译目标=%d 字",
             len(items),
