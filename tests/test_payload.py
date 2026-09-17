@@ -128,6 +128,161 @@ def test_agent_never_imports_tool_side_modules(agent_text):
             assert (node.module or "").split(".")[0] not in forbidden
 
 
+# ------------------------------------------------- 分支选项捕获（离线 exec）
+
+
+def _load_agent_module(agent_text: str):
+    """把 agent 源码 exec 到独立命名空间：顶层只依赖标准库，可离线执行纯逻辑。"""
+    import types
+
+    module = types.ModuleType("agent_under_test")
+    module.__dict__["__name__"] = "agent_under_test"
+    exec(compile(agent_text, "agent.py", "exec"), module.__dict__)
+    return module
+
+
+def _fresh_queue_module(agent_text: str):
+    import collections
+
+    module = _load_agent_module(agent_text)
+    module._STATE["queue"] = collections.deque()
+    return module
+
+
+def test_menu_choice_capture_roundtrip(agent_text):
+    """选项出现上报 items 与上下文；玩家所选（8.x 形态：value 在三元组第三位）
+    映射回序号与文本。"""
+    module = _fresh_queue_module(agent_text)
+    # Ren'Py 8.x menu_actions=True：Menu.execute 传入 (label, condition, value)
+    items = [("Accept", "True", "label_a"), ("Reject", "True", "label_b")]
+    assert module._publish_choice(items) is True
+    shown = module._STATE["queue"][-1]
+    assert shown["t"] == "choice"
+    assert shown["items"] == ["Accept", "Reject"]
+    # 本机无 renpy：_scan_history 降级为空上下文
+    assert shown["who"] == "" and shown["what"] == ""
+    assert module._publish_choice_pick("label_b") is True
+    pick = module._STATE["queue"][-1]
+    assert pick["t"] == "choice_pick"
+    assert pick["index"] == 1
+    assert pick["caption"] == "Reject"
+
+
+def test_menu_choice_pick_matches_caption_and_legacy_two_tuple(agent_text):
+    """匹配兼容：caption 匹配、旧二组形态（value 在第二位）也支持。"""
+    module = _fresh_queue_module(agent_text)
+    module._publish_choice([("接受", "yes")])  # 旧二组形态 (label, value)
+    assert module._publish_choice_pick("yes") is True
+    pick = module._STATE["queue"][-1]
+    assert pick["index"] == 0 and pick["caption"] == "接受"
+
+
+def test_menu_choice_pick_unmatched_falls_back_to_caption(agent_text):
+    """返回值与 items 不匹配（版本差异/自定义返回）：降级为仅上报文本。"""
+    module = _fresh_queue_module(agent_text)
+    module._publish_choice([("接受", "True", "a")])
+    assert module._publish_choice_pick("weird-value") is True
+    pick = module._STATE["queue"][-1]
+    assert pick["index"] == -1
+    assert pick["caption"] == "weird-value"
+
+
+def test_menu_choice_invalid_inputs_ignored(agent_text):
+    """非法 items / 菜单被跳过（返回 None）时不上报，不产生噪音消息。"""
+    module = _fresh_queue_module(agent_text)
+    assert module._publish_choice(None) is False
+    assert module._publish_choice("not-a-list") is False
+    assert module._publish_choice_pick(None) is False
+    assert len(module._STATE["queue"]) == 0
+
+
+def test_menu_captions_skips_malformed_items(agent_text):
+    """items 中的非三元组元素被跳过，不影响其余选项解析。"""
+    module = _load_agent_module(agent_text)
+    captions = module._menu_captions(
+        [("选项一", "a", False), "junk", (42,), ("选项二", "b", True)]
+    )
+    assert captions == ["选项一", "选项二"]
+
+
+def test_menu_captions_supports_entry_objects(agent_text):
+    """choice screen 传入的带 caption 属性的条目对象同样可解析。"""
+    import types
+
+    module = _load_agent_module(agent_text)
+    entries = [
+        types.SimpleNamespace(caption="Yes", action="a", chosen=False),
+        types.SimpleNamespace(caption="No", action="b", chosen=True),
+    ]
+    assert module._menu_captions(entries) == ["Yes", "No"]
+
+
+def test_exports_menu_wrapper_captures_and_forwards(agent_text):
+    """包装器：先上报 choice，再透传原调用，返回后上报 choice_pick。"""
+    module = _fresh_queue_module(agent_text)
+    calls = []
+
+    def fake_menu(items, set_expr=None, **kwargs):
+        calls.append((items, set_expr, kwargs))
+        return "label_b"
+
+    module._STATE["exports_menu_prev"] = fake_menu
+    items = [("Yes", "True", "label_a"), ("No", "True", "label_b")]
+    result = module._exports_menu_wrapper(items, None)
+    assert result == "label_b"
+    assert calls == [(items, None, {})]
+    kinds = [message["t"] for message in module._STATE["queue"]]
+    assert kinds == ["choice", "choice_pick"]
+    pick = module._STATE["queue"][-1]
+    assert pick["index"] == 1 and pick["caption"] == "No"
+
+
+def test_exports_menu_wrapper_propagates_game_exception(agent_text):
+    """原函数异常必须原样抛回游戏；异常路径不产生 choice_pick。"""
+    module = _fresh_queue_module(agent_text)
+
+    def boom(items):
+        raise RuntimeError("game error")
+
+    module._STATE["exports_menu_prev"] = boom
+    with pytest.raises(RuntimeError, match="game error"):
+        module._exports_menu_wrapper([("A", "True", "a")])
+    assert [message["t"] for message in module._STATE["queue"]] == ["choice"]
+
+
+def test_menu_choice_screen_fallback_poll(agent_text, monkeypatch):
+    """轮询兜底：choice screen 在屏时从 scope 读 items 上报；同一菜单不重复报；
+    菜单关闭后清指纹，同一菜单再次出现可重新上报。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    screen = types.SimpleNamespace(
+        scope={"items": [("Yes", "y", False), ("No", "n", False)]}
+    )
+    fake = types.SimpleNamespace(get_screen=lambda name: screen)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._scan_choice_screen() is True
+    shown = module._STATE["queue"][-1]
+    assert shown["t"] == "choice" and shown["items"] == ["Yes", "No"]
+    assert shown["src"] == "choice_screen"
+
+    # 同一菜单仍在屏：返回值仍为 True（表示在屏），但指纹去重不重复上报
+    assert module._scan_choice_screen() is True
+    assert len(module._STATE["queue"]) == 1
+
+    # 菜单关闭：清指纹
+    fake.get_screen = lambda name: None
+    assert module._scan_choice_screen() is False
+
+    # 同一菜单再次出现：可重新上报
+    module._STATE["queue"].clear()
+    fake.get_screen = lambda name: screen
+    assert module._scan_choice_screen() is True
+    assert module._STATE["queue"][-1]["t"] == "choice"
+
+
 # ------------------------------------------------------------------ 引导模板
 
 

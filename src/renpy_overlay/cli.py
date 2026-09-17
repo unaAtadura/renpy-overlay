@@ -54,6 +54,8 @@ EPILOG = """\
   缓存大小    config.json 的 translation_cache_size_kb（默认 256KB）控制内存缓存上限
   API 配置    config.json 的 api_base_url / api_timeout / model / system_prompt / api_key / enable_thinking / reasoning_effort
   查看全文    窗口只显示最新一条对话；滚轮上翻可回看当前对话全文，回到底部恢复跟随
+  分支选项    注入代理同时捕获剧情分支选项（menu choice）：出现时正文显示编号选项，
+              选择后提示玩家所选；控制台模式下同步打印
   流式窗样式  config.json 的 stream_window_width/height（默认 1760x200，正文窗尺寸）/
               stream_window_font_size（默认 14）/ stream_window_line_spacing（默认 1.45）/
               stream_window_title_font_size（默认 8）/ stream_window_title_gap（默认 4）
@@ -248,6 +250,24 @@ class Session:
                 print(f"[{who or '-'}] {what}")
             if self.overlay is not None:
                 self.overlay.push_say(who, what, source=str(message.get("src") or ""))
+        elif kind == "choice":
+            items = [str(item) for item in message.get("items") or []]
+            if self.args.no_overlay:
+                printable = "  ".join(f"{idx}.{item}" for idx, item in enumerate(items, 1))
+                print(f"[选项] {printable}" if printable else "[选项]（空）")
+            if self.overlay is not None:
+                self.overlay.push_choice(
+                    items,
+                    who=str(message.get("who") or ""),
+                    what=str(message.get("what") or ""),
+                )
+        elif kind == "choice_pick":
+            index = message.get("index", -1)
+            caption = str(message.get("caption") or "")
+            if self.args.no_overlay:
+                print(f"[选择] {caption or '<未知>'}")
+            if self.overlay is not None:
+                self.overlay.push_choice_pick(index, caption)
         elif kind == "log":
             log_from_game(str(message.get("level", "info")), str(message.get("msg", "")))
         elif kind == "hooks":

@@ -19,9 +19,12 @@
 - ``config.all_character_callbacks``：官方角色回调，``event == "begin"`` 时
   kwargs 里带完整的 ``what``，是最可靠的来源。
 - ``config.say_arguments_callback``：链式包装以取得当前发言角色对象。
+- ``renpy.exports.menu``：链式包装，所有 menu 语句（分支选项）的唯一入口 ——
+  进入时捕获选项原文（玩家当前语言下所见文本）与触发对话上下文，返回时
+  捕获玩家所选；游戏自定义 choice screen 也经过它。
 - ``say`` 界面作用域：``renpy.get_screen("say").scope["who" / "what"]``。
 - 对话历史：``renpy.store._history_list[-1].who / .what``。
-- 当前语句：``renpy.game.context().current`` 上的 ``who`` / ``what``。
+- 当前语句：``renpy.game.context().current`` 上的 ``who / what``。
 """
 
 import json
@@ -71,6 +74,9 @@ _STATE = {
     "last_heartbeat": 0.0,
     "say_arguments_prev": None,
     "say_arguments_had": False,
+    "exports_menu_prev": None,
+    "last_menu": None,
+    "last_choice_captions": None,
 }
 
 _TAG_RE = re.compile(r"\{[^{}]*\}")
@@ -204,7 +210,8 @@ def _scan_history():
         import renpy
     except BaseException:
         return None
-    history = getattr(renpy.store, "_history_list", None)
+    # 双层 getattr：store 属性缺失（如被 mock 的不完整模块）时也不能抛
+    history = getattr(getattr(renpy, "store", None), "_history_list", None)
     if not history:
         return None
     try:
@@ -322,9 +329,174 @@ def _periodic_callback():
                 continue
             _publish(found[0], found[1], "poll")
             break
+        _scan_choice_screen()
         _ensure_installed()
     except BaseException as exc:
         _note_error("periodic", exc)
+
+
+# ------------------------------------------------------------------ 分支选项捕获
+
+
+def _menu_entry_caption(item):
+    """取单个选项条目的显示文本。
+
+    兼容两种形态：display_menu 原始 items 的 ``(caption, label, chosen)``
+    三元组（第二项语义在版本间有差异，不用；长度不足 2 的畸形项跳过，
+    与 _publish_choice_pick 的防御一致），以及 choice screen 传入的
+    带 ``caption`` 属性的条目对象。
+    """
+    try:
+        if isinstance(item, (list, tuple)):
+            return _clean_text(_to_text(item[0])) if len(item) >= 2 else ""
+        caption = getattr(item, "caption", None)
+        if caption is None:
+            return ""
+        return _clean_text(_to_text(caption))
+    except BaseException:
+        return ""
+
+
+def _menu_captions(items):
+    """解析 display_menu 的 items，返回玩家可见的选项文本列表（清洗后）。"""
+    captions = []
+    if not isinstance(items, (list, tuple)):
+        return captions
+    for item in items:
+        caption = _menu_entry_caption(item)
+        if caption:
+            captions.append(caption)
+    return captions
+
+
+def _publish_choice(items, source="display_menu"):
+    """菜单出现：上报选项原文列表与触发该菜单的对话上下文。
+
+    以选项文本组合作指纹去重：display_menu 主 hook 与 choice screen 轮询兜底
+    可能先后看到同一菜单，只报第一次；菜单关闭后由轮询清空指纹，同一菜单
+    再次出现时可重新上报。
+    """
+    if not isinstance(items, (list, tuple)):
+        return False
+    captions = _menu_captions(items)
+    fingerprint = tuple(captions)
+    if not captions or fingerprint == _STATE.get("last_choice_captions"):
+        return False
+    _STATE["last_menu"] = items  # 原始 items 留给结果匹配（见 _publish_choice_pick）
+    _STATE["last_choice_captions"] = fingerprint
+    context = _scan_history() or ("", "")
+    _STATE["captured"] = _STATE["captured"] + 1
+    return _emit(
+        {
+            "t": "choice",
+            "items": captions,
+            "who": _clean_text(context[0]),
+            "what": _clean_text(context[1]),
+            "src": source,
+            "ts": time.time(),
+        }
+    )
+
+
+def _publish_choice_pick(result, source="exports_menu"):
+    """菜单关闭：把玩家所选（exports.menu 的返回值）映射回选项序号与文本并上报。
+
+    返回值是选项的 value：8.x menu_actions 形态在三元组第三位、旧二组形态在
+    第二位，两处都尝试匹配；都匹配不上时降级为仅上报返回值文本。
+    """
+    if result is None:
+        return False
+    items = _STATE.get("last_menu")
+    index = -1
+    caption = ""
+    if isinstance(items, (list, tuple)):
+        text = _clean_text(_to_text(result))
+        for position, item in enumerate(items):
+            if not isinstance(item, (list, tuple)):
+                continue
+            entry_caption = _menu_entry_caption(item)
+            entry_values = [item[1], item[-1]] if len(item) >= 3 else [item[1]] if len(item) >= 2 else []
+            if result in entry_values or (entry_caption and entry_caption == text):
+                index = position
+                caption = entry_caption
+                break
+    if index < 0:
+        caption = _clean_text(_to_text(result))
+    return _emit(
+        {
+            "t": "choice_pick",
+            "index": index,
+            "caption": caption,
+            "src": source,
+            "ts": time.time(),
+        }
+    )
+
+
+def _exports_menu_wrapper(*args, **kwargs):
+    """链式包装 renpy.exports.menu：进入时捕获选项，返回时捕获玩家所选。
+
+    捕获逻辑全部包在 try/except 里，绝不干扰原调用；原函数的异常必须
+    原样抛回给游戏（那是游戏自己的流程，不能吞）。
+    """
+    try:
+        items = args[0] if args else kwargs.get("items")
+        _publish_choice(items)
+    except BaseException as exc:
+        _note_error("choice_capture", exc)
+    prev = _STATE.get("exports_menu_prev")
+    if not callable(prev):
+        return None  # 未注册（不应发生）：不调用原函数，也不产生 pick
+    result = prev(*args, **kwargs)
+    try:
+        _publish_choice_pick(result)
+    except BaseException as exc:
+        _note_error("choice_pick", exc)
+    return result
+
+
+def _restore_exports_menu():
+    try:
+        import renpy
+
+        renpy.exports.menu = _STATE["exports_menu_prev"]
+    except BaseException as exc:
+        _note_error("restore_exports_menu", exc)
+
+
+def _scan_choice_screen():
+    """轮询兜底：从 choice screen 的 scope 读取选项并上报。
+
+    覆盖两类场景：display_menu 替换未生效（某些版本的 renpy 命名空间不含
+    该 re-export，或被调用方绕过），以及直接从停在选项节点的存档载入。
+    游戏自定义 choice screen 名时本兜底失效，依赖 display_menu 主 hook。
+
+    返回 True 表示菜单当前在屏；不在屏时清空指纹，允许同一菜单下次出现时
+    重新上报。同一菜单在屏期间靠 _publish_choice 的指纹去重不重复上报。
+    """
+    try:
+        import renpy
+    except BaseException:
+        return False
+    getter = getattr(renpy, "get_screen", None)
+    if not callable(getter):
+        return False
+    try:
+        screen = getter("choice")
+    except BaseException:
+        screen = None
+    if screen is None:
+        _STATE["last_choice_captions"] = None  # 菜单已关闭：清指纹
+        return False
+    scope = getattr(screen, "scope", None)
+    try:
+        items = scope.get("items") if scope is not None and hasattr(scope, "get") else None
+    except BaseException:
+        items = None
+    if not items:
+        return False
+    _publish_choice(items, source="choice_screen")
+    return True
 
 
 # ------------------------------------------------------------------ Hook 安装
@@ -372,6 +544,24 @@ def _install_now():
             layers.append("say_arguments_callback")
         except BaseException as exc:
             _note_error("say_arguments_callback", exc)
+
+        # 分支选项：Ren'Py 8.2 实测（Sicae）中 menu 语句经 Menu.execute 调用
+        # renpy.exports.menu(choices, ...)（唯一入口，返回值即所选 value）；
+        # renpy 命名空间无 display_menu/menu 的 re-export，renpy/display/menu.py
+        # 也不存在 —— 因此直接替换 renpy.exports 模块上的 menu；替换未生效或
+        # 被绕过的场景（如从选项节点存档载入）由轮询兑底（_scan_choice_screen）覆盖。
+        hooked = False
+        exports_menu = getattr(renpy.exports, "menu", None)
+        if callable(exports_menu):
+            try:
+                _STATE["exports_menu_prev"] = exports_menu
+                renpy.exports.menu = _exports_menu_wrapper
+                _STATE["remove_hooks"].append(_restore_exports_menu)
+                hooked = True
+            except BaseException as exc:
+                _note_error("exports_menu", exc)
+        if hooked:
+            layers.append("exports_menu")
 
         exit_callbacks = getattr(config, "python_exit_callbacks", None)
         if isinstance(exit_callbacks, list):
@@ -582,6 +772,9 @@ def start(config_json=None):
     _STATE["last_what"] = ""
     _STATE["last_who"] = ""
     _STATE["who_hint"] = ""
+    _STATE["exports_menu_prev"] = None
+    _STATE["last_menu"] = None
+    _STATE["last_choice_captions"] = None
     _STATE["started_at"] = time.time()
 
     thread = threading.Thread(target=_sender_loop, name="renpy-overlay-sender")

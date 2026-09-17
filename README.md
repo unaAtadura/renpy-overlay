@@ -57,6 +57,7 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
 | --- | --- | --- |
 | 主 | `config.all_character_callbacks` | 官方角色回调，`event == "begin"` 时 `kwargs["what"]` 是完整对话文本 |
 | 主 | `config.say_arguments_callback` | 链式包装（保留原有值）以取得当前说话角色名 |
+| 主 | `renpy.display_menu` | 链式包装，所有 menu 语句（分支选项）的唯一入口：进入时捕获选项原文与触发对话上下文，返回时捕获玩家所选；游戏自定义 choice screen 也经过它 |
 | 备 | `config.periodic_callbacks` | 约 20Hz 轮询，读 `renpy.get_screen("say").scope` |
 | 备 | 对话历史 | `renpy.store._history_list[-1].who / .what` |
 | 备 | 当前语句 | `renpy.game.context().current` 上的 `who / what` |
@@ -97,6 +98,10 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   `auto_translate_interval`（默认 3 秒）轮询最新游戏原文并自动翻译 —— 同一原文只翻
   一次、在途请求不重复发起；进入锁定需先经过一个完整轮询间隔才会首次触发；
   两级缓存命中时直接上屏；解锁即停用并中止在途（手动单击路径不受影响）；
+- **分支选项捕获**：注入代理同时捕获剧情分支选项（menu choice）—— 选项出现时
+  正文整段替换为编号选项列表（打字机呈现，含触发对话的上文），标题显示选项预览；
+  玩家做出选择后正文追加「→ 已选择：×××」提示；选项事件不影响翻译链路
+  （自动翻译仍只翻对话原文）；控制台模式下同步打印；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；

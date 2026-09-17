@@ -589,6 +589,14 @@ class StreamOverlayWindow:
     def push_say(self, who: str, what: str, source: str = "", ts: float | None = None) -> None:
         self._queue.put(("say", {"who": who, "what": what, "src": source, "ts": ts or time.time()}))
 
+    def push_choice(self, items: list[str], who: str = "", what: str = "") -> None:
+        """分支选项出现（跨线程安全，经队列回主线程展示）。"""
+        self._queue.put(("choice", {"items": list(items), "who": who, "what": what}))
+
+    def push_choice_pick(self, index: int, caption: str) -> None:
+        """玩家做出选择（跨线程安全，经队列回主线程展示）。"""
+        self._queue.put(("choice_pick", {"index": index, "caption": caption}))
+
     def hint(self, text: str) -> None:
         self._queue.put(("hint", text))
 
@@ -671,6 +679,10 @@ class StreamOverlayWindow:
                 kind, payload = self._queue.get_nowait()
                 if kind == "say":
                     self._handle_say(payload)
+                elif kind == "choice":
+                    self._handle_choice(payload)
+                elif kind == "choice_pick":
+                    self._handle_choice_pick(payload)
                 elif kind == "hint":
                     # 正文只保留最新一条内容：提示语同样整段替换显示
                     self._display_text(payload)
@@ -728,6 +740,53 @@ class StreamOverlayWindow:
         self._stream_seq = 0
         self._body_window.begin_stream()
         self._body_window.feed_text(text)
+
+    def _handle_choice(self, payload: dict) -> None:
+        """分支选项出现：正文整段替换为编号选项列表（打字机呈现），标题显示预览。
+
+        同时把翻译输入（_last_say）对齐到当前选项上下文：choice 事件的
+        who/what 来自游戏内对话历史（即菜单上方的那句话），从停在选项节点的
+        存档直接载入时同样正确，避免沿用上一个会话遗留的无关句子；为空
+        （纯分支点/历史禁用）时保留原值，避免把翻译目标置空。选项事件不改
+        变选项列表本身的展示，也不干扰自动翻译的去重与缓存逻辑。
+        """
+        items = [
+            str(item).strip()
+            for item in (payload.get("items") or [])
+            if str(item).strip()
+        ]
+        who = str(payload.get("who") or "").strip()
+        what = str(payload.get("what") or "").strip()
+        if what:
+            self._last_say = {"who": who, "what": what}
+        lines = ([what] if what else []) + [
+            f"{number}. {item}" for number, item in enumerate(items, 1)
+        ]
+        if any(line.strip() for line in lines):
+            self._display_text("\n".join(lines) + "\n")
+        if items:
+            self._update_title("选项：" + " / ".join(items))
+        else:
+            self._update_title("出现选项")
+        logger.info(
+            "出现分支选项（%d 项）：%s；翻译上下文：[%s] %s",
+            len(items),
+            " / ".join(items) or "<空>",
+            who or "-",
+            what[:60],
+        )
+
+    def _handle_choice_pick(self, payload: dict) -> None:
+        """玩家做出选择：正文追加结果提示行，标题同步更新（不清屏）。"""
+        try:
+            index = int(payload.get("index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        caption = str(payload.get("caption") or "").strip()
+        label = f"{index}. {caption}" if index >= 0 and caption else (caption or "未知选项")
+        self._body_window.feed_text(f"→ 已选择：{label}\n")
+        self._update_title(f"已选择：{label}")
+        logger.info("玩家做出选择：%s", label)
 
     def _handle_chunk(self, payload: dict) -> None:
         seq = payload.get("seq")
