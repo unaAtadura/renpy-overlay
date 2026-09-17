@@ -30,7 +30,7 @@ SRC = os.path.join(ROOT, "src")
 EXCLUDES = [
     # 科学计算 / 图像
     "numpy", "scipy", "pandas", "matplotlib", "sympy", "PIL", "cv2", "torch",
-    # 其它 GUI 框架（悬浮窗 / 选择窗用 tkinter 与 PyQt6；PyQt6 由内置 hook 收集）
+    # 其它 GUI 框架（悬浮窗用 PyQt6，内置 hook 收集；选择窗用 tkinter）
     "PyQt5", "PySide2", "PySide6", "wx",
     # 交互式环境与网络库（翻译走标准库 urllib）
     "IPython", "jupyter", "notebook", "requests", "urllib3", "aiohttp", "httpx",
