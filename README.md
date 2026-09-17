@@ -107,6 +107,19 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   正文整段替换为编号选项列表（打字机呈现，含触发对话的上文），标题显示选项预览；
   玩家做出选择后正文追加「→ 已选择：×××」提示；选项事件不影响翻译链路
   （自动翻译仍只翻对话原文）；控制台模式下同步打印；
+- **截图翻译**：标题/正文窗文字处**右键**弹快捷菜单 —— 创建截图窗口（最多 8 个，
+  边框按红橙黄绿青蓝紫黑依次分配；可拖动、八向拉伸、双击锁定）、销毁截图窗口
+  （堆栈式，优先销毁最新）、查看截图历史；双击锁定截图窗后单击即截取该区域，
+  短暂隐藏全部悬浮窗后用 Pillow 截屏，发送 vision 模型识别翻译 —— 始终走 API
+  不检索缓存、同一时刻与单击/自动翻译互斥（存在任意在途翻译则不截图不发请求）；
+  双击解锁截图窗不打断截图翻译，双击解锁流式窗则会中止它；译文显示在正文窗，
+  成功后原图（JPEG Q90）与 ≤10w 像素缩略图存入游戏目录
+  `renpy_overlay_cache/screenshot.db`（不写翻译两级缓存）；失败则清除内存图像
+  并提示「翻译失败」；
+- **截图历史**：常规窗口浏览 `screenshot.db` —— 左上为年/月/日下拉（年范围取自
+  首末记录、日智能平闰年）与首末记录日期标签，左中为缩略图条带（滚轮上滚看
+  早期/下滚看后期、按住左键拖动浏览；中垂线扫到的缩略图停留 1 秒自动选中，
+  左键点击跳过延迟直接选中），左下为选中记录的译文，右侧为原图；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；
@@ -191,6 +204,8 @@ uv run renpy-overlay --pid 12345
 | 按住标题/正文任一窗 + 左键拖动 | 两窗整体联动移动；松开后位置锁定（相对游戏窗口保持） |
 | 左键双击 | 锁定 / 解锁窗口位置（锁定后不响应拖动；双击同时中止在途翻译） |
 | 锁定状态下单击 | 翻译当前对话原文，译文增量流入正文窗（未锁定不触发） |
+| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史 |
+| 截图窗双击 | 锁定/解锁截图窗口（锁定后单击即截图翻译） |
 | 鼠标滚轮（悬浮窗内任意位置） | 上翻回看当前对话全文、回到底部恢复跟随（窗口只显示最新一条） |
 
 启动工具的终端里另有控制台命令：`h`（显隐）、`d`（恢复自动停靠）、`u`（卸载代理）、`s`（状态）、`q`（退出）。
@@ -231,6 +246,8 @@ uv run renpy-overlay --pid 12345
     "stream_window_line_spacing": 1.45, // 流式正文行距倍数（最小 1.0）
     "stream_window_title_font_size": 8, // 流式标题窗字号（像素，最小 6）
     "stream_window_title_gap": 4,     // 标题窗与正文窗间距（像素，非负）
+    "screenshot_compress_percent": 10, // 截图翻译发送 API 前的等比压缩百分比（1~100）
+    "screenshot_model": "",           // 识图模型；空则回退 model（需 vision 多模态模型）
     "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
     "api_timeout": 20.0,              // 请求超时（秒）
     "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个
@@ -322,7 +339,13 @@ uv run ruff check .    # 静态检查
 - `tests/test_translation_cache.py`：分桶共存（同哈希多原文）、桶内覆盖与顺序刷新、
   记录级 FIFO 淘汰（不整桶淘汰）、哈希键稳定性、UTF-8 字节计量、单条超限拒绝；
 - `tests/test_translation_store.py`：数据库创建、增量写入、同原文覆盖、同哈希多原文共存、
-  旧版单主键数据库自动迁移、重启持久化、目录不可建时的降级。
+  旧版单主键数据库自动迁移、重启持久化、目录不可建时的降级；
+- `tests/test_screenshot_processing.py`：宽高比约束（0.10~10.00 白填充）、百分比压缩、
+  ≤10w 像素缩略图、JPEG/base64 往返；
+- `tests/test_screenshot_store.py`：screenshot.db 建库/插入/首末时间戳/升序列表/
+  按位读取与降级；
+- `tests/test_screenshot_vision.py`：vision 请求体（image_url base64、思考模式方言）、
+  译文解析与错误路径（本地 HTTP 桩）；
 
 端到端自测（需要真实游戏）：用 Ren'Py SDK 的 *The Question* 或任一发行版游戏，
 按"快速开始"注入后确认：对话实时上屏且只保留最新一条（旧对话不累积）、拖动悬浮窗
@@ -351,10 +374,19 @@ renpygameread/
 │  ├─ injector.py              # 注入 / 卸载 / 状态查询编排
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
 │  ├─ stream_window.py         # 悬浮窗（PyQt6 全透明双窗口：标题+正文、打字机、拖动/锁定/翻译）
+│  ├─ quick_menu.py            # 右键快捷菜单管理器（截图窗口池 + 后续新功能菜单扩展点）
+│  ├─ screenshot/              # 截图翻译功能包（各窗口相互独立、原子级文件）
+│  │  ├─ capture.py            # Pillow 屏幕截图（物理像素，支持多显示器负坐标）
+│  │  ├─ processing.py         # 纯函数图像处理（宽高比约束/压缩/缩略图/编码）
+│  │  ├─ vision.py             # vision 识别翻译客户端（OpenAI 兼容，urllib）
+│  │  ├─ store.py              # screenshot.db 存取（可降级，仅主线程读写）
+│  │  ├─ window.py             # 单个截图窗口（8 色边框、八向拉伸、双击锁定）
+│  │  ├─ window_visual.py      # 截图窗绘制与边缘检测纯函数
+│  │  └─ history_window.py     # 截图历史浏览窗口（缩略图条带+原图+译文）
 │  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib，支持 SSE 流式）
 │  ├─ translation_cache.py     # 翻译内存缓存（哈希键→(原文,译文)，FIFO，仅主线程读写）
 │  ├─ translation_store.py     # 翻译 SQLite 持久化（游戏目录 renpy_overlay_cache/，可降级）
-│  ├─ config.py                # 本地配置加载（config.json：窗口尺寸 / 自动翻译 / API）
+│  ├─ config.py                # 本地配置加载（config.json：窗口尺寸 / 自动翻译 / API / 截图）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown
 └─ tests/
@@ -367,6 +399,9 @@ renpygameread/
    ├─ test_stream_window.py
    ├─ test_translation_cache.py
    ├─ test_translation_store.py
+   ├─ test_screenshot_processing.py
+   ├─ test_screenshot_store.py
+   ├─ test_screenshot_vision.py
    └─ test_config.py
 ```
 

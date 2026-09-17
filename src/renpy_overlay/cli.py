@@ -59,6 +59,14 @@ EPILOG = """\
   流式窗样式  config.json 的 stream_window_width/height（默认 1760x200，正文窗尺寸）/
               stream_window_font_size（默认 14）/ stream_window_line_spacing（默认 1.45）/
               stream_window_title_font_size（默认 8）/ stream_window_title_gap（默认 4）
+  截图翻译    标题/正文窗文字处右键弹快捷菜单：创建截图窗口（最多 8 个，边框按
+              红橙黄绿青蓝紫黑依次分配）、销毁截图窗口（堆栈式，优先最新）、
+              查看截图历史（浏览 screenshot.db，中垂线选中缩略图看译文与原图）。
+              双击锁定截图窗后单击即截取该区域并发 vision 模型识别翻译
+              （始终走 API 不查缓存；成功显示在正文窗并存入 screenshot.db）
+  截图配置    config.json 的 screenshot_compress_percent（发送 API 前等比压缩
+              百分比，默认 10）/ screenshot_model（识图模型，空则回退 model，
+              需 vision 多模态模型）
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
 

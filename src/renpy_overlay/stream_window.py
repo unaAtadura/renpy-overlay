@@ -39,6 +39,18 @@ from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import config, translation_store, translator, win32api
+from .quick_menu import QuickMenu
+from .screenshot import (
+    ScreenshotHistoryWindow,
+    capture_region,
+    constrain_aspect_ratio,
+    encode_jpeg_base64,
+    encode_jpeg_bytes,
+    make_thumbnail,
+    open_store,
+    scale_to_percent,
+)
+from .screenshot.vision import translate_image
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -48,6 +60,9 @@ FOLLOW_INTERVAL_MS = 200
 CLICK_DELAY_MS = win32api.double_click_time_ms() + 60
 CLICK_MOVE_TOLERANCE = 4
 CLICK_SUPPRESS_SECONDS = 0.5
+#: SW_HIDE 返回后等待 DWM 合成移除旧帧的时间（秒）：约 10 个 60Hz 合成周期，
+#  保证截图不会抓到刚隐藏的悬浮窗残影（否则与流式窗重叠时会把译文截进图里）
+SCREENSHOT_DWM_SETTLE_SECONDS = 0.18
 
 #: 视觉参数：取值沿用参考项目的已验证方案，按对话窗缩小边距
 BODY_MARGIN = 24.0  # 正文窗文本边距（逻辑像素，参考项目全屏窗用 64）
@@ -249,6 +264,11 @@ class _StreamWindowBase(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self._host.on_window_double_click(self, event)
+        event.accept()
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """右键（标题/正文文字处）：转发宿主弹快捷菜单（创建/销毁截图窗等）。"""
+        self._host.on_window_context_menu(self, event)
         event.accept()
 
 
@@ -572,6 +592,15 @@ class StreamOverlayWindow:
             max_bytes=self._config.translation_cache_size_kb * 1024
         )
         self._translation_store = translation_store.open_store(game_dir or None)
+        # 截图翻译：独立数据库 + 快捷菜单（窗口池），历史窗口单例惰性创建
+        self._screenshot_store = open_store(game_dir or None)
+        self._quick_menu = QuickMenu(
+            on_capture_click=self.request_screenshot_translation,
+            on_open_history=self._open_history,
+        )
+        self._history_window: ScreenshotHistoryWindow | None = None
+        self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
+        self._context_menu_open = False  # 右键菜单打开期间暂停周期性置顶重申
         self._last_translation_input: str | None = None
         self._lock_started_at = 0.0
         self._auto_skip_reason: str | None = None
@@ -668,6 +697,16 @@ class StreamOverlayWindow:
         if self._translation_store is not None:
             self._translation_store.close()
             self._translation_store = None
+        if self._screenshot_store is not None:
+            self._screenshot_store.close()
+            self._screenshot_store = None
+        self._quick_menu.close_all()
+        if self._history_window is not None:
+            try:
+                self._history_window.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._history_window = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -701,6 +740,10 @@ class StreamOverlayWindow:
                     self._handle_chunk(payload)
                 elif kind == "translation":
                     self._handle_translation(payload)
+                elif kind == "screenshot_done":
+                    self._handle_screenshot_done(payload)
+                elif kind == "screenshot_fail":
+                    self._handle_screenshot_fail(payload)
                 elif kind == "cmd":
                     self._handle_command(payload)
         except queue.Empty:
@@ -861,6 +904,9 @@ class StreamOverlayWindow:
             logger.exception("跟随游戏窗口时出错")
 
     def _follow_once(self) -> None:
+        if self._screenshot_suppress:
+            # 截图瞬间：不解析目标、不重新显示，防止 200ms 跟随循环把隐藏的窗口拉回
+            return
         hwnd = self._resolve_target()
         if not hwnd:
             self._update_title(f"等待 pid={self.target_pid} 的游戏窗口…")
@@ -898,9 +944,12 @@ class StreamOverlayWindow:
 
     def _reassert_topmost(self) -> None:
         """把两窗重新压回最顶层（不改位置/尺寸/焦点）；日志节流避免刷屏。"""
+        if self._context_menu_open:
+            return  # 右键菜单打开期间不与菜单竞争 TOPMOST 层组的顶部位置
         try:
             win32api.set_topmost(self._body_hwnd)
             win32api.set_topmost(self._title_hwnd)
+            self._quick_menu.reassert_topmost()  # 截图窗锁定态同样对抗独占全屏覆盖
         except Exception:  # pragma: no cover - pywin32 缺失等
             return
         now = time.time()
@@ -1182,6 +1231,186 @@ class StreamOverlayWindow:
         if stop is not None:
             stop.set()
         logger.info("已中止在途翻译（%s）：结果作废，界面保持当前状态", reason)
+
+    # -- 截图翻译（右键菜单创建截图窗；锁定态单击触发；始终走 API 不检索缓存）
+
+    def on_window_context_menu(self, window: QWidget, event) -> None:
+        """右键转发终点：菜单构建与动作分发全部在 QuickMenu 内。
+
+        exec 阻塞期间置位 ``_context_menu_open``，暂停锁定态每 200ms 的
+        周期性置顶重申 —— 否则流式窗会被 reassert 到 TOPMOST 层组顶部，
+        反过来盖住刚弹出的菜单。
+        """
+        self._context_menu_open = True
+        try:
+            self._quick_menu.show_context_menu(event.globalPos())
+        finally:
+            self._context_menu_open = False
+            self._reassert_topmost()  # 菜单关闭后立即恢复两窗的置顶层级
+
+    def _open_history(self) -> None:
+        """打开截图历史窗口（单例复用，每次刷新数据）。"""
+        if self._screenshot_store is None:
+            self.hint("截图历史不可用：未定位到游戏目录或数据库初始化失败。")
+            return
+        if self._history_window is None:
+            self._history_window = ScreenshotHistoryWindow(self._screenshot_store)
+        self._history_window.refresh()
+        self._history_window.show()
+        self._history_window.raise_()
+        self._history_window.activateWindow()
+        logger.info("已打开截图历史窗口")
+
+    def request_screenshot_translation(self, window) -> None:
+        """截图窗口锁定态单击（主线程）：互斥检查 → 隐藏 → 截图 → 恢复 → 后台翻译。
+
+        与单击/自动翻译共用 ``_translating`` 互斥：存在任意在途翻译则既不
+        调 API 也不截图（防止译文被意外覆盖）。截图始终走 API、不检索缓存，
+        成功不写两级缓存（需求）。
+        """
+        if self._closed:
+            return
+        if self._translating:
+            logger.info("已有翻译请求在途（单击/自动/截图），忽略本次截图翻译")
+            return
+        try:
+            bbox = win32api.window_rect(window.hwnd)
+        except Exception:  # pragma: no cover - 窗口销毁竞态
+            logger.warning("无法定位截图窗口区域，忽略本次截图翻译")
+            return
+        self._translating = True
+        self._translation_seq += 1
+        seq = self._translation_seq
+        stop = threading.Event()
+        self._current_stop = stop
+        self._update_title("截图翻译中，翻译速度会更慢...")
+        # 截图时短暂隐藏截图窗口与流式窗口，截图后发送 API 前恢复（需求时序）。
+        # 记录 hide 前的物理矩形：show() 可能重应用 Qt 逻辑几何，而锁定态下跟随
+        # 循环不做 move_window 矫正，漂移会永久残留（表现为正文窗宽度突变）
+        self._screenshot_suppress = True
+        self._quick_menu.hide_all()
+        was_visible = self._visible
+        saved_rects = None
+        if was_visible:
+            try:
+                saved_rects = (
+                    win32api.window_rect(self._body_hwnd),
+                    win32api.window_rect(self._title_hwnd),
+                )
+            except Exception:  # pragma: no cover - 窗口销毁竞态
+                saved_rects = None
+            self._set_visible(False)
+        try:
+            # SW_HIDE 返回后 DWM 合成树可能尚未移除窗口（屏幕 DC 仍可抓到旧帧），
+            # 与流式窗重叠时截图会混入悬浮窗画面（模型看到已有中文译文后不再翻译）。
+            # 处理一拍事件并等待数个合成周期后再抓屏
+            QApplication.processEvents()
+            time.sleep(SCREENSHOT_DWM_SETTLE_SECONDS)
+            image = capture_region(bbox)
+        except Exception as exc:
+            logger.warning("屏幕截图失败：%s", exc)
+            image = None
+        finally:
+            self._screenshot_suppress = False
+            self._quick_menu.show_all()
+            if was_visible:
+                self._set_visible(True)
+                if saved_rects is not None:
+                    # 用 hide 前的物理矩形原样恢复（锁定态无人矫正几何，必须显式还原）
+                    try:
+                        win32api.move_window(self._body_hwnd, *saved_rects[0], topmost=True)
+                        win32api.move_window(self._title_hwnd, *saved_rects[1], topmost=True)
+                    except Exception:  # pragma: no cover - 窗口销毁竞态
+                        pass
+        if image is None:
+            self._translating = False
+            self._update_title("翻译失败")
+            return
+        logger.info("发起截图翻译（seq=%d，区域 %dx%d）", seq, image.width, image.height)
+        api_options = {  # 连接参数来自 config.json；模型用截图专用配置（可回退 model）
+            "base_url": self._config.api_base_url,
+            "timeout": self._config.api_timeout,
+            "model": self._config.screenshot_model,
+            "api_key": self._config.api_key,
+            "enable_thinking": self._config.enable_thinking,
+            "reasoning_effort": self._config.reasoning_effort,
+        }
+        thread = threading.Thread(
+            target=self._screenshot_worker,
+            args=(seq, image, stop, api_options),
+            name=f"screenshot-translate-{seq}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _screenshot_worker(self, seq: int, image, stop: threading.Event, api_options: dict) -> None:
+        """后台线程：宽高比约束副本 → 压缩至配置百分比 → vision API → 结果入队。
+
+        原始截图与副本均为线程局部变量：翻译失败随 return 自然清除（需求）；
+        成功时在回传前生成 ≤10w 像素缩略图，主线程只负责展示与落库。
+        """
+        try:
+            ratio_image = constrain_aspect_ratio(image)
+            api_image = scale_to_percent(ratio_image, self._config.screenshot_compress_percent)
+            jpeg_base64 = encode_jpeg_base64(api_image)
+            if stop.is_set():
+                return  # 已作废：不再发起请求
+            text = translate_image(jpeg_base64, **api_options)
+            if stop.is_set():
+                return
+            thumbnail = make_thumbnail(image)
+            self._queue.put(
+                (
+                    "screenshot_done",
+                    {
+                        "seq": seq,
+                        "text": text,
+                        "original_jpeg": encode_jpeg_bytes(image),
+                        "thumb_jpeg": encode_jpeg_bytes(thumbnail),
+                    },
+                )
+            )
+        except Exception as exc:  # 网络/协议/图像错误统一收敛为失败结果
+            if stop.is_set():
+                return
+            logger.debug("截图翻译失败（seq=%d）：%s", seq, exc)
+            self._queue.put(("screenshot_fail", {"seq": seq, "error": str(exc)}))
+
+    def _handle_screenshot_done(self, item: dict) -> None:
+        """主线程：校验世代号 → 正文显示译文 → 原图/缩略图落库（不写两级缓存）。"""
+        seq = item.get("seq")
+        if seq != self._translation_seq:
+            logger.info("截图翻译结果已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        self._translating = False
+        text = str(item.get("text") or "").strip()
+        if not text:
+            logger.warning("截图翻译返回空文本，保持当前显示")
+            self._update_title("翻译失败")
+            return
+        self._display_text(text + "\n")
+        self._update_title("翻译完成")
+        logger.info("截图翻译完成（seq=%d，译文 %d 字），已显示在正文窗", seq, len(text))
+        if self._screenshot_store is None:
+            return  # 数据库不可用：仅显示不入库
+        record_id = self._screenshot_store.insert(
+            ts=int(time.time() * 1000),  # 13 位毫秒时间戳（需求）
+            ocr_text=text,
+            img_original=bytes(item.get("original_jpeg") or b""),
+            img_thumbnail=bytes(item.get("thumb_jpeg") or b""),
+        )
+        if record_id is None:
+            logger.warning("截图记录入库失败，仅保留正文显示")
+
+    def _handle_screenshot_fail(self, item: dict) -> None:
+        """主线程：截图翻译失败收尾（提示与单击/自动一致；内存图像已随 worker 释放）。"""
+        seq = item.get("seq")
+        if seq != self._translation_seq:
+            logger.info("截图翻译失败结果已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        self._translating = False
+        logger.warning("截图翻译失败：%s", item.get("error"))
+        self._update_title("翻译失败")
 
     # -- 自动翻译（config.json: auto_translate / auto_translate_interval）
 
