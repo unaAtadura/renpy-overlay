@@ -25,6 +25,7 @@ from .processing import (
 )
 from .store import ScreenshotStore, open_store
 from .viewer_window import ImageViewerWindow
+from .vision import looks_untranslated, translate_image_verified
 from .window import ScreenshotWindow
 
 __all__ = [
@@ -36,7 +37,9 @@ __all__ = [
     "constrain_aspect_ratio",
     "encode_jpeg_base64",
     "encode_jpeg_bytes",
+    "looks_untranslated",
     "make_thumbnail",
     "open_store",
     "scale_to_percent",
+    "translate_image_verified",
 ]

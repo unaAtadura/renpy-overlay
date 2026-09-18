@@ -21,10 +21,22 @@ from ..translator import (
 
 logger = logging.getLogger("renpy_overlay.screenshot.vision")
 
+#: 首次请求指令：不提"保持原始格式/顺序"（实测 qwen3.5-vl 对多行诗体会被这句
+#: 带偏，只输出保持原文格式的识别结果而不翻译，表现为"返回英文"）
 DEFAULT_SCREENSHOT_PROMPT = (
-    "请识别图片中的所有文字，保持原始格式和顺序，然后将识别结果翻译成简体中文。"
-    "只输出译文本身，不要解释、不要引号。"
+    "把图片中的全部文字翻译成简体中文。"
+    "只输出中文译文本身，不要输出原文，不要解释，不要引号。"
 )
+
+#: 结果校验未通过（译文疑似未翻译）时的强化重试指令
+RETRY_SCREENSHOT_PROMPT = (
+    "图中的文字是外文。请把图中全部文字翻译成简体中文，"
+    "只输出中文译文，禁止输出原文，禁止保持原文格式。"
+)
+
+#: 译文中 CJK 字符占比低于该阈值时判定为"疑似未翻译"：正常中文译文几乎全
+#: 为 CJK，允许少量英文专名（如 Sicae/legacy）混入，取 0.25 留足余量
+UNTRANSLATED_CJK_RATIO = 0.25
 
 
 def _image_payload(jpeg_base64: str, instruction: str) -> dict:
@@ -45,6 +57,50 @@ def _image_payload(jpeg_base64: str, instruction: str) -> dict:
         "temperature": 0.2,
         "stream": False,
     }
+
+
+def looks_untranslated(text: str, min_cjk_ratio: float = UNTRANSLATED_CJK_RATIO) -> bool:
+    """判断译文是否"疑似只识别未翻译"（纯函数，便于离线单测）。
+
+    依据：非空白字符中 CJK 字符占比。正常中文译文几乎全为 CJK（英文专名
+    占比很低），而英文原文占比接近 0；空文本同样视为未翻译。
+    """
+    chars = [ch for ch in text if not ch.isspace()]
+    if not chars:
+        return True
+    cjk = sum(1 for ch in chars if "\u4e00" <= ch <= "\u9fff")
+    return cjk / len(chars) < min_cjk_ratio
+
+
+def translate_image_verified(jpeg_base64: str, abort_check=None, **call_kwargs) -> str:
+    """带结果校验的识图翻译：译文疑似未翻译时用强化指令自动重试一次。
+
+    模型对"识别+翻译"混合指令存在非确定行为（实测同一段诗体英文有时只输出
+    识别结果），首条指令已去掉"保持原始格式"诱因；此函数再加一层 CJK 占比
+    校验：未通过则用 :data:`RETRY_SCREENSHOT_PROMPT` 重试一次，重试结果无论
+    是否通过都返回并记 WARNING（不无限重试，同一请求最多两次 API 调用）。
+
+    ``abort_check``：返回 True 时放弃重试（直接返回首次结果），由调用方传入
+    中止信号（如 ``stop.is_set``），语义与参考实现 ``llm_service`` 一致。
+    """
+    instruction = call_kwargs.pop("instruction", DEFAULT_SCREENSHOT_PROMPT)
+    text = translate_image(jpeg_base64, instruction=instruction, **call_kwargs)
+    if not looks_untranslated(text):
+        return text
+    if abort_check is not None and abort_check():
+        logger.warning("译文疑似未翻译且请求已作废，不重试：%r", text[:50])
+        return text
+    logger.warning(
+        "译文疑似未翻译（CJK 占比过低），用强化指令重试一次：%r", text[:50]
+    )
+    retried = translate_image(
+        jpeg_base64, instruction=RETRY_SCREENSHOT_PROMPT, **call_kwargs
+    )
+    if looks_untranslated(retried):
+        logger.warning("强化指令重试后仍疑似未翻译，保留重试结果：%r", retried[:50])
+    else:
+        logger.info("强化指令重试成功，已获得中文译文")
+    return retried
 
 
 def translate_image(

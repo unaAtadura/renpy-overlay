@@ -12,14 +12,17 @@ import pytest
 
 from renpy_overlay import translator
 from renpy_overlay.screenshot import vision
+from renpy_overlay.screenshot.vision import looks_untranslated, translate_image_verified
 
 NO_CHOICES = "__no_choices__"
 EMPTY_TEXT = "__empty_text__"
+ENGLISH_SAMPLE = "Sicae was the pride of the kingdom, their banners fluttering in the wind."
 
 
 class _StubHandler(BaseHTTPRequestHandler):
     received: list[dict] = []
     models: list[dict] = [{"id": "stub-model"}]
+    english_first = False  # True：首个 POST 返回英文原文（模拟模型未翻译），之后返回中文
 
     def log_message(self, *args):  # 静音桩服务器日志
         pass
@@ -51,6 +54,8 @@ class _StubHandler(BaseHTTPRequestHandler):
             self._send(200, {"choices": []})
         elif instruction == EMPTY_TEXT:
             self._send(200, {"choices": [{"message": {"content": "  "}}]})
+        elif type(self).english_first and len(type(self).received) == 1:
+            self._send(200, {"choices": [{"message": {"content": ENGLISH_SAMPLE}}]})
         else:
             self._send(200, {"choices": [{"message": {"content": "识别到的中文译文"}}]})
 
@@ -59,6 +64,7 @@ class _StubHandler(BaseHTTPRequestHandler):
 def stub_server():
     _StubHandler.received = []
     _StubHandler.models = [{"id": "stub-model"}]
+    _StubHandler.english_first = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -157,3 +163,48 @@ def test_unreachable_service_raises():
     probe.close()
     with pytest.raises(translator.TranslationError, match="无法连接"):
         vision.translate_image(_tiny_base64(), base_url=f"http://127.0.0.1:{port}", timeout=2)
+
+
+# ---- looks_untranslated：CJK 占比校验（纯函数） -------------------------------
+
+
+def test_looks_untranslated():
+    assert not looks_untranslated("西凯是王国的骄傲，他们的旗帜在风中飘扬。")
+    assert not looks_untranslated("称为Sicae，王国的守护者。")  # 少量英文专名不算未翻译
+    assert looks_untranslated(ENGLISH_SAMPLE)
+    assert looks_untranslated("Sicae was proud.\nTheir banners fluttered.")
+    assert looks_untranslated("   ")  # 空白文本视为未翻译
+    # 阈值边界：CJK 占比恰好等于 0.25 时不算未翻译（2 CJK / 8 非空白）
+    assert not looks_untranslated("西凯a b c d e f")
+    assert looks_untranslated("西凯a b c d e f g")  # 2/9 < 0.25：判定未翻译
+
+
+def test_verified_passes_through_translated_text(stub_server):
+    base, received = stub_server
+    result = translate_image_verified(_tiny_base64(), base_url=base, timeout=5, model="m")
+    assert result == "识别到的中文译文"
+    assert len(received) == 1  # 校验通过：不重试
+
+
+def test_verified_retries_with_strict_instruction(stub_server):
+    base, received = stub_server
+    _StubHandler.english_first = True
+    result = translate_image_verified(_tiny_base64(), base_url=base, timeout=5, model="m")
+    assert result == "识别到的中文译文"  # 重试后拿到中文
+    assert len(received) == 2  # 首次 + 强化重试
+    retry_instruction = received[1]["body"]["messages"][0]["content"][-1]["text"]
+    assert "禁止输出原文" in retry_instruction
+
+
+def test_verified_retry_aborted_returns_first_result(stub_server):
+    base, received = stub_server
+    _StubHandler.english_first = True
+    result = translate_image_verified(
+        _tiny_base64(),
+        base_url=base,
+        timeout=5,
+        model="m",
+        abort_check=lambda: True,  # 请求已作废：不重试
+    )
+    assert result == ENGLISH_SAMPLE
+    assert len(received) == 1
