@@ -14,6 +14,15 @@ dependencies = [
     "pyqt6>=6.7",
     # 窗口枚举、窗口样式、窗口定位（仅 Windows）
     "pywin32>=306; sys_platform == 'win32'",
+    # 听歌识曲（song_recognition 包；shazamio 安装可能需要 Rust 工具链，见 README）
+    "shazamio>=0.5.1",
+    # Python 3.13+ 移除标准库 audioop（shazamio 的 pydub 依赖它），需兼容层
+    "audioop-lts>=0.2; python_version >= '3.13'",
+    # 系统音频录制三方案：soundcard 环回 / WASAPI 环回（支持蓝牙）/ 立体声混音
+    "soundcard>=0.4.2; sys_platform == 'win32'",
+    "soundfile>=0.12.1",
+    "pyaudiowpatch>=0.2.0; sys_platform == 'win32'",
+    "pyaudio>=0.2.14; sys_platform == 'win32'",
 ]
 
 [project.scripts]

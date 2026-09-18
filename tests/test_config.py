@@ -37,6 +37,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "stream_window_title_gap": 4,
         "screenshot_compress_percent": 10,
         "screenshot_model": "",
+        "recording_duration": 8,
     }
 
 
@@ -82,6 +83,36 @@ def test_screenshot_model_loaded_and_fallback(tmp_path):
     for bad in (123, None, ["vl"]):
         target.write_text(json.dumps({"screenshot_model": bad}), encoding="utf-8")
         assert config.load_config(target).screenshot_model == "", f"{bad!r}"
+
+
+# ---------------------------------------------------------------- 听歌识曲
+
+
+def test_recording_duration_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"recording_duration": 12}), encoding="utf-8")
+    assert config.load_config(target).recording_duration == 12
+
+
+def test_recording_duration_defaults_when_missing(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退默认 8 秒
+    assert config.load_config(target).recording_duration == config.DEFAULT_RECORDING_DURATION
+
+
+def test_recording_duration_invalid_types_fall_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in ("8", True, 8.5, None, [8]):  # bool 不算数字、非整数浮点回退
+        target.write_text(json.dumps({"recording_duration": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.recording_duration == config.DEFAULT_RECORDING_DURATION, f"{bad!r}"
+
+
+def test_recording_duration_below_minimum_falls_back(tmp_path):
+    """低于下限 3 秒的采样难以命中指纹库，回退默认。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"recording_duration": 2}), encoding="utf-8")
+    assert config.load_config(target).recording_duration == config.DEFAULT_RECORDING_DURATION
 
 
 def test_reasoning_effort_invalid_falls_back(tmp_path):

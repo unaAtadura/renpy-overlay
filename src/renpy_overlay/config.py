@@ -26,6 +26,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
       "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
+      "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
     }
 """
 
@@ -66,6 +67,10 @@ DEFAULT_STREAM_WINDOW_TITLE_GAP = 4  # 标题窗与正文窗间距（像素）
 DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
 #: 截图识别翻译的模型代号；空 = 回退 model（识图需 vision 多模态模型）
 DEFAULT_SCREENSHOT_MODEL = ""
+#: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
+DEFAULT_RECORDING_DURATION = 8
+#: 录制时长下限：过短的采样难以命中 Shazam 指纹库
+MIN_RECORDING_DURATION = 3
 #: 字号下限：再小就不可辨认；行距下限：小于 1.0 会上下行重叠
 MIN_STREAM_FONT_SIZE = 6
 MIN_STREAM_LINE_SPACING = 1.0
@@ -101,6 +106,8 @@ class AppConfig:
     # 截图翻译
     screenshot_compress_percent: int = DEFAULT_SCREENSHOT_COMPRESS_PERCENT
     screenshot_model: str = DEFAULT_SCREENSHOT_MODEL
+    # 听歌识曲
+    recording_duration: int = DEFAULT_RECORDING_DURATION
 
 
 def default_path() -> Path:
@@ -141,6 +148,7 @@ def _write_defaults(target: Path) -> None:
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
         "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
+        "recording_duration": DEFAULT_RECORDING_DURATION,
     }
     try:
         target.write_text(
@@ -331,13 +339,16 @@ def load_config(path: Path | None = None) -> AppConfig:
             raw, "screenshot_compress_percent", DEFAULT_SCREENSHOT_COMPRESS_PERCENT
         ),
         screenshot_model=_read_str(raw, "screenshot_model", DEFAULT_SCREENSHOT_MODEL),
+        recording_duration=_read_positive_int(
+            raw, "recording_duration", DEFAULT_RECORDING_DURATION, MIN_RECORDING_DURATION
+        ),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
-        "screenshot（compress=%d%%，model=%s）（%s）",
+        "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -357,6 +368,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.stream_window_title_gap,
         app_config.screenshot_compress_percent,
         app_config.screenshot_model or "<回退 model>",
+        app_config.recording_duration,
         target,
     )
     return app_config
