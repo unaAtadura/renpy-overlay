@@ -538,6 +538,21 @@ def window_rect(hwnd: int) -> tuple[int, int, int, int]:
     return _win32gui().GetWindowRect(hwnd)
 
 
+def ltrb_to_xywh(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """``GetWindowRect`` 的 (left, top, right, bottom) 换算为 (x, y, 宽, 高)。
+
+    ``move_window`` / ``SetWindowPos`` 接收的是位置 + 尺寸，直接展开 ltrb
+    会把 right/bottom 当宽高传入（窗口尺寸错乱）。宽高下限钳到 1。
+    """
+    left, top, right, bottom = rect
+    return (int(left), int(top), max(1, int(right) - int(left)), max(1, int(bottom) - int(top)))
+
+
+def window_xywh(hwnd: int) -> tuple[int, int, int, int]:
+    """窗口几何 ``(x, y, 宽, 高)``（物理像素，``move_window`` 的参数格式）。"""
+    return ltrb_to_xywh(_win32gui().GetWindowRect(hwnd))
+
+
 def is_window_valid(hwnd: int) -> bool:
     return bool(_win32gui().IsWindow(hwnd))
 

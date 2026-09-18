@@ -21,3 +21,9 @@ config.json
 
 # 样例代码
 .reference_projects
+
+# 原始需求文档
+.raw_plans
+
+# 测试用例
+.test_cases

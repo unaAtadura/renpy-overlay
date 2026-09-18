@@ -35,22 +35,39 @@ class ImageViewerWindow(QWidget):
         self._press_global: QPoint | None = None
 
     def show_pixmap(self, pixmap: QPixmap) -> None:
-        """显示完整原图：窗口尺寸 = 原图尺寸，超出屏幕可用区时等比缩小。"""
-        self._label.setPixmap(pixmap)
-        self._label.adjustSize()
+        """显示完整原图：窗口尺寸 = 图片尺寸，超出屏幕可用区时等比缩小整图。
+
+        缩放作用于 pixmap 本身（而非仅缩小窗口）：保证整张原图完整可见、
+        不被裁剪（QLabel 固定为原尺寸时缩小窗口只会裁掉超出部分）。
+        """
         target = pixmap.size()
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry().adjusted(40, 40, -40, -40)
             if target.width() > available.width() or target.height() > available.height():
-                target.scale(
-                    available.size(), Qt.AspectRatioMode.KeepAspectRatio
-                )
-        self.resize(target)
+                target.scale(available.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        scaled = (
+            pixmap
+            if target == pixmap.size()
+            else pixmap.scaled(
+                target,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self._label.setPixmap(scaled)
+        self._label.adjustSize()
+        self.resize(scaled.size())
         self.show()
         self.raise_()
         self.activateWindow()
-        logger.debug("原图查看弹窗已显示（%dx%d）", self.width(), self.height())
+        logger.debug(
+            "原图查看弹窗已显示（原图 %dx%d，窗口 %dx%d）",
+            pixmap.width(),
+            pixmap.height(),
+            self.width(),
+            self.height(),
+        )
 
     # ---- 左键拖拽移动 + 单击关闭 ---------------------------------------------
 

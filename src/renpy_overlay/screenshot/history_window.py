@@ -351,7 +351,7 @@ class _PanImageScroll(QScrollArea):
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return True
-        if etype == QEvent.Type.MouseMouseMove and self._panning and self._last_global is not None:
+        if etype == QEvent.Type.MouseMove and self._panning and self._last_global is not None:
             current = event.globalPosition().toPoint()
             delta = current - self._last_global
             self._last_global = QPoint(current)

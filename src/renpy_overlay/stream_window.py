@@ -50,7 +50,7 @@ from .screenshot import (
     open_store,
     scale_to_percent,
 )
-from .screenshot.vision import translate_image
+from .screenshot.vision import translate_image_verified
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -904,8 +904,10 @@ class StreamOverlayWindow:
             logger.exception("跟随游戏窗口时出错")
 
     def _follow_once(self) -> None:
-        if self._screenshot_suppress:
-            # 截图瞬间：不解析目标、不重新显示，防止 200ms 跟随循环把隐藏的窗口拉回
+        if self._screenshot_suppress or self._context_menu_open:
+            # 截图瞬间：不定位不重显示，防跟随循环把隐藏窗口拉回；
+            # 右键菜单打开期间（无论锁定/解锁）：解锁态的周期定位也带
+            # move_window(HWND_TOPMOST)，会把流式窗重新提到菜单之上遮住菜单
             return
         hwnd = self._resolve_target()
         if not hwnd:
@@ -1285,8 +1287,10 @@ class StreamOverlayWindow:
         self._current_stop = stop
         self._update_title("截图翻译中，翻译速度会更慢...")
         # 截图时短暂隐藏截图窗口与流式窗口，截图后发送 API 前恢复（需求时序）。
-        # 记录 hide 前的物理矩形：show() 可能重应用 Qt 逻辑几何，而锁定态下跟随
-        # 循环不做 move_window 矫正，漂移会永久残留（表现为正文窗宽度突变）
+        # 记录 hide 前的物理几何（xywh，与 move_window 参数格式一致）：show() 可能
+        # 重应用 Qt 逻辑几何，而锁定态下跟随循环不做 move_window 矫正，漂移会永久
+        # 残留（曾因把 GetWindowRect 的 ltrb 直接当 xywh 传入导致标题窗高度暴增、
+        # 文字绘制到窗口垂直中央而"跑到正文窗下方/不可见"）
         self._screenshot_suppress = True
         self._quick_menu.hide_all()
         was_visible = self._visible
@@ -1294,29 +1298,36 @@ class StreamOverlayWindow:
         if was_visible:
             try:
                 saved_rects = (
-                    win32api.window_rect(self._body_hwnd),
-                    win32api.window_rect(self._title_hwnd),
+                    win32api.window_xywh(self._body_hwnd),
+                    win32api.window_xywh(self._title_hwnd),
                 )
             except Exception:  # pragma: no cover - 窗口销毁竞态
                 saved_rects = None
             self._set_visible(False)
+        # SW_HIDE 返回后 DWM 合成树可能尚未移除窗口（屏幕 DC 仍可抓到旧帧），与
+        # 流式窗重叠时截图会混入悬浮窗画面。用单发定时器等合成周期后再抓屏：
+        # 等待期间主线程照常泵事件（打字机动画与鼠标不冻结），避免整段 sleep 卡 UI
+        QTimer.singleShot(
+            int(SCREENSHOT_DWM_SETTLE_SECONDS * 1000),
+            lambda: self._capture_after_hide(seq, bbox, stop, saved_rects, was_visible),
+        )
+
+    def _capture_after_hide(self, seq: int, bbox, stop, saved_rects, was_visible: bool) -> None:
+        """延迟抓屏终点（主线程）：抓屏 -> 恢复窗口显示 -> 起后台翻译线程。"""
+        if self._closed:
+            return
+        image = None
         try:
-            # SW_HIDE 返回后 DWM 合成树可能尚未移除窗口（屏幕 DC 仍可抓到旧帧），
-            # 与流式窗重叠时截图会混入悬浮窗画面（模型看到已有中文译文后不再翻译）。
-            # 处理一拍事件并等待数个合成周期后再抓屏
-            QApplication.processEvents()
-            time.sleep(SCREENSHOT_DWM_SETTLE_SECONDS)
             image = capture_region(bbox)
         except Exception as exc:
             logger.warning("屏幕截图失败：%s", exc)
-            image = None
         finally:
             self._screenshot_suppress = False
             self._quick_menu.show_all()
             if was_visible:
                 self._set_visible(True)
                 if saved_rects is not None:
-                    # 用 hide 前的物理矩形原样恢复（锁定态无人矫正几何，必须显式还原）
+                    # 用 hide 前的物理几何原样恢复（锁定态无人矫正几何，必须显式还原）
                     try:
                         win32api.move_window(self._body_hwnd, *saved_rects[0], topmost=True)
                         win32api.move_window(self._title_hwnd, *saved_rects[1], topmost=True)
@@ -1355,7 +1366,9 @@ class StreamOverlayWindow:
             jpeg_base64 = encode_jpeg_base64(api_image)
             if stop.is_set():
                 return  # 已作废：不再发起请求
-            text = translate_image(jpeg_base64, **api_options)
+            # 带结果校验：模型偶发"只识别不翻译"（返回英文原文），
+            # CJK 占比过低时自动用强化指令重试一次
+            text = translate_image_verified(jpeg_base64, abort_check=stop.is_set, **api_options)
             if stop.is_set():
                 return
             thumbnail = make_thumbnail(image)
