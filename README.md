@@ -120,6 +120,13 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   首末记录、日智能平闰年）与首末记录日期标签，左中为缩略图条带（滚轮上滚看
   早期/下滚看后期、按住左键拖动浏览；中垂线扫到的缩略图停留 1 秒自动选中，
   左键点击跳过延迟直接选中），左下为选中记录的译文，右侧为原图；
+- **听歌识曲**：标题/正文窗文字处**右键**快捷菜单的「听歌识曲」—— 纯后台行为
+  （无新窗口/弹窗）：录制 `recording_duration`（默认 8 秒）系统音频（soundcard
+  环回 → pyaudiowpatch WASAPI 环回 → pyaudio 立体声混音三重回退）交 Shazam 识别；
+  标题窗显示录制倒计时（建议关闭游戏音效提升识别率）/录制失败/识曲中/识曲成功/
+  识曲失败，成功时正文窗显示「歌曲名/艺术家」，失败提示多次失败可能是该曲目
+  未被收录；与翻译/截图翻译共用“同时仅一个 API 请求”互斥（在途时点击被忽略
+  且不更新提示），双击可打断录制与识曲（识别结果作废）；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；
@@ -140,13 +147,16 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
 
 - Windows 10 / 11（仅桌面版 Ren'Py，不支持网页版与 Android 构建）；
 - 本机安装 [uv](https://docs.astral.sh/uv/)；工具端 Python ≥ 3.10（`uv sync` 会自动准备）；
+- Rust 工具链（**推荐预先安装**，否则 shazamio 模块可能会安装失败 —— 听歌识曲
+  功能依赖）：Windows 从 https://rustup.rs 下载安装；未安装 Rust 时若依赖均能
+  从镜像获得预编译 wheel 也可正常安装，其余功能不受影响；
 - 目标游戏为 Ren'Py 7.x（32 位）或 8.x（64 位），且已经启动到游戏主循环；
 - 工具与游戏为**同一用户**运行。若游戏以管理员身份启动，本工具也需以管理员运行。
 
 ## 安装
 
 ```bash
-uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32 / PyQt6）
+uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32 / PyQt6 / shazamio 等）
 ```
 
 默认通过清华 TUNA 镜像下载（写在 `pyproject.toml` 的 `[[tool.uv.index]]` 里，
@@ -157,8 +167,8 @@ uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32 / PyQt
 ## 打包为独立 exe（可选）
 
 不想装 Python 环境时，可以把工具端打成单文件 exe：PyInstaller 打包运行必需的
-模块（psutil / pywin32 / tkinter / PyQt6；包含 Qt DLL 后体积明显增大），排除
-numpy 等无关库：
+模块（psutil / pywin32 / tkinter / PyQt6 / PIL / 听歌识曲的 shazamio 链路；包含
+Qt DLL 后体积明显增大），排除 scipy 等无关库：
 
 ```bash
 uv run pyinstaller renpy_overlay.spec --noconfirm
@@ -202,9 +212,9 @@ uv run renpy-overlay --pid 12345
 | 操作 | 作用 |
 | --- | --- |
 | 按住标题/正文任一窗 + 左键拖动 | 两窗整体联动移动；松开后位置锁定（相对游戏窗口保持） |
-| 左键双击 | 锁定 / 解锁窗口位置（锁定后不响应拖动；双击同时中止在途翻译） |
+| 左键双击 | 锁定 / 解锁窗口位置（锁定后不响应拖动；双击同时中止在途翻译与听歌识曲） |
 | 锁定状态下单击 | 翻译当前对话原文，译文增量流入正文窗（未锁定不触发） |
-| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史 |
+| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史、听歌识曲 |
 | 截图窗双击 | 锁定/解锁截图窗口（锁定后单击即截图翻译） |
 | 鼠标滚轮（悬浮窗内任意位置） | 上翻回看当前对话全文、回到底部恢复跟随（窗口只显示最新一条） |
 
@@ -248,6 +258,7 @@ uv run renpy-overlay --pid 12345
     "stream_window_title_gap": 4,     // 标题窗与正文窗间距（像素，非负）
     "screenshot_compress_percent": 10, // 截图翻译发送 API 前的等比压缩百分比（1~100）
     "screenshot_model": "",           // 识图模型；空则回退 model（需 vision 多模态模型）
+    "recording_duration": 8,          // 听歌识曲录制系统音频时长（秒，最小 3）
     "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
     "api_timeout": 20.0,              // 请求超时（秒）
     "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个

@@ -67,6 +67,11 @@ EPILOG = """\
   截图配置    config.json 的 screenshot_compress_percent（发送 API 前等比压缩
               百分比，默认 10）/ screenshot_model（识图模型，空则回退 model，
               需 vision 多模态模型）
+  听歌识曲    标题/正文窗文字处右键弹快捷菜单：录制 recording_duration（默认 8）
+              秒系统音频交 Shazam 识别；标题窗显示录制倒计时（建议关闭游戏音效
+              提升识别率）/录制失败/识曲中/成功/失败，成功时正文窗显示歌名与
+              艺术家；与翻译/截图翻译互斥（在途时点击被忽略），双击可打断录制
+              与识曲
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
 

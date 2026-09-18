@@ -27,13 +27,16 @@ ROOT = SPECPATH  # noqa: F821 - PyInstaller 注入：spec 文件所在目录
 SRC = os.path.join(ROOT, "src")
 
 # 保险清单：本工具运行链不依赖这些库，防止将来被间接引入而撑大体积
+# （注：numpy / aiohttp 是听歌识曲 shazamio 链路（song_recognition 包）的
+# 真实运行依赖，PIL 是截图翻译链路（screenshot 包）的真实运行依赖，
+# 均不在此列；scipy / pandas 等仍未使用）
 EXCLUDES = [
-    # 科学计算 / 图像
-    "numpy", "scipy", "pandas", "matplotlib", "sympy", "PIL", "cv2", "torch",
+    # 科学计算 / 图像（PIL / numpy 已被真实运行链引入，不能排除）
+    "scipy", "pandas", "matplotlib", "sympy", "cv2", "torch",
     # 其它 GUI 框架（悬浮窗用 PyQt6，内置 hook 收集；选择窗用 tkinter）
     "PyQt5", "PySide2", "PySide6", "wx",
-    # 交互式环境与网络库（翻译走标准库 urllib）
-    "IPython", "jupyter", "notebook", "requests", "urllib3", "aiohttp", "httpx",
+    # 交互式环境与网络库（翻译走标准库 urllib；aiohttp 已被 shazamio 链路引入）
+    "IPython", "jupyter", "notebook", "requests", "urllib3", "httpx",
     "lxml", "bs4",
     # 测试 / 构建工具与标准库测试包
     "pytest", "_pytest", "setuptools", "pkg_resources", "pip", "wheel",

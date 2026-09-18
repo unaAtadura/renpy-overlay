@@ -33,6 +33,7 @@ import math
 import queue
 import threading
 import time
+from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
@@ -51,6 +52,15 @@ from .screenshot import (
     scale_to_percent,
 )
 from .screenshot.vision import translate_image_verified
+from .song_recognition import (
+    RECORDER_AVAILABLE,
+    SHAZAMIO_AVAILABLE,
+    extract_track_info,
+    format_fail_body,
+    format_success_body,
+    recognize,
+    record_system_audio,
+)
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -63,6 +73,8 @@ CLICK_SUPPRESS_SECONDS = 0.5
 #: SW_HIDE 返回后等待 DWM 合成移除旧帧的时间（秒）：约 10 个 60Hz 合成周期，
 #  保证截图不会抓到刚隐藏的悬浮窗残影（否则与流式窗重叠时会把译文截进图里）
 SCREENSHOT_DWM_SETTLE_SECONDS = 0.18
+#: 听歌识曲录制倒计时的标题刷新周期（毫秒）
+RECORD_TICK_INTERVAL_MS = 1000
 
 #: 视觉参数：取值沿用参考项目的已验证方案，按对话窗缩小边距
 BODY_MARGIN = 24.0  # 正文窗文本边距（逻辑像素，参考项目全屏窗用 64）
@@ -585,6 +597,10 @@ class StreamOverlayWindow:
         self._title_text = ""
         self._last_say: dict | None = None
         self._translating = False
+        # 听歌识曲：与翻译互斥的进行中标志；stop 让录制/识别尽快结束
+        self._recognizing = False
+        self._song_stop: threading.Event | None = None
+        self._record_deadline = 0.0
         self._translation_seq = 0
         self._stream_seq = 0  # 正文窗正在流式呈现的翻译世代号（0 = 非翻译内容）
         self._current_stop: threading.Event | None = None
@@ -597,6 +613,7 @@ class StreamOverlayWindow:
         self._quick_menu = QuickMenu(
             on_capture_click=self.request_screenshot_translation,
             on_open_history=self._open_history,
+            on_recognize_song=self.request_song_recognition,
         )
         self._history_window: ScreenshotHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
@@ -617,6 +634,9 @@ class StreamOverlayWindow:
         self._click_timer.timeout.connect(self._on_delayed_click)
         self._auto_timer = QTimer()
         self._auto_timer.timeout.connect(self._auto_translate_tick)
+        self._record_timer = QTimer()
+        self._record_timer.setInterval(RECORD_TICK_INTERVAL_MS)
+        self._record_timer.timeout.connect(self._record_tick)
         self._update_title("正在启动…")
 
     # ------------------------------------------------------------ 对外接口
@@ -683,12 +703,14 @@ class StreamOverlayWindow:
         self._translation_seq += 1  # 在途翻译的结果作废
         if self._translating:
             self._abort_translation("窗口关闭")
+        self._abort_song_recognition("窗口关闭")
         self._cancel_pending_click()
         for timer in (
             self._drain_timer,
             self._follow_timer,
             self._click_timer,
             self._auto_timer,
+            self._record_timer,
         ):
             try:
                 timer.stop()
@@ -744,6 +766,12 @@ class StreamOverlayWindow:
                     self._handle_screenshot_done(payload)
                 elif kind == "screenshot_fail":
                     self._handle_screenshot_fail(payload)
+                elif kind == "song_recognizing":
+                    self._handle_song_recognizing(payload)
+                elif kind == "song_done":
+                    self._handle_song_done(payload)
+                elif kind == "song_fail":
+                    self._handle_song_fail(payload)
                 elif kind == "cmd":
                     self._handle_command(payload)
         except queue.Empty:
@@ -1090,6 +1118,7 @@ class StreamOverlayWindow:
             # 双击的第二次按下可能顺带开了拖动，直接取消，避免它的 release 产生副作用
             self._dragging = False
         self._abort_translation("双击")
+        self._abort_song_recognition("双击")
         self._toggle_lock()
 
     def _toggle_lock(self) -> None:
@@ -1126,8 +1155,8 @@ class StreamOverlayWindow:
     def _start_translation(self, origin: str = "manual") -> None:
         """发起流式翻译请求（仅主线程调用）。同一时刻只允许一条在途请求。"""
         label = "自动触发" if origin == "auto" else "单击触发"
-        if self._translating:
-            logger.info("已有翻译请求在途，忽略本次%s翻译", label)
+        if self._translating or self._recognizing:
+            logger.info("已有请求在途（翻译/识曲），忽略本次%s翻译", label)
             return
         say = self._last_say or {}
         what = str(say.get("what") or "").strip()
@@ -1272,8 +1301,8 @@ class StreamOverlayWindow:
         """
         if self._closed:
             return
-        if self._translating:
-            logger.info("已有翻译请求在途（单击/自动/截图），忽略本次截图翻译")
+        if self._translating or self._recognizing:
+            logger.info("已有请求在途（翻译/识曲），忽略本次截图翻译")
             return
         try:
             bbox = win32api.window_rect(window.hwnd)
@@ -1425,6 +1454,143 @@ class StreamOverlayWindow:
         logger.warning("截图翻译失败：%s", item.get("error"))
         self._update_title("翻译失败")
 
+    # -- 听歌识曲（右键菜单触发；与翻译/截图翻译共用互斥；双击打断）
+
+    def request_song_recognition(self) -> None:
+        """听歌识曲入口（主线程）：互斥检查 → 标题倒计时 → 后台录制+识别。
+
+        与单击/自动/截图翻译共用"同时仅一个 API 请求"的互斥原则：存在任意在途
+        翻译或识曲时静默忽略本次点击（需求：不做提示更新，防止正文被意外覆盖）。
+        依赖缺失时给出降级提示，不占用互斥标志。
+        """
+        if self._closed:
+            return
+        if self._translating or self._recognizing:
+            logger.info("已有请求在途（翻译/识曲），忽略本次听歌识曲")
+            return
+        missing = []
+        if not SHAZAMIO_AVAILABLE:
+            missing.append("shazamio（pip install shazamio）")
+        if not RECORDER_AVAILABLE:
+            missing.append("soundcard / pyaudiowpatch / pyaudio 任一录制库")
+        if missing:
+            logger.warning("听歌识曲依赖缺失：%s", "、".join(missing))
+            self._update_title("识曲不可用：缺少依赖")
+            self._display_text("听歌识曲依赖未安装：\n" + "\n".join(missing) + "\n")
+            return
+        duration = self._config.recording_duration
+        self._recognizing = True
+        self._translation_seq += 1
+        seq = self._translation_seq
+        stop = threading.Event()
+        self._song_stop = stop
+        self._record_deadline = time.monotonic() + duration
+        self._record_tick()  # 立即显示第一条倒计时，不等 1s 定时器
+        self._record_timer.start()
+        logger.info("发起听歌识曲（seq=%d，录制 %d 秒）", seq, duration)
+        thread = threading.Thread(
+            target=self._song_worker,
+            args=(seq, stop, duration),
+            name=f"song-recognition-{seq}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _record_tick(self) -> None:
+        """录制倒计时（主线程 QTimer）：标题窗每秒刷新剩余秒数。"""
+        remaining = int(math.ceil(self._record_deadline - time.monotonic()))
+        if remaining <= 0:
+            self._record_timer.stop()
+            return  # 录制应已结束，等待 worker 投递下一状态
+        self._update_title(f"正在录制系统音频 {remaining}s，建议关闭游戏音效提升识别率")
+
+    def _song_worker(self, seq: int, stop: threading.Event, duration: int) -> None:
+        """后台线程：录制系统音频 → Shazam 识别 → 结果只经队列回主线程。"""
+        try:
+            audio = record_system_audio(duration=duration, stop_event=stop)
+            if audio is None:
+                if not stop.is_set():
+                    self._queue.put(("song_fail", {"seq": seq, "stage": "record"}))
+                return
+            if stop.is_set():
+                self._cleanup_temp_audio(audio)
+                return
+            self._queue.put(("song_recognizing", {"seq": seq}))
+            track = recognize(audio)
+            self._cleanup_temp_audio(audio)
+            if stop.is_set():
+                return  # 已作废：识别结果不再上屏
+            if track is None:
+                self._queue.put(("song_fail", {"seq": seq, "stage": "recognize"}))
+                return
+            title, artist = extract_track_info(track)
+            self._queue.put(("song_done", {"seq": seq, "title": title, "artist": artist}))
+        except Exception as exc:  # 兑底：录制/识别之外的异常统一收敛为识曲失败
+            logger.exception("听歌识曲过程发生错误")
+            if not stop.is_set():
+                self._queue.put(
+                    ("song_fail", {"seq": seq, "stage": "recognize", "error": str(exc)})
+                )
+
+    @staticmethod
+    def _cleanup_temp_audio(audio: Path) -> None:
+        """删除录制产生的临时 wav（失败仅记日志，不影响识曲结果展示）。"""
+        try:
+            audio.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("删除临时音频文件失败：%s", audio)
+
+    def _handle_song_recognizing(self, item: dict) -> None:
+        """主线程：录制结束、开始识别（停倒计时，标题切换为识别中）。"""
+        seq = item.get("seq")
+        if seq != self._translation_seq:
+            logger.info("识曲状态已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        self._record_timer.stop()
+        self._update_title("正在通过Shazam听歌识曲...")
+
+    def _handle_song_done(self, item: dict) -> None:
+        """主线程：识曲成功收尾：标题提示成功，正文显示歌名与艺术家。"""
+        seq = item.get("seq")
+        if seq != self._translation_seq:
+            logger.info("识曲结果已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        self._recognizing = False
+        self._record_timer.stop()
+        title = str(item.get("title") or "未知")
+        artist = str(item.get("artist") or "未知")
+        self._display_text(format_success_body(title, artist))
+        self._update_title("识曲成功")
+        logger.info("识曲成功（seq=%d）：%s - %s", seq, title, artist)
+
+    def _handle_song_fail(self, item: dict) -> None:
+        """主线程：识曲失败收尾：录制失败只改标题，识别失败额外显示正文提示。"""
+        seq = item.get("seq")
+        if seq != self._translation_seq:
+            logger.info("识曲失败结果已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        self._recognizing = False
+        self._record_timer.stop()
+        if item.get("stage") == "record":
+            logger.warning("系统音频录制失败，无法进行识曲")
+            self._update_title("录制失败")
+            return
+        logger.warning("识曲失败：%s", item.get("error") or "未识别到歌曲")
+        self._display_text(format_fail_body())
+        self._update_title("识曲失败")
+
+    def _abort_song_recognition(self, reason: str) -> None:
+        """作废在途识曲：世代号递增使结果不再上屏，stop 让录制循环尽快退出。"""
+        if not self._recognizing:
+            return
+        self._recognizing = False
+        self._translation_seq += 1
+        self._record_timer.stop()
+        stop = self._song_stop
+        if stop is not None:
+            stop.set()
+        logger.info("已中止听歌识曲（%s）：结果作废，界面保持当前状态", reason)
+
     # -- 自动翻译（config.json: auto_translate / auto_translate_interval）
 
     def _start_auto_translate(self) -> None:
@@ -1467,6 +1633,10 @@ class StreamOverlayWindow:
             return
         if what == self._last_translation_input:
             self._auto_note_skip("该条原文已翻译过")
+            return
+        if self._recognizing:
+            # 听歌识曲在途：识曲结果即将整屏替换正文，缓存命中也不上屏
+            self._auto_note_skip("听歌识曲进行中")
             return
 
         # 缓存命中优先：依次查内存与数据库，任一级命中则直接上屏并记录"已翻译"
