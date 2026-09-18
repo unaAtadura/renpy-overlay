@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -53,6 +54,17 @@ PIXMAP_CACHE_LIMIT = 64
 BYTES_CACHE_LIMIT = 128
 #: 时间显示格式（记录列表与日期标签共用）
 TIME_FORMAT = "%Y-%m-%d %H:%M"
+
+
+def _index_after_delete(deleted_index: int, new_count: int) -> int:
+    """计算删除后应回位选中的新索引（纯函数，便于离线单测）。
+
+    优先保持原位置（被删条目的下一条顺位前移到该处）；若原索引在新列表中
+    越界（被删的是末尾条目）则回退到前一条；删除后已无任何记录返回 -1。
+    """
+    if new_count <= 0:
+        return -1
+    return min(deleted_index, new_count - 1)
 
 
 class _ThumbStrip(QWidget):
@@ -87,6 +99,11 @@ class _ThumbStrip(QWidget):
         self.setMinimumHeight(SLOT_H + 2 * SLOT_GAP)
 
     # ---- 数据与布局 ---------------------------------------------------------
+
+    @property
+    def selected_index(self) -> int:
+        """当前选中槽序号（-1 = 无选中），供窗口侧换算 record_id。"""
+        return self._selected_index
 
     def set_entries(self, entries: list[tuple[int, int]]) -> None:
         self._entries = list(entries)
@@ -195,12 +212,23 @@ class _ThumbStrip(QWidget):
         if not 0 <= index < len(self._entries):
             return
         self._forced = False  # 日期跳转 = 新一轮浏览：恢复自动选中
-        self._offset = index * (SLOT_W + SLOT_GAP) + SLOT_W // 2 - self.width() // 2
-        self._clamp_offset()
-        self._hover_candidate = self._center_index()
+        self._scroll_to_center(index)
         if self._hover_candidate != -1:
             self._select_timer.start()  # 居中后按中垂线同一逻辑延迟自动选中
         self.update()
+
+    def select_and_center(self, index: int) -> None:
+        """删除回位：立即直接选中并居中（同步更新详情，不经 1 秒延迟自动选中）。"""
+        if not 0 <= index < len(self._entries):
+            return
+        self._forced = True  # 明确动作后的选中应稳定：中垂线不再自动改选
+        self._scroll_to_center(index)
+        self.select(index)
+
+    def _scroll_to_center(self, index: int) -> None:
+        self._offset = index * (SLOT_W + SLOT_GAP) + SLOT_W // 2 - self.width() // 2
+        self._clamp_offset()
+        self._hover_candidate = self._center_index()
 
     def _on_auto_select_timeout(self) -> None:
         if self._forced:
@@ -403,11 +431,15 @@ class ScreenshotHistoryWindow(QWidget):
         self._day_combo = QComboBox()
         for combo in (self._year_combo, self._month_combo, self._day_combo):
             combo.currentIndexChanged.connect(self._on_date_changed)
+        self._delete_btn = QPushButton("删除")
+        self._delete_btn.setEnabled(False)  # 无选中记录时不可用
+        self._delete_btn.clicked.connect(self._delete_selected)
         date_row = QHBoxLayout()
         date_row.addWidget(self._year_combo)
         date_row.addWidget(self._month_combo)
         date_row.addWidget(self._day_combo)
         date_row.addStretch(1)
+        date_row.addWidget(self._delete_btn)
 
         date_box = QVBoxLayout()
         date_box.addWidget(self._first_label)
@@ -430,27 +462,55 @@ class ScreenshotHistoryWindow(QWidget):
 
     # ---- 对外接口 -----------------------------------------------------------
 
-    def refresh(self) -> None:
-        """从数据库重建记录列表、日期范围与下拉选项（每次打开前调用）。"""
-        self._entries = self._store.entries() if self._store is not None else []
-        self._strip.set_entries(self._entries)
-        first_last = self._store.first_last_ts() if self._store is not None else None
-        has_data = bool(self._entries)
-        for combo in (self._year_combo, self._month_combo, self._day_combo):
-            combo.setEnabled(has_data)
-        if not has_data:
-            self._first_label.setText("最早记录：暂无截图记录")
-            self._last_label.setText("最新记录：—")
-            self._text_view.setPlainText("")
-            self._image_label.setText("暂无截图记录")
-            logger.info("截图历史为空（数据库 %s）", self._store.path if self._store else "<无>")
-            return
-        self._first_label.setText("最早记录：" + datetime.fromtimestamp(first_last[0] / 1000).strftime(TIME_FORMAT))
-        self._last_label.setText("最新记录：" + datetime.fromtimestamp(first_last[1] / 1000).strftime(TIME_FORMAT))
-        self._rebuild_year_combo(int(datetime.fromtimestamp(first_last[0] / 1000).year), int(datetime.fromtimestamp(first_last[1] / 1000).year))
-        self._rebuild_day_combo()
-        # 默认定位到最新一条并居中（自动选中逻辑生效）
-        self._strip.center_on(len(self._entries) - 1)
+    def refresh(self, locate_latest: bool = True) -> None:
+        """从数据库重建记录列表、日期范围与下拉选项（每次打开/删除后调用）。
+
+        ``locate_latest=True``（默认，打开窗口时）重建后居中到最新一条并延迟
+        自动选中；删除回位场景传 False，由调用方用 ``select_and_center``
+        精确定位，避免覆盖回位选中。重建全程屏蔽日期信号，不触发
+        ``_go_to_date`` 跳转。
+        """
+        self._updating_date = True
+        try:
+            self._entries = self._store.entries() if self._store is not None else []
+            self._strip.set_entries(self._entries)
+            self._delete_btn.setEnabled(False)  # 重建后无选中；选中后由 _show_record 启用
+            first_last = (
+                self._store.first_last_ts() if self._store is not None else None
+            )
+            has_data = bool(self._entries)
+            for combo in (self._year_combo, self._month_combo, self._day_combo):
+                combo.setEnabled(has_data)
+            if not has_data:
+                self._first_label.setText("最早记录：暂无截图记录")
+                self._last_label.setText("最新记录：—")
+                self._text_view.setPlainText("")
+                self._image_label.clear()
+                self._image_label.setText("暂无截图记录")
+                logger.info(
+                    "截图历史为空（数据库 %s）",
+                    self._store.path if self._store else "<无>",
+                )
+                return
+            self._first_label.setText(
+                "最早记录："
+                + datetime.fromtimestamp(first_last[0] / 1000).strftime(TIME_FORMAT)
+            )
+            self._last_label.setText(
+                "最新记录："
+                + datetime.fromtimestamp(first_last[1] / 1000).strftime(TIME_FORMAT)
+            )
+            self._rebuild_year_combo(
+                int(datetime.fromtimestamp(first_last[0] / 1000).year),
+                int(datetime.fromtimestamp(first_last[1] / 1000).year),
+            )
+            self._rebuild_day_combo()
+        finally:
+            self._updating_date = False
+        if locate_latest and self._entries:
+            # 默认定位到最新一条并居中（自动选中逻辑生效）；删除回位场景由
+            # 调用方传 locate_latest=False 后用 select_and_center 精确定位
+            self._strip.center_on(len(self._entries) - 1)
 
     # ---- 日期联动 -----------------------------------------------------------
 
@@ -517,7 +577,8 @@ class ScreenshotHistoryWindow(QWidget):
     # ---- 记录展示 -----------------------------------------------------------
 
     def _show_record(self, payload: tuple[str, bytes] | None) -> None:
-        """缩略图选中回调：更新译文框与原图区。"""
+        """缩略图选中回调：更新译文框与原图区，并同步删除按钮可用状态。"""
+        self._delete_btn.setEnabled(self._strip.selected_index != -1)
         if not payload:
             self._text_view.setPlainText("（读取记录失败）")
             return
@@ -529,6 +590,42 @@ class ScreenshotHistoryWindow(QWidget):
             self._image_label.setText("")
         else:
             self._image_label.setText("原图解码失败")
+
+    def _selected_record_id(self) -> int | None:
+        """当前选中的截图记录 id；无选中返回 None。"""
+        index = self._strip.selected_index
+        if 0 <= index < len(self._entries):
+            return self._entries[index][0]
+        return None
+
+    def _delete_selected(self) -> None:
+        """删除当前选中的截图记录（无二次确认），删除后立即同步界面与数据库。"""
+        deleted_index = self._strip.selected_index  # 删除前记录位置（供回位计算）
+        record_id = self._selected_record_id()
+        if record_id is None:
+            logger.info("没有选中的截图记录，忽略删除请求")
+            return
+        if self._store is None or not self._store.delete(record_id):
+            logger.warning("删除截图记录失败（id=%s）", record_id)
+            self._text_view.setPlainText(
+                f"删除记录 id={record_id} 失败（数据库异常或已降级），详见日志。"
+            )
+            return
+        logger.info("已删除截图记录 id=%s", record_id)
+        if self._viewer is not None:
+            # viewer 只展示当前选中的原图，即被删除的那条：一并隐藏避免滞留失效数据
+            self._viewer.hide()
+        # 清空详情区：回位选中后立即重新填充，空窗期不再残留已删内容
+        self._text_view.setPlainText("")
+        self._image_label.clear()
+        self._image_label.setText("选择左侧缩略图查看原图\n（拖拽平移；单击弹窗看原图）")
+        # 重建列表/首末标签/日期下拉（不触发日期跳转、不跳到末尾），
+        # 随后在原位置附近立即选中相邻条目；空库时 refresh 已切空态
+        self.refresh(locate_latest=False)
+        new_index = _index_after_delete(deleted_index, len(self._entries))
+        if new_index == -1:
+            return  # 已无任何记录：空态无需定位
+        self._strip.select_and_center(new_index)
 
     def _open_viewer(self) -> None:
         """单击原图区：用当前原图弹出全尺寸查看窗口（拖拽移动，单击任意处关闭）。"""

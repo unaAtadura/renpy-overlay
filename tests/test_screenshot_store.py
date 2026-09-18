@@ -61,6 +61,41 @@ def test_database_persists_across_connections(tmp_path):
     reopened.close()
 
 
+def test_delete_removes_only_target_record(tmp_path):
+    store = open_store(str(tmp_path))
+    _insert(store, 1000, "第一条")
+    second = _insert(store, 2000, "第二条")
+    third = _insert(store, 3000, "第三条")
+    assert store.delete(second) is True
+    assert store.count() == 2
+    assert store.record(second) is None  # 被删记录不可再读
+    assert [ts for _id, ts in store.entries()] == [1000, 3000]  # 其余记录保留
+    assert store.record(third)[0] == "第三条"
+    store.close()
+
+
+def test_delete_missing_id_returns_false(tmp_path):
+    store = open_store(str(tmp_path))
+    _insert(store, 1000, "唯一一条")
+    assert store.delete(999) is False  # id 不存在：未命中
+    assert store.count() == 1
+    store.close()
+
+
+def test_delete_persists_after_reopen(tmp_path):
+    store = open_store(str(tmp_path))
+    _insert(store, 1000, "保留")
+    victim = _insert(store, 2000, "将被删除")
+    store.close()
+    reopened = open_store(str(tmp_path))
+    assert reopened.delete(victim) is True
+    reopened.close()
+    final = open_store(str(tmp_path))
+    assert final.count() == 1
+    assert final.record(victim) is None
+    final.close()
+
+
 def test_schema_matches_specification(tmp_path):
     import sqlite3
 

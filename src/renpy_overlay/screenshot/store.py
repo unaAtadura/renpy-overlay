@@ -72,6 +72,24 @@ class ScreenshotStore:
         logger.debug("截图记录已写入（id=%s，译文 %d 字）：%s", cursor.lastrowid, len(ocr_text), self._db_path)
         return int(cursor.lastrowid)
 
+    def delete(self, record_id: int) -> bool:
+        """按 id 删除一条截图记录，返回是否删除成功（id 不存在返回 False）。"""
+        if self._broken:
+            return False
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM game_screenshot WHERE id = ?", (int(record_id),)
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._degrade("删除", exc)
+            return False
+        if cursor.rowcount == 0:
+            logger.debug("删除截图记录未命中（id=%s）：%s", record_id, self._db_path)
+            return False
+        logger.debug("截图记录已删除（id=%s）：%s", record_id, self._db_path)
+        return True
+
     def first_last_ts(self) -> tuple[int, int] | None:
         """首条与末条记录的毫秒时间戳（升序）；空库或失败返回 None。"""
         if self._broken:
