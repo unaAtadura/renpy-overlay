@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from renpy_overlay import win32api
 from renpy_overlay.quick_menu import QuickMenu
+from renpy_overlay.screenshot.window import needs_reshow_after_flags_change
 
 
 class _StubWindow:
@@ -163,3 +164,16 @@ def test_set_clickthrough_updates_exstyle_and_refreshes(monkeypatch):
     )
     win32api.set_clickthrough(0xAA, False)
     assert calls["set"][2] == 0x00000100  # TRANSPARENT 被清除，其余保留
+
+
+# ---- 穿透与显示状态切换：补显示判定（纯函数） ----------------------------------
+
+
+def test_needs_reshow_after_flags_change():
+    # 可见 → 被标志修改隐藏：必须补显示（保持窗口持续可见的唯一补显路径）
+    assert needs_reshow_after_flags_change(True, False) is True
+    # 可见 → 仍可见：不补，避免多余的 show 造成闪烁
+    assert needs_reshow_after_flags_change(True, True) is False
+    # 原本隐藏：保持隐藏，不主动显示
+    assert needs_reshow_after_flags_change(False, False) is False
+    assert needs_reshow_after_flags_change(False, True) is False

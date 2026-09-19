@@ -45,6 +45,16 @@ FRAME_COLORS: tuple[QColor, ...] = (
 )
 
 
+def needs_reshow_after_flags_change(was_visible: bool, now_visible: bool) -> bool:
+    """窗口标志变更后是否需要补 ``show()``（纯函数，便于离线单测）。
+
+    对已显示的顶层窗口修改窗口标志（如 ``WindowTransparentForInput``）
+    会被 Qt 隐藏；仅当“原本可见且现在不可见”时需要补显示，其余组合
+    （原本就隐藏、标志变更后仍可见）都不动，避免多余的 show 造成闪烁。
+    """
+    return was_visible and not now_visible
+
+
 class ScreenshotWindow(QWidget):
     """一个截图区域框：彩色边框 + 八向拉伸 + 锁定态单击触发截图翻译。"""
 
@@ -295,13 +305,22 @@ class ScreenshotWindow(QWidget):
     def set_clickthrough(self, enable: bool) -> None:
         """设置/取消鼠标穿透（QuickMenu 布局锁定时批量调用）。
 
-        双保险：win32 扩展样式 ``WS_EX_TRANSPARENT``（真正的点击穿透到
-        下层）+ Qt ``WindowTransparentForInput`` 窗口标志——后者由 Qt
-        协同维护同一扩展样式，防止窗口状态变化时被 Qt 重写样式导致穿透
-        丢失，并让窗口直接忽略全部鼠标事件（即使穿透未及时生效，单击、
-        双击、拖动、拉伸也不会触发）。解锁后两者同时还原，不影响正常
-        鼠标交互，也不改变双击锁定状态。
+        三层协同（方向一致，互不冲突），确保穿透真实生效：
+        - Qt ``WindowTransparentForInput`` 窗口标志（主力）：Qt 据此维护
+          原生扩展样式 ``WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE``，
+          系统级点击穿透到下层；由 Qt 管理可避免手动 SetWindowLong 被
+          窗口状态变化时的样式重算覆盖（实测手动路径对 Qt 顶层窗口不可靠）。
+        - ``WA_TransparentForMouseEvents`` 属性：Qt 事件层兜底，全部鼠标
+          事件不分发（单击/双击/拖动/拉伸均不触发），属性方式无副作用。
+        - win32 手动扩展样式 + ``SWP_FRAMECHANGED`` 刷新（win32api 层）再兜底。
 
+        注意：修改顶层窗口标志会令 Qt 隐藏窗口（内部按重父化处理），因此
+        标志变更后按 :func:`needs_reshow_after_flags_change` 对原本可见的
+        窗口补一次 ``show()``——与截图翻译流程 hide_all()/show_all() 的先
+        隐藏再显示同模式，同步执行不产生闪烁，且窗口已带
+        ``WA_ShowWithoutActivating``，不会抢焦点。
+
+        解锁后全部同时还原，不影响正常鼠标交互，也不改变双击锁定状态。
         单窗口失败（如销毁竞态）只记日志不抛：调用方是批量循环，不能让
         一个窗口拖垮整体。
         """
@@ -311,7 +330,11 @@ class ScreenshotWindow(QWidget):
             logger.warning(
                 "截图窗口 #%d 设置鼠标穿透失败（enable=%r）", self._index, enable
             )
+        was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, bool(enable))
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, bool(enable))
+        if needs_reshow_after_flags_change(was_visible, self.isVisible()):
+            self.show()  # 修改标志被 Qt 隐藏：补显示，窗口持续可见且不闪烁
 
     def reposition_cascade(self, center: QPoint, cascade_step: int = 30) -> None:
         """把窗口摆到 ``center`` 为中心的级联位置（第 index 个偏移一步）。"""
