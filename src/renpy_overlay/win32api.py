@@ -612,6 +612,77 @@ def set_topmost(hwnd: int) -> None:
     gui.SetWindowPos(hwnd, con.HWND_TOPMOST, 0, 0, 0, 0, flags)
 
 
+#: 扩展样式位（与 win32con 同值，避免仅为取常量而强依赖 pywin32）
+GWL_EXSTYLE = -16
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_LAYERED = 0x00080000
+
+
+def clickthrough_exstyle(exstyle: int, enable: bool) -> int:
+    """计算启用/取消鼠标穿透后的扩展样式位（纯函数，便于离线单测）。
+
+    启用：叠加 ``WS_EX_TRANSPARENT``（命中测试直接落到下层窗口）+
+    ``WS_EX_LAYERED``（微软文档要求两者同时存在才生效）；取消：仅清除
+    ``WS_EX_TRANSPARENT``，保留 ``WS_EX_LAYERED``（半透明渲染可能依赖它，
+    清除无必要且可能破坏 Qt 半透明背景）。
+    """
+    if enable:
+        return exstyle | WS_EX_TRANSPARENT | WS_EX_LAYERED
+    return exstyle & ~WS_EX_TRANSPARENT
+
+
+def set_clickthrough(hwnd: int, enable: bool) -> None:
+    """设置/取消窗口鼠标穿透（点击落到下层，本窗口不再响应鼠标交互）。
+
+    修改 ``GWL_EXSTYLE`` 后必须补一次 ``SWP_FRAMECHANGED`` 的 SetWindowPos，
+    否则系统命中测试缓存不刷新，穿透不会真正生效（实测缺陷）。
+    """
+    gui = _win32gui()
+    current = gui.GetWindowLong(hwnd, GWL_EXSTYLE)
+    gui.SetWindowLong(hwnd, GWL_EXSTYLE, clickthrough_exstyle(current, enable))
+    con = _win32con()
+    flags = (
+        con.SWP_NOMOVE
+        | con.SWP_NOSIZE
+        | con.SWP_NOZORDER
+        | con.SWP_NOACTIVATE
+        | con.SWP_FRAMECHANGED
+    )
+    gui.SetWindowPos(hwnd, 0, 0, 0, 0, 0, flags)
+
+
+#: 全局热键：RegisterHotKey 的修饰符 / 消息号（与 win32con 同值）
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+WM_HOTKEY = 0x0312
+
+
+def register_hotkey(hotkey_id: int, modifiers: int, vk: int) -> bool:
+    """注册进程级全局热键（WM_HOTKEY → wParam = hotkey_id）；失败返回 False。
+
+    失败通常是热键已被其它程序占用（如媒体键）；由调用方记日志降级。
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        return bool(user32.RegisterHotKey(None, hotkey_id, modifiers, vk))
+    except OSError:  # pragma: no cover
+        return False
+
+
+def unregister_hotkey(hotkey_id: int) -> None:
+    """注销全局热键（未注册的 id 静默忽略）。"""
+    if not _IS_WINDOWS:  # pragma: no cover
+        return
+    try:
+        ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+    except OSError:  # pragma: no cover
+        pass
+
+
 def enable_dpi_awareness() -> str:
     """开启 Per-Monitor DPI 感知，保证 GetWindowRect 拿到物理像素、与游戏窗口对齐。"""
     if not _IS_WINDOWS:  # pragma: no cover

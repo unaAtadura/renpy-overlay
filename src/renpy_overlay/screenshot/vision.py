@@ -1,9 +1,12 @@
-"""截图识别翻译：OpenAI 兼容 vision 接口（图片 base64 → 中文译文）。
+"""截图识图客户端：OpenAI 兼容 vision 接口（图片 base64 → 中文译文 / 文字原文）。
 
 与 :mod:`renpy_overlay.translator` 同风格：只依赖标准库 ``urllib``、不含任何
 线程 / GUI 逻辑，请求由调用方在后台线程执行。请求体是 OpenAI 多模态
 ``image_url + text`` 结构，思考模式的三方方言字段与 ``translator._chat_payload``
 保持同一语义（LM Studio 等本地服务需要 ``reasoning_effort`` 才能真正关闭思考）。
+
+两条平级链路互不影响：:func:`translate_image` 识图翻译为中文，
+:func:`recognize_image` 只识别返回图中文字原文（供原文译文对照等后续功能复用）。
 """
 
 from __future__ import annotations
@@ -32,6 +35,13 @@ DEFAULT_SCREENSHOT_PROMPT = (
 RETRY_SCREENSHOT_PROMPT = (
     "图中的文字是外文。请把图中全部文字翻译成简体中文，"
     "只输出中文译文，禁止输出原文，禁止保持原文格式。"
+)
+
+#: 识别原文指令：与翻译指令明确区分——只输出图中文字原文，不翻译、不改写、
+#: 不添加解释，避免模型自行翻译或改写（供原文译文对照等后续功能复用）
+DEFAULT_OCR_PROMPT = (
+    "把图片中的全部文字原样输出。"
+    "只输出图中文字的原文，不翻译，不改写，不添加解释，不要引号。"
 )
 
 #: 译文中 CJK 字符占比低于该阈值时判定为"疑似未翻译"：正常中文译文几乎全
@@ -143,3 +153,36 @@ def translate_image(
         raise TranslationError("模型返回了空译文")
     logger.info("截图识别翻译完成（译文 %d 字）", len(result))
     return result
+
+
+def recognize_image(
+    jpeg_base64: str,
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT,
+    model: str = "",
+    api_key: str = "",
+    enable_thinking: bool = False,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    instruction: str = DEFAULT_OCR_PROMPT,
+) -> str:
+    """识图 + 识别原文：把 base64 JPEG 发给 vision 模型，返回图中文字原文。
+
+    与 :func:`translate_image` 平级的独立链路（只识别、不翻译）：请求体结构、
+    参数与错误处理完全一致，仅默认指令不同——:data:`DEFAULT_OCR_PROMPT` 强调
+    只输出原文、不翻译不改写。翻译流程互不影响：调用方分别调用两个接口即可
+    同时获得原文与译文。空结果 / 响应缺字段抛 :class:`TranslationError`。
+    """
+    if not jpeg_base64:
+        raise ValueError("没有可识别的图片数据")
+    logger.info("发起截图识别原文请求（只识别、不翻译）")
+    return translate_image(
+        jpeg_base64,
+        base_url=base_url,
+        timeout=timeout,
+        model=model,
+        api_key=api_key,
+        enable_thinking=enable_thinking,
+        reasoning_effort=reasoning_effort,
+        instruction=instruction,
+    )

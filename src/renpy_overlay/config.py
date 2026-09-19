@@ -27,6 +27,15 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
       "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
       "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
+      "hotkey_main": "ctrl+alt+p",        # 快捷键模式主开关键（全局热键，Ctrl+Alt+P）
+      "hotkey_window_1": "1",             # 红色截图窗口的全局热键
+      "hotkey_window_2": "2",             # 橙色截图窗口的全局热键
+      "hotkey_window_3": "3",             # 黄色截图窗口的全局热键
+      "hotkey_window_4": "4",             # 绿色截图窗口的全局热键
+      "hotkey_window_5": "5",             # 青色截图窗口的全局热键
+      "hotkey_window_6": "6",             # 蓝色截图窗口的全局热键
+      "hotkey_window_7": "7",             # 紫色截图窗口的全局热键
+      "hotkey_window_8": "8",             # 黑色截图窗口的全局热键
     }
 """
 
@@ -38,6 +47,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .screenshot.hotkeys import DEFAULT_MAIN_HOTKEY, DEFAULT_WINDOW_HOTKEYS, parse_hotkey
 from .translator import (
     DEFAULT_BASE_URL,
     DEFAULT_REASONING_EFFORT,
@@ -69,6 +79,9 @@ DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
 DEFAULT_SCREENSHOT_MODEL = ""
 #: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
 DEFAULT_RECORDING_DURATION = 8
+#: 快捷键模式：主开关键默认 Ctrl+Alt+P，窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
+DEFAULT_HOTKEY_MAIN = DEFAULT_MAIN_HOTKEY
+DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
 #: 录制时长下限：过短的采样难以命中 Shazam 指纹库
 MIN_RECORDING_DURATION = 3
 #: 字号下限：再小就不可辨认；行距下限：小于 1.0 会上下行重叠
@@ -108,6 +121,9 @@ class AppConfig:
     screenshot_model: str = DEFAULT_SCREENSHOT_MODEL
     # 听歌识曲
     recording_duration: int = DEFAULT_RECORDING_DURATION
+    # 截图翻译快捷键模式（主开关 + 8 个窗口键，均为全局热键）
+    hotkey_main: str = DEFAULT_HOTKEY_MAIN
+    hotkey_windows: tuple[str, ...] = DEFAULT_HOTKEY_WINDOWS
 
 
 def default_path() -> Path:
@@ -149,7 +165,10 @@ def _write_defaults(target: Path) -> None:
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
         "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "recording_duration": DEFAULT_RECORDING_DURATION,
+        "hotkey_main": DEFAULT_HOTKEY_MAIN,
     }
+    for index, hotkey in enumerate(DEFAULT_HOTKEY_WINDOWS, start=1):
+        payload[f"hotkey_window_{index}"] = hotkey
     try:
         target.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -283,6 +302,23 @@ def _read_interval(raw: dict) -> float:
     return float(value)
 
 
+def _read_hotkey(raw: dict, key: str, default: str) -> str:
+    """快捷键字段校验：类型不对或格式解析失败 → 回退默认值。"""
+    value = _read_str(raw, key, default)
+    if parse_hotkey(value) is None:
+        logger.warning("%s 不是合法快捷键（%r），回退默认值 %r", key, value, default)
+        return default
+    return value
+
+
+def _read_hotkeys(raw: dict) -> tuple[str, ...]:
+    """窗口快捷键组（1-8 依次对应红橙黄绿青蓝紫黑）：逐项校验回退。"""
+    return tuple(
+        _read_hotkey(raw, f"hotkey_window_{index}", default)
+        for index, default in enumerate(DEFAULT_HOTKEY_WINDOWS, start=1)
+    )
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     """读取配置；文件不存在时创建默认值。任何异常都回退默认值并记日志。"""
     target = Path(path) if path is not None else default_path()
@@ -342,13 +378,16 @@ def load_config(path: Path | None = None) -> AppConfig:
         recording_duration=_read_positive_int(
             raw, "recording_duration", DEFAULT_RECORDING_DURATION, MIN_RECORDING_DURATION
         ),
+        hotkey_main=_read_hotkey(raw, "hotkey_main", DEFAULT_HOTKEY_MAIN),
+        hotkey_windows=_read_hotkeys(raw),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
-        "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s）",
+        "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s），"
+        "hotkeys（main=%r，windows=%r）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -370,5 +409,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.screenshot_model or "<回退 model>",
         app_config.recording_duration,
         target,
+        app_config.hotkey_main,
+        app_config.hotkey_windows,
     )
     return app_config

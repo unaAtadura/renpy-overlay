@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from . import config, translation_store, translator, win32api
 from .quick_menu import QuickMenu
 from .screenshot import (
+    HotkeyMode,
     ScreenshotHistoryWindow,
     capture_region,
     constrain_aspect_ratio,
@@ -728,6 +729,16 @@ class StreamOverlayWindow:
             on_recognize_song=self.request_song_recognition,
             on_open_song_history=self._open_song_history,
         )
+        # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
+        # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
+        self._hotkey_mode = HotkeyMode(
+            controller=self._quick_menu,
+            notify=self._update_title,
+            trigger_translation=self.request_screenshot_translation,
+            main_hotkey=self._config.hotkey_main,
+            window_hotkeys=self._config.hotkey_windows,
+        )
+        self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
@@ -839,6 +850,7 @@ class StreamOverlayWindow:
         if self._song_store is not None:
             self._song_store.close()
             self._song_store = None
+        self._hotkey_mode.shutdown()
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:

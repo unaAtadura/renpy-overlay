@@ -38,6 +38,15 @@ def test_missing_file_creates_defaults(tmp_path):
         "screenshot_compress_percent": 10,
         "screenshot_model": "",
         "recording_duration": 8,
+        "hotkey_main": "ctrl+alt+p",
+        "hotkey_window_1": "1",
+        "hotkey_window_2": "2",
+        "hotkey_window_3": "3",
+        "hotkey_window_4": "4",
+        "hotkey_window_5": "5",
+        "hotkey_window_6": "6",
+        "hotkey_window_7": "7",
+        "hotkey_window_8": "8",
     }
 
 
@@ -113,6 +122,46 @@ def test_recording_duration_below_minimum_falls_back(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"recording_duration": 2}), encoding="utf-8")
     assert config.load_config(target).recording_duration == config.DEFAULT_RECORDING_DURATION
+
+
+# ---------------------------------------------------------------- 截图翻译快捷键
+
+
+def test_hotkey_defaults_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    assert loaded.hotkey_main == "ctrl+alt+p"
+    assert loaded.hotkey_windows == tuple(str(i) for i in range(1, 9))
+
+
+def test_hotkey_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"hotkey_main": "ctrl+shift+k", "hotkey_window_1": "f2"}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.hotkey_main == "ctrl+shift+k"
+    assert loaded.hotkey_windows[0] == "f2"
+    assert loaded.hotkey_windows[1] == "2"  # 未配置的窗口键保持默认
+
+
+def test_hotkey_invalid_format_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in ("ctrl", "1+2", "foo", "ctrl+", "???", ""):
+        target.write_text(json.dumps({"hotkey_main": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.hotkey_main == "ctrl+alt+p", f"{bad!r} 应回退默认"
+
+
+def test_hotkey_invalid_type_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"hotkey_main": 123, "hotkey_window_3": None}), encoding="utf-8"
+    )
+    loaded = config.load_config(target)
+    assert loaded.hotkey_main == "ctrl+alt+p"
+    assert loaded.hotkey_windows[2] == "3"
 
 
 def test_reasoning_effort_invalid_falls_back(tmp_path):

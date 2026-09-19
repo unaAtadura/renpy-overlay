@@ -54,6 +54,9 @@ class _StubHandler(BaseHTTPRequestHandler):
             self._send(200, {"choices": []})
         elif instruction == EMPTY_TEXT:
             self._send(200, {"choices": [{"message": {"content": "  "}}]})
+        elif "不翻译" in instruction:
+            # 识别原文指令：模型按指令原样返回图中文字（英文样例）
+            self._send(200, {"choices": [{"message": {"content": ENGLISH_SAMPLE}}]})
         elif type(self).english_first and len(type(self).received) == 1:
             self._send(200, {"choices": [{"message": {"content": ENGLISH_SAMPLE}}]})
         else:
@@ -208,3 +211,75 @@ def test_verified_retry_aborted_returns_first_result(stub_server):
     )
     assert result == ENGLISH_SAMPLE
     assert len(received) == 1
+
+
+# ---- recognize_image：只识别原文、不翻译（与翻译链路平级） ---------------------
+
+
+def test_ocr_prompt_distinct_from_translation_prompts():
+    # 识别原文指令与翻译指令明确区分：强调只输出原文、不翻译不改写不解释
+    assert vision.DEFAULT_OCR_PROMPT != vision.DEFAULT_SCREENSHOT_PROMPT
+    assert "原文" in vision.DEFAULT_OCR_PROMPT
+    assert "不翻译" in vision.DEFAULT_OCR_PROMPT
+    assert "不改写" in vision.DEFAULT_OCR_PROMPT
+    assert "不添加解释" in vision.DEFAULT_OCR_PROMPT
+    assert "翻译成简体中文" in vision.DEFAULT_SCREENSHOT_PROMPT
+
+
+def test_recognize_returns_source_without_translation(stub_server):
+    base, received = stub_server
+    result = vision.recognize_image(_tiny_base64(), base_url=base, timeout=5)
+    assert result == ENGLISH_SAMPLE  # 原样返回图中文字，不做翻译
+    assert len(received) == 1  # 单次请求：不做 CJK 校验、不重试（区别于 verified）
+    instruction = received[0]["body"]["messages"][0]["content"][-1]["text"]
+    assert "不翻译" in instruction  # 发出的是识别原文指令
+
+
+def test_recognize_params_forwarded_like_translate(stub_server):
+    base, received = stub_server
+    vision.recognize_image(
+        _tiny_base64(), base_url=base, timeout=5, model="m", enable_thinking=True
+    )
+    body = received[0]["body"]
+    assert body["model"] == "m"
+    assert body["stream"] is False
+    assert body["enable_thinking"] is True
+    assert "reasoning_effort" not in body
+
+
+def test_recognize_custom_instruction_forwarded(stub_server):
+    base, received = stub_server
+    result = vision.recognize_image(
+        _tiny_base64(), base_url=base, timeout=5, model="m", instruction="自定义指令"
+    )
+    assert received[0]["body"]["messages"][0]["content"][-1]["text"] == "自定义指令"
+    assert result == "识别到的中文译文"  # 接口原样返回模型输出，不做二次加工
+
+
+def test_recognize_missing_choices_raises(stub_server):
+    base, _received = stub_server
+    with pytest.raises(translator.TranslationError, match="choices"):
+        vision.recognize_image(
+            _tiny_base64(), base_url=base, timeout=5, model="m", instruction=NO_CHOICES
+        )
+
+
+def test_recognize_empty_text_raises(stub_server):
+    base, _received = stub_server
+    with pytest.raises(translator.TranslationError, match="空"):
+        vision.recognize_image(
+            _tiny_base64(), base_url=base, timeout=5, model="m", instruction=EMPTY_TEXT
+        )
+
+
+def test_recognize_empty_base64_rejected(stub_server):
+    _base, received = stub_server
+    with pytest.raises(ValueError, match="没有可识别的图片"):
+        vision.recognize_image("")
+    assert received == []
+
+
+def test_recognize_exported_from_package_root():
+    from renpy_overlay.screenshot import recognize_image
+
+    assert recognize_image is vision.recognize_image

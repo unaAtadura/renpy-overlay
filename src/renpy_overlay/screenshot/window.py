@@ -26,10 +26,23 @@ from .window_visual import draw_edge_highlight, draw_grip_handles, draw_size_lab
 
 logger = logging.getLogger("renpy_overlay.screenshot.window")
 
-#: 单击延迟判定：等一个系统双击间隔再认定"单击"（双击会取消），与宿主同模式
+#: 单击延迟判定：等一个系统双击间隔再认定“单击”（双击会取消），与宿主同模式
 CLICK_DELAY_MS = win32api.double_click_time_ms() + 60
-#: 判定"点击"的最大位移（像素）：超过视为拖动/拉伸
+#: 判定“点击”的最大位移（像素）：超过视为拖动/拉伸
 CLICK_MOVE_TOLERANCE = 4
+
+#: 边框颜色（需求：创建截图窗口时依次分配，红橙黄绿青蓝紫黑）。
+#: 定义在窗口模块（边框色是窗口的固有属性）：快捷键模块以色找窗也用它
+FRAME_COLORS: tuple[QColor, ...] = (
+    QColor(255, 50, 50),  # 红
+    QColor(255, 165, 0),  # 橙
+    QColor(255, 255, 0),  # 黄
+    QColor(50, 205, 50),  # 绿
+    QColor(0, 206, 209),  # 青
+    QColor(30, 144, 255),  # 蓝
+    QColor(160, 32, 240),  # 紫
+    QColor(30, 30, 30),  # 黑
+)
 
 
 class ScreenshotWindow(QWidget):
@@ -87,6 +100,11 @@ class ScreenshotWindow(QWidget):
     @property
     def border_color(self) -> QColor:
         return QColor(self._border_color)
+
+    @property
+    def is_locked(self) -> bool:
+        """双击锁定状态（QuickMenu.locked_windows 以此筛“可识别”窗口）。"""
+        return self._locked
 
     # ---- 绘制 ---------------------------------------------------------------
 
@@ -273,6 +291,27 @@ class ScreenshotWindow(QWidget):
         super().enterEvent(event)
 
     # ---- 供 QuickMenu 管理的辅助 -------------------------------------------
+
+    def set_clickthrough(self, enable: bool) -> None:
+        """设置/取消鼠标穿透（QuickMenu 布局锁定时批量调用）。
+
+        双保险：win32 扩展样式 ``WS_EX_TRANSPARENT``（真正的点击穿透到
+        下层）+ Qt ``WindowTransparentForInput`` 窗口标志——后者由 Qt
+        协同维护同一扩展样式，防止窗口状态变化时被 Qt 重写样式导致穿透
+        丢失，并让窗口直接忽略全部鼠标事件（即使穿透未及时生效，单击、
+        双击、拖动、拉伸也不会触发）。解锁后两者同时还原，不影响正常
+        鼠标交互，也不改变双击锁定状态。
+
+        单窗口失败（如销毁竞态）只记日志不抛：调用方是批量循环，不能让
+        一个窗口拖垮整体。
+        """
+        try:
+            win32api.set_clickthrough(self.hwnd, enable)
+        except Exception:  # pragma: no cover - 窗口销毁竞态
+            logger.warning(
+                "截图窗口 #%d 设置鼠标穿透失败（enable=%r）", self._index, enable
+            )
+        self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, bool(enable))
 
     def reposition_cascade(self, center: QPoint, cascade_step: int = 30) -> None:
         """把窗口摆到 ``center`` 为中心的级联位置（第 index 个偏移一步）。"""

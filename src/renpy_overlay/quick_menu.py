@@ -6,7 +6,10 @@
 - 不依赖宿主类型：宿主能力（截图翻译、打开历史）全部经构造回调注入，
   后续新功能 = 在此加菜单项 + 注入对应回调，宿主零改动；
 - 所有方法仅在 Qt 主线程调用（右键事件本就在主线程，菜单动作就地分发，
-  不经过宿主的消息队列）。
+  不经过宿主的消息队列）；
+- 布局锁定（lock_layout/unlock_layout）与窗口双击锁定相互独立：前者只
+  屏蔽创建/销毁入口 + 全部窗口鼠标穿透，不改任何窗口的 ``is_locked``；
+  “已锁定窗口”（locked_windows）特指双击锁定（可识别）的窗口。
 """
 
 from __future__ import annotations
@@ -14,26 +17,15 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QMenu
 
-from .screenshot.window import ScreenshotWindow
+from .screenshot.hotkeys import HOTKEY_MODE_OFF_TEXT, HOTKEY_MODE_ON_TEXT
+from .screenshot.window import FRAME_COLORS, ScreenshotWindow
 
 logger = logging.getLogger("renpy_overlay.quick_menu")
 
 #: 截图窗口数量上限（需求：最多创建 8 个）
 MAX_WINDOWS = 8
-#: 边框颜色（需求：创建截图窗口时依次分配，红橙黄绿青蓝紫黑）
-FRAME_COLORS: tuple[QColor, ...] = (
-    QColor(255, 50, 50),  # 红
-    QColor(255, 165, 0),  # 橙
-    QColor(255, 255, 0),  # 黄
-    QColor(50, 205, 50),  # 绿
-    QColor(0, 206, 209),  # 青
-    QColor(30, 144, 255),  # 蓝
-    QColor(160, 32, 240),  # 紫
-    QColor(30, 30, 30),  # 黑
-)
 #: 级联创建时后一个窗口相对前一个的偏移（像素），避免完全重叠
 CASCADE_STEP = 30
 
@@ -53,6 +45,8 @@ class QuickMenu:
         self._on_recognize_song = on_recognize_song
         self._on_open_song_history = on_open_song_history
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
+        self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
+        self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
 
     # ---- 右键菜单 -----------------------------------------------------------
 
@@ -67,9 +61,14 @@ class QuickMenu:
         menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         count = len(self._windows)
         create_action = menu.addAction(f"创建截图窗口（{count}/{MAX_WINDOWS}）")
-        create_action.setEnabled(count < MAX_WINDOWS)
+        create_action.setEnabled(count < MAX_WINDOWS and not self._layout_locked)
         destroy_action = menu.addAction("销毁截图窗口")
-        destroy_action.setEnabled(count > 0)
+        destroy_action.setEnabled(count > 0 and not self._layout_locked)
+        hotkey_mode_action = None
+        if self._hotkey_mode is not None:
+            hotkey_mode_action = menu.addAction(
+                HOTKEY_MODE_ON_TEXT if self._hotkey_mode.enabled else HOTKEY_MODE_OFF_TEXT
+            )
         menu.addSeparator()
         history_action = menu.addAction("查看截图历史")
         menu.addSeparator()
@@ -80,6 +79,8 @@ class QuickMenu:
             self.create_window()
         elif chosen is destroy_action:
             self.destroy_latest()
+        elif hotkey_mode_action is not None and chosen is hotkey_mode_action:
+            self._hotkey_mode.toggle()
         elif chosen is history_action and callable(self._on_open_history):
             self._on_open_history()
         elif chosen is song_action and callable(self._on_recognize_song):
@@ -90,7 +91,10 @@ class QuickMenu:
     # ---- 截图窗口池 ---------------------------------------------------------
 
     def create_window(self) -> ScreenshotWindow | None:
-        """新建一个截图窗口（颜色按创建顺序分配）；已满返回 None。"""
+        """新建一个截图窗口（颜色按创建顺序分配）；已满/布局锁定返回 None。"""
+        if self._layout_locked:
+            logger.info("截图布局已锁定，忽略创建截图窗口请求")
+            return None
         if len(self._windows) >= MAX_WINDOWS:
             logger.info("截图窗口已达上限 %d 个，忽略创建请求", MAX_WINDOWS)
             return None
@@ -112,7 +116,10 @@ class QuickMenu:
         return window
 
     def destroy_latest(self) -> bool:
-        """堆栈式销毁：优先销毁最新创建的窗口；无窗口返回 False。"""
+        """堆栈式销毁：优先销毁最新创建的窗口；无窗口/布局锁定返回 False。"""
+        if self._layout_locked:
+            logger.info("截图布局已锁定，忽略销毁截图窗口请求")
+            return False
         if not self._windows:
             logger.info("没有可销毁的截图窗口")
             return False
@@ -152,6 +159,45 @@ class QuickMenu:
     @property
     def window_count(self) -> int:
         return len(self._windows)
+
+    # ---- 布局锁定（控制模块接口：供未来功能调用） ------------------------------
+
+    def attach_hotkey_mode(self, hotkey_mode) -> None:
+        """注入快捷键模式实例（菜单项按其状态显示文案与切换）。
+
+        不走构造参数：HotkeyMode 需要 controller（本实例）先存在才能构造，
+        宿主按「先建菜单、再附着模式」的顺序组装。
+        """
+        self._hotkey_mode = hotkey_mode
+
+    def lock_layout(self) -> None:
+        """锁定截图布局：屏蔽创建/销毁入口 + 全部截图窗口鼠标穿透。
+
+        只影响布局，不改任何窗口的双击锁定状态（两组接口彼此独立，也不
+        影响已有的截图识别与翻译流程）；幂等：重复调用无额外副作用。
+        """
+        self._layout_locked = True
+        for window in self._windows:
+            window.set_clickthrough(True)
+        logger.info(
+            "截图布局已锁定（%d 个窗口鼠标穿透，创建/销毁入口已屏蔽）",
+            len(self._windows),
+        )
+
+    def unlock_layout(self) -> None:
+        """解锁截图布局：恢复创建/销毁入口 + 取消全部截图窗口鼠标穿透。"""
+        self._layout_locked = False
+        for window in self._windows:
+            window.set_clickthrough(False)
+        logger.info("截图布局已解锁（恢复创建/销毁与窗口鼠标交互）")
+
+    def locked_windows(self) -> list[ScreenshotWindow]:
+        """全部双击锁定的截图窗口（栈序；边框色可作窗口唯一标识）。
+
+        特指双击锁定（可识别）的窗口，不含布局锁定锁定的窗口——遵守
+        “只有双击锁定的窗口才能进行识别”的既有原则。
+        """
+        return [window for window in self._windows if window.is_locked]
 
     # ---- 内部 ---------------------------------------------------------------
 
