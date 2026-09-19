@@ -55,12 +55,14 @@ from .screenshot.vision import translate_image_verified
 from .song_recognition import (
     RECORDER_AVAILABLE,
     SHAZAMIO_AVAILABLE,
+    SongHistoryWindow,
     extract_track_info,
     format_fail_body,
     format_success_body,
     recognize,
     record_system_audio,
 )
+from .song_recognition.store import open_store as open_song_store
 from .translation_cache import TranslationCache
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -610,12 +612,16 @@ class StreamOverlayWindow:
         self._translation_store = translation_store.open_store(game_dir or None)
         # 截图翻译：独立数据库 + 快捷菜单（窗口池），历史窗口单例惰性创建
         self._screenshot_store = open_store(game_dir or None)
+        # 听歌识曲：成功识别结果独立落库（game_song.db，与 screenshot.db 同目录）
+        self._song_store = open_song_store(game_dir or None)
         self._quick_menu = QuickMenu(
             on_capture_click=self.request_screenshot_translation,
             on_open_history=self._open_history,
             on_recognize_song=self.request_song_recognition,
+            on_open_song_history=self._open_song_history,
         )
         self._history_window: ScreenshotHistoryWindow | None = None
+        self._song_history_window: SongHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
         self._context_menu_open = False  # 右键菜单打开期间暂停周期性置顶重申
         self._last_translation_input: str | None = None
@@ -722,6 +728,9 @@ class StreamOverlayWindow:
         if self._screenshot_store is not None:
             self._screenshot_store.close()
             self._screenshot_store = None
+        if self._song_store is not None:
+            self._song_store.close()
+            self._song_store = None
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -729,6 +738,12 @@ class StreamOverlayWindow:
             except Exception:  # pragma: no cover
                 pass
             self._history_window = None
+        if self._song_history_window is not None:
+            try:
+                self._song_history_window.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._song_history_window = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -1292,6 +1307,19 @@ class StreamOverlayWindow:
         self._history_window.activateWindow()
         logger.info("已打开截图历史窗口")
 
+    def _open_song_history(self) -> None:
+        """打开识曲历史窗口（单例复用，每次刷新数据）。"""
+        if self._song_store is None:
+            self.hint("识曲历史不可用：未定位到游戏目录或数据库初始化失败。")
+            return
+        if self._song_history_window is None:
+            self._song_history_window = SongHistoryWindow(self._song_store)
+        self._song_history_window.refresh()
+        self._song_history_window.show()
+        self._song_history_window.raise_()
+        self._song_history_window.activateWindow()
+        logger.info("已打开识曲历史窗口")
+
     def request_screenshot_translation(self, window) -> None:
         """截图窗口锁定态单击（主线程）：互斥检查 → 隐藏 → 截图 → 恢复 → 后台翻译。
 
@@ -1562,6 +1590,9 @@ class StreamOverlayWindow:
         self._display_text(format_success_body(title, artist))
         self._update_title("识曲成功")
         logger.info("识曲成功（seq=%d）：%s - %s", seq, title, artist)
+        # 成功结果落库（需求：仅成功写入，失败不入库）；写入异常由 store 内部降级
+        if self._song_store is not None:
+            self._song_store.insert(artist=artist, song_name=title)
 
     def _handle_song_fail(self, item: dict) -> None:
         """主线程：识曲失败收尾：录制失败只改标题，识别失败额外显示正文提示。"""

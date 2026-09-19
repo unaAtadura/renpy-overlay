@@ -11,6 +11,7 @@
   （stream_window.StreamOverlayWindow）内实现，本包只提供录制与识别。
 """
 
+from .history_window import SongHistoryWindow
 from .recognizer import (
     SHAZAMIO_AVAILABLE,
     extract_track_info,
@@ -24,6 +25,7 @@ from .recorder import (
     SOUNDCARD_AVAILABLE,
     record_system_audio,
 )
+from .store import SongStore, open_store
 
 #: 是否存在至少一个可用的系统音频录制方案
 RECORDER_AVAILABLE = (
@@ -35,10 +37,13 @@ __all__ = [
     "PYAUDIOWPATCH_AVAILABLE",
     "RECORDER_AVAILABLE",
     "SHAZAMIO_AVAILABLE",
+    "SongHistoryWindow",
+    "SongStore",
     "SOUNDCARD_AVAILABLE",
     "extract_track_info",
     "format_fail_body",
     "format_success_body",
+    "open_store",
     "recognize",
     "record_system_audio",
 ]

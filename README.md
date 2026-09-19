@@ -126,7 +126,12 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   标题窗显示录制倒计时（建议关闭游戏音效提升识别率）/录制失败/识曲中/识曲成功/
   识曲失败，成功时正文窗显示「歌曲名/艺术家」，失败提示多次失败可能是该曲目
   未被收录；与翻译/截图翻译共用“同时仅一个 API 请求”互斥（在途时点击被忽略
-  且不更新提示），双击可打断录制与识曲（识别结果作废）；
+  且不更新提示），双击可打断录制与识曲（识别结果作废）；成功结果存入游戏目录
+  `renpy_overlay_cache/game_song.db`（`game_scene`/`remark` 留空）；
+- **识曲历史**：常规窗口浏览 `game_song.db` —— 上部为「查找」输入框与上一个/
+  下一个/删除按钮，下部为四列表格（曲名/艺术家/游戏场景/备注），按写入顺序
+  滚动浏览；查找精确匹配、不区分大小写并整行高亮，Ctrl+C 复制选中内容；
+  删除选中行同步删除数据库记录；游戏场景与备注两列可编辑，回车写入数据库；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；
@@ -214,7 +219,7 @@ uv run renpy-overlay --pid 12345
 | 按住标题/正文任一窗 + 左键拖动 | 两窗整体联动移动；松开后位置锁定（相对游戏窗口保持） |
 | 左键双击 | 锁定 / 解锁窗口位置（锁定后不响应拖动；双击同时中止在途翻译与听歌识曲） |
 | 锁定状态下单击 | 翻译当前对话原文，译文增量流入正文窗（未锁定不触发） |
-| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史、听歌识曲 |
+| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史、听歌识曲、查看识曲历史 |
 | 截图窗双击 | 锁定/解锁截图窗口（锁定后单击即截图翻译） |
 | 鼠标滚轮（悬浮窗内任意位置） | 上翻回看当前对话全文、回到底部恢复跟随（窗口只显示最新一条） |
 
@@ -398,6 +403,11 @@ renpygameread/
 │  ├─ translation_cache.py     # 翻译内存缓存（哈希键→(原文,译文)，FIFO，仅主线程读写）
 │  ├─ translation_store.py     # 翻译 SQLite 持久化（游戏目录 renpy_overlay_cache/，可降级）
 │  ├─ config.py                # 本地配置加载（config.json：窗口尺寸 / 自动翻译 / API / 截图）
+│  ├─ song_recognition/        # 听歌识曲功能包（纯后台识别 + 历史浏览）
+│  │  ├─ recorder.py           # 系统音频录制（三重回退：环回/立体声混音，可中断）
+│  │  ├─ recognizer.py         # Shazam 识别封装 + 结果提取/展示纯函数
+│  │  ├─ store.py              # game_song.db 存取（可降级，仅主线程读写）
+│  │  └─ history_window.py     # 识曲历史浏览窗口（四列表格：查找/删除/备注编辑）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown
 └─ tests/
@@ -413,6 +423,9 @@ renpygameread/
    ├─ test_screenshot_processing.py
    ├─ test_screenshot_store.py
    ├─ test_screenshot_vision.py
+   ├─ test_song_recognition.py
+   ├─ test_song_recognition_store.py
+   ├─ test_song_recognition_history.py
    └─ test_config.py
 ```
 

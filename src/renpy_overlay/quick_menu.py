@@ -41,10 +41,17 @@ CASCADE_STEP = 30
 class QuickMenu:
     """右键快捷菜单 + 截图窗口池（仅 Qt 主线程使用）。"""
 
-    def __init__(self, on_capture_click, on_open_history, on_recognize_song=None) -> None:
+    def __init__(
+        self,
+        on_capture_click,
+        on_open_history,
+        on_recognize_song=None,
+        on_open_song_history=None,
+    ) -> None:
         self._on_capture_click = on_capture_click
         self._on_open_history = on_open_history
         self._on_recognize_song = on_recognize_song
+        self._on_open_song_history = on_open_song_history
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
 
     # ---- 右键菜单 -----------------------------------------------------------
@@ -67,6 +74,7 @@ class QuickMenu:
         history_action = menu.addAction("查看截图历史")
         menu.addSeparator()
         song_action = menu.addAction("听歌识曲")
+        song_history_action = menu.addAction("查看识曲历史")
         chosen = menu.exec(global_pos)
         if chosen is create_action:
             self.create_window()
@@ -76,6 +84,8 @@ class QuickMenu:
             self._on_open_history()
         elif chosen is song_action and callable(self._on_recognize_song):
             self._on_recognize_song()
+        elif chosen is song_history_action and callable(self._on_open_song_history):
+            self._on_open_song_history()
 
     # ---- 截图窗口池 ---------------------------------------------------------
 
