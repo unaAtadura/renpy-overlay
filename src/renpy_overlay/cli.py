@@ -53,7 +53,8 @@ EPILOG = """\
   显示原文    config.json 的 show_original_text（默认 true）控制正文区是否随对话显示原文
   缓存大小    config.json 的 translation_cache_size_kb（默认 256KB）控制内存缓存上限
   API 配置    config.json 的 api_base_url / api_timeout / model / system_prompt / api_key / enable_thinking / reasoning_effort
-  查看全文    窗口只显示最新一条对话；滚轮上翻可回看当前对话全文，回到底部恢复跟随
+  查看全文    窗口只显示最新一条对话；输出过程固定显示第一行，滚轮可回看当前
+              对话全文，滚回顶部恢复固定显示
   分支选项    注入代理同时捕获剧情分支选项（menu choice）：出现时正文显示编号选项，
               选择后提示玩家所选；控制台模式下同步打印
   流式窗样式  config.json 的 stream_window_width/height（默认 1760x200，正文窗尺寸）/

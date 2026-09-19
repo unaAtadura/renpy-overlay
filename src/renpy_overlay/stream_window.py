@@ -7,8 +7,9 @@
    + Tool`` 实现屏幕上只可见文字本身；文字以常规 QFont（Black 字重）+ 统一
    淡蓝色直接绘制，背后逐行绘制半透明黑色蒙版条带提升对比度。标题窗在正文窗
    上方、水平左对齐，一次性整显完整标题（无打字机动画）；正文窗以打字机节拍
-   逐字弹出（积压越多消化越快），带出现动画，平滑滚动自动跟随最新内容，滚轮
-   上翻可回看当前对话全文、回到底部恢复跟随。
+   逐字弹出（积压越多消化越快），带出现动画，输出过程始终固定显示第一行
+   （大段文字不因自动滚屏滚出可视区），滚轮可回看当前对话全文、滚回顶部
+   恢复固定显示。
 
 2. **定位全部走 win32 物理像素**。跟随游戏窗口复用 :func:`compute_geometry`
    （整体高度 = 标题高 + 间距 + 正文高），经 :func:`pair_layout` 拆成两窗后用
@@ -222,6 +223,40 @@ def body_mask_bands(
     return bands
 
 
+def body_scroll_target(follow: bool, scroll_target: float, max_scroll: float) -> float:
+    """计算正文窗本帧的滚动目标（内容坐标系像素）。
+
+    ``follow`` 为 True：固定显示第一行（偏移 0）—— 大段文字流式输出时不再
+    因自动滚屏被推出可视区，1-2 行短文本（本就不足一屏）观感不变；为 False
+    （滚轮回看中）：把既有目标收敛回 ``[0, max_scroll]``，防止内容清空或
+    变短后目标越界。抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
+    """
+    if follow:
+        return 0.0
+    return min(max(scroll_target, 0.0), max_scroll)
+
+
+def body_wheel_target(
+    scroll_target: float,
+    notches: float,
+    line_h: float,
+    max_scroll: float,
+) -> tuple[float, bool]:
+    """由滚轮事件计算新的 ``(滚动目标, 跟随态)``。
+
+    每格滚动 ``WHEEL_LINES_PER_NOTCH`` 行：下翻（notches < 0）向底部推进
+    回看后文并暂停固定首行；上翻（notches > 0）向顶部回退，滚回顶部
+    （目标归零）即恢复"固定显示第一行"。抽成纯函数便于离线验证
+    （见 ``tests/test_stream_window.py``）。
+    """
+    target = min(
+        max(scroll_target - notches * WHEEL_LINES_PER_NOTCH * line_h, 0.0),
+        max_scroll,
+    )
+    follow = notches > 0 and target <= 0.5
+    return target, follow
+
+
 def choice_translation_text(items: list[str]) -> str:
     """分支选项的翻译输入：编号逐行拼接（与正文里的编号选项列表一致）。
 
@@ -358,7 +393,7 @@ class _Glyph:
 
 
 class BodyWindow(_StreamWindowBase):
-    """正文窗：打字机式逐字弹出的流式文本，平滑滚动 + 滚轮回看。"""
+    """正文窗：打字机式逐字弹出的流式文本，固定显示第一行 + 滚轮回看。"""
 
     def __init__(self, font_px: int, line_spacing: float, host) -> None:
         font = _stream_font(font_px)
@@ -372,8 +407,8 @@ class BodyWindow(_StreamWindowBase):
         self._line_used = 0.0  # 当前行已用宽度
         self._line_empty = True
         self._scroll = 0.0  # 当前平滑滚动偏移（像素）
-        self._scroll_target = 0.0  # 滚动目标：自动跟随与滚轮回顾共用的收敛点
-        self._follow = True  # True=跟随最新文字；滚轮上翻回顾时暂停
+        self._scroll_target = 0.0  # 滚动目标：固定首行与滚轮回看共用的收敛点
+        self._follow = True  # True=固定显示第一行；滚轮下翻回看时暂停
 
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(TYPE_INTERVAL_MS)
@@ -387,7 +422,7 @@ class BodyWindow(_StreamWindowBase):
     # ---- 对外接口 ---------------------------------------------------------
 
     def begin_stream(self) -> None:
-        """开始一段新的内容：清屏并恢复自动跟随（由宿主在内容切换时调用）。"""
+        """开始一段新的内容：清屏并恢复固定显示第一行（由宿主在内容切换时调用）。"""
         self.clear()
 
     def feed_text(self, text: str) -> None:
@@ -455,13 +490,10 @@ class BodyWindow(_StreamWindowBase):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        # —— 滚动：自动跟随最新文字 / 滚轮回顾历史，统一向 _scroll_target 缓动 ——
-        max_scroll = self._max_scroll()
-        if self._follow:
-            # 吸附到整行，避免顶部裁出半行、底部露出空行
-            self._scroll_target = math.floor(max_scroll / self._line_h) * self._line_h
-        else:
-            self._scroll_target = min(max(self._scroll_target, 0.0), max_scroll)
+        # —— 滚动：跟随 = 固定显示第一行；滚轮回看时停在用户翻到的位置 ——
+        self._scroll_target = body_scroll_target(
+            self._follow, self._scroll_target, self._max_scroll()
+        )
         self._scroll += (self._scroll_target - self._scroll) * 0.12
         if abs(self._scroll_target - self._scroll) < 0.5:
             self._scroll = self._scroll_target
@@ -513,7 +545,7 @@ class BodyWindow(_StreamWindowBase):
     # ---- 滚轮回看 ----------------------------------------------------------
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        """滚轮回顾当前对话全文：上翻回退并暂停自动跟随，回到底部恢复跟随。"""
+        """滚轮回看当前对话全文：下翻离开顶部暂停固定，滚回顶部恢复固定首行。"""
         delta = event.angleDelta().y()
         if delta == 0:
             delta = event.pixelDelta().y() * 8
@@ -521,11 +553,9 @@ class BodyWindow(_StreamWindowBase):
             event.ignore()
             return
         notches = delta / 120.0
-        self._scroll_target = min(
-            max(self._scroll_target - notches * WHEEL_LINES_PER_NOTCH * self._line_h, 0.0),
-            self._max_scroll(),
+        self._scroll_target, self._follow = body_wheel_target(
+            self._scroll_target, notches, self._line_h, self._max_scroll()
         )
-        self._follow = notches < 0 and self._scroll_target >= self._max_scroll() - 0.5
         event.accept()
 
 

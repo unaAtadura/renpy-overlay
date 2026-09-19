@@ -2,6 +2,7 @@
 
 悬浮窗定位的核心是两组纯计算 —— "给定游戏窗口矩形 → 整体几何"的
 ``compute_geometry`` 与 "整体几何 → 标题/正文几何"的 ``pair_layout``，
+以及正文窗滚动方式的纯计算（``body_scroll_target`` / ``body_wheel_target``），
 这里把它们当成数学函数来验证（不实例化 QWidget，无需显示环境）。
 """
 
@@ -11,7 +12,10 @@ from renpy_overlay.stream_window import (
     MARGIN,
     MASK_PAD_X,
     MASK_PAD_Y,
+    WHEEL_LINES_PER_NOTCH,
     body_mask_bands,
+    body_scroll_target,
+    body_wheel_target,
     choice_translation_text,
     compute_geometry,
     pair_layout,
@@ -200,3 +204,56 @@ def test_choice_translation_text_numbered_lines():
 
 def test_choice_translation_text_empty():
     assert choice_translation_text([]) == ""
+
+
+# ---- body_scroll_target / body_wheel_target：滚动方式（固定首行 + 回看） ----
+
+
+LINE_H = 20.0
+FULL_SCREEN = 400.0  # 可滚动内容高度（px），每格滚轮 = 3 行 = 60px
+
+
+def test_scroll_target_follow_pins_first_line():
+    """跟随态 = 固定显示第一行：目标偏移恒为 0，与内容多少/旧目标无关。"""
+    assert body_scroll_target(True, 0.0, FULL_SCREEN) == 0.0
+    assert body_scroll_target(True, 120.0, FULL_SCREEN) == 0.0
+    assert body_scroll_target(True, 0.0, 0.0) == 0.0  # 不足一屏同样停在首行
+
+
+def test_scroll_target_review_clamped():
+    """回看态（滚轮翻阅中）：目标收敛回 [0, max_scroll]，不越界。"""
+    assert body_scroll_target(False, 120.0, FULL_SCREEN) == 120.0
+    assert body_scroll_target(False, -5.0, FULL_SCREEN) == 0.0
+    assert body_scroll_target(False, 500.0, FULL_SCREEN) == FULL_SCREEN
+    assert body_scroll_target(False, 120.0, 0.0) == 0.0  # 内容清空后目标归零
+
+
+def test_wheel_down_leaves_top_and_pauses_follow():
+    """下翻离开顶部：目标向底部推进，暂停固定首行（首行不再固定）。"""
+    target, follow = body_wheel_target(0.0, -1.0, LINE_H, FULL_SCREEN)
+    assert target == WHEEL_LINES_PER_NOTCH * LINE_H
+    assert follow is False
+    # 继续下翻：目标继续推进并钳在底部，保持暂停
+    target, follow = body_wheel_target(0.0, -10.0, LINE_H, FULL_SCREEN)
+    assert target == FULL_SCREEN
+    assert follow is False
+
+
+def test_wheel_up_to_top_restores_follow():
+    """上翻滚回顶部：目标归零并恢复固定首行；中途停下则保持暂停。"""
+    target, follow = body_wheel_target(FULL_SCREEN, 1.0, LINE_H, FULL_SCREEN)
+    assert target == FULL_SCREEN - WHEEL_LINES_PER_NOTCH * LINE_H
+    assert follow is False  # 未回到顶部，跟随不恢复
+    target, follow = body_wheel_target(FULL_SCREEN, 8.0, LINE_H, FULL_SCREEN)
+    assert target == 0.0
+    assert follow is True
+
+
+def test_wheel_short_content_stays_at_top():
+    """内容不足一屏：任何滚动目标都钳在顶部，上翻即在首行并恢复固定。"""
+    target, follow = body_wheel_target(0.0, -1.0, LINE_H, 0.0)
+    assert target == 0.0
+    assert follow is False  # 下翻意图明确，不强行恢复
+    target, follow = body_wheel_target(0.0, 1.0, LINE_H, 0.0)
+    assert target == 0.0
+    assert follow is True
