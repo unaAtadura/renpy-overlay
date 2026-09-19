@@ -303,7 +303,11 @@ class ScreenshotWindow(QWidget):
     # ---- 供 QuickMenu 管理的辅助 -------------------------------------------
 
     def set_clickthrough(self, enable: bool) -> None:
-        """设置/取消鼠标穿透（QuickMenu 布局锁定时批量调用）。
+        """设置/取消鼠标穿透（通用能力；当前快捷键模式已改为整体隐藏窗口
+        方案、不再经此路径，保留供未来需要系统级穿透的功能使用）。
+
+        调用方需自行管理 Qt/Win32 双层状态一致性（见下方三层协同与顺序
+        说明）——这是实测中难以收敛的根源，慎用。
 
         三层协同（方向一致，互不冲突），确保穿透真实生效：
         - Qt ``WindowTransparentForInput`` 窗口标志（主力）：Qt 据此维护
@@ -320,21 +324,50 @@ class ScreenshotWindow(QWidget):
         隐藏再显示同模式，同步执行不产生闪烁，且窗口已带
         ``WA_ShowWithoutActivating``，不会抢焦点。
 
+        执行顺序关键：Qt 标志/属性变更（含补 show）必须在前，win32 手动
+        样式 + ``SWP_FRAMECHANGED`` 收尾——命中测试缓存只在 FRAMECHANGED
+        时刷新，若刷新发生在 Qt 清除穿透样式之前（如先 win32 后 Qt），
+        退出时缓存里残留的还是穿透态，窗口将无法恢复交互（实测缺陷）。
+        收尾刷新永远基于最终样式状态，进入/退出两侧都正确。
+
+        取消穿透的确定性还原：Qt 清除窗口标志对 DWM 合成窗口的输入布局
+        不总是即时生效（实测退出后穿透残留，且随原生窗口实例存在——重建
+        窗口即恢复）。因此 enable=False 时在全部清除动作之后调用
+        :meth:`recreate_native_window` 强制销毁重建原生窗口，按已无穿透
+        标志的当前状态全新创建，任何形式的残留都物理消失。
+
         解锁后全部同时还原，不影响正常鼠标交互，也不改变双击锁定状态。
         单窗口失败（如销毁竞态）只记日志不抛：调用方是批量循环，不能让
         一个窗口拖垮整体。
         """
-        try:
-            win32api.set_clickthrough(self.hwnd, enable)
-        except Exception:  # pragma: no cover - 窗口销毁竞态
-            logger.warning(
-                "截图窗口 #%d 设置鼠标穿透失败（enable=%r）", self._index, enable
-            )
         was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, bool(enable))
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, bool(enable))
         if needs_reshow_after_flags_change(was_visible, self.isVisible()):
             self.show()  # 修改标志被 Qt 隐藏：补显示，窗口持续可见且不闪烁
+        try:
+            # 收尾执行：SetWindowLong 后的 FRAMECHANGED 刷新基于最终样式，
+            # 保证命中测试缓存与真实状态一致（进入与退出都生效）
+            win32api.set_clickthrough(self.hwnd, enable)
+        except Exception:  # pragma: no cover - 窗口销毁竞态
+            logger.warning(
+                "截图窗口 #%d 设置鼠标穿透失败（enable=%r）", self._index, enable
+            )
+        if not enable:
+            self.recreate_native_window()
+
+    def recreate_native_window(self) -> None:
+        """销毁并重建本窗口的原生窗口（Qt 公开 API ``create()``）。
+
+        用于取消穿透后的确定性还原：穿透相关残留（扩展样式位、DWM 输入
+        布局、命中测试缓存）都绑定在原生窗口实例上，Qt 清标志/手动
+        SetWindowLong + FRAMECHANGED 均无法解除（实测）；而原生窗口重建
+        会按当前窗口标志全新创建——穿透标志已清，残留必然消失。
+
+        几何、窗口标志与可见状态原样保留；不改变双击锁定状态；新原生
+        窗口句柄由各调用方动态获取（winId()），无长期缓存可失效。
+        """
+        self.create(0, True, True)  # destroyOldWindow=True：旧原生窗口随之销毁
 
     def reposition_cascade(self, center: QPoint, cascade_step: int = 30) -> None:
         """把窗口摆到 ``center`` 为中心的级联位置（第 index 个偏移一步）。"""

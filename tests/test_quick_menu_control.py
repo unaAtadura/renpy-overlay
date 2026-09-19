@@ -1,9 +1,10 @@
 """QuickMenu 布局锁定控制接口的离线验证：stub 窗口注入，不构造真实 QWidget。
 
 控制模块三组接口（锁定/解锁截图布局、获取双击锁定窗口）只操作窗口池列表
-与窗口的鸭子接口（``is_locked`` / ``set_clickthrough``），用轻量 stub 即可
-离线覆盖全部路径与边界（含创建/销毁的锁定态拦截）。win32api 侧的穿透样式
-位计算抽为纯函数，配合 fake gui 验证调用链。
+与窗口的鸭子接口（``is_locked`` / ``hide`` / ``show``），用轻量 stub 即可
+离线覆盖全部路径与边界（含创建/销毁的锁定态拦截、锁定期 show_all 守卫、
+多轮往返一致性）。win32api 侧的穿透样式位计算抽为纯函数，配合 fake gui
+验证调用链（通用能力保留，快捷键模式已改用整体隐藏方案）。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ class _StubWindow:
     def __init__(self, index: int = 0, locked: bool = False) -> None:
         self.index = index
         self._locked = locked
-        self.clickthrough_calls: list[bool] = []
+        self.visible = True
         self.closed = False
         self.deleted = False
 
@@ -27,8 +28,11 @@ class _StubWindow:
     def is_locked(self) -> bool:
         return self._locked
 
-    def set_clickthrough(self, enable: bool) -> None:
-        self.clickthrough_calls.append(enable)
+    def hide(self) -> None:
+        self.visible = False
+
+    def show(self) -> None:
+        self.visible = True
 
     def close(self) -> None:
         self.closed = True
@@ -46,31 +50,42 @@ def _menu_with(*locked_flags: bool) -> QuickMenu:
 # ---- 锁定 / 解锁截图布局 -------------------------------------------------------
 
 
-def test_lock_layout_enables_clickthrough_and_blocks_create_destroy():
+def test_lock_layout_hides_all_and_blocks_create_destroy():
     menu = _menu_with(False, True, False)
     menu.lock_layout()
-    assert [w.clickthrough_calls for w in menu._windows] == [[True], [True], [True]]
+    assert all(not w.visible for w in menu._windows)  # 整体隐藏：不显示、不可交互
     assert menu.create_window() is None  # 创建入口被屏蔽
     assert menu.destroy_latest() is False  # 销毁入口被屏蔽
     assert menu.window_count == 3  # 窗口池原样
 
 
-def test_unlock_layout_restores_clickthrough_and_actions():
+def test_unlock_layout_restores_visibility_and_actions():
     menu = _menu_with(False)
     menu.lock_layout()
     menu.unlock_layout()
-    assert menu._windows[0].clickthrough_calls == [True, False]
+    assert menu._windows[0].visible  # 恢复显示且可交互（无穿透残留概念）
     assert menu._layout_locked is False
 
 
 def test_layout_lock_and_unlock_are_idempotent():
     menu = _menu_with(False)
     menu.lock_layout()
-    menu.lock_layout()  # 重复锁定无额外副作用
-    assert menu._windows[0].clickthrough_calls == [True, True]
+    menu.lock_layout()  # 重复锁定无额外副作用：窗口保持隐藏
+    assert not menu._windows[0].visible
     menu.unlock_layout()
-    menu.unlock_layout()  # 重复解锁无额外副作用
-    assert menu._windows[0].clickthrough_calls == [True, True, False, False]
+    menu.unlock_layout()  # 重复解锁无额外副作用：窗口保持可见
+    assert menu._windows[0].visible
+
+
+def test_show_all_respects_layout_lock():
+    # 快捷键模式（布局锁定）期间触发截图翻译：翻译流程 finally 中无条件
+    # 调用的 show_all() 不得把被刻意隐藏的窗口放出来
+    menu = _menu_with(False, True)
+    menu.lock_layout()
+    menu.show_all()
+    assert all(not w.visible for w in menu._windows)  # 仍保持隐藏
+    menu.unlock_layout()  # 解锁后恢复
+    assert all(w.visible for w in menu._windows)
 
 
 def test_layout_lock_keeps_double_click_lock_state_unchanged():
@@ -145,6 +160,16 @@ def test_set_clickthrough_updates_exstyle_and_refreshes(monkeypatch):
         SWP_NOACTIVATE = 0x0010
         SWP_FRAMECHANGED = 0x0020
 
+        @classmethod
+        def expected_refresh_flags(cls) -> int:
+            return (
+                cls.SWP_NOMOVE
+                | cls.SWP_NOSIZE
+                | cls.SWP_NOZORDER
+                | cls.SWP_NOACTIVATE
+                | cls.SWP_FRAMECHANGED
+            )
+
     monkeypatch.setattr(win32api, "_win32gui", lambda: _FakeGui())
     monkeypatch.setattr(win32api, "_win32con", lambda: _FakeCon())
     win32api.set_clickthrough(0xAA, True)
@@ -155,15 +180,11 @@ def test_set_clickthrough_updates_exstyle_and_refreshes(monkeypatch):
     # 扩展样式修改后必须带 SWP_FRAMECHANGED 刷新，命中测试才会真正生效
     refresh_hwnd, flags = calls["refresh"]
     assert refresh_hwnd == 0xAA
-    assert flags == (
-        _FakeCon.SWP_NOMOVE
-        | _FakeCon.SWP_NOSIZE
-        | _FakeCon.SWP_NOZORDER
-        | _FakeCon.SWP_NOACTIVATE
-        | _FakeCon.SWP_FRAMECHANGED
-    )
+    assert flags == _FakeCon.expected_refresh_flags()
     win32api.set_clickthrough(0xAA, False)
     assert calls["set"][2] == 0x00000100  # TRANSPARENT 被清除，其余保留
+    # 取消穿透同样必须以 FRAMECHANGED 收尾刷新，命中测试缓存才能恢复可交互
+    assert calls["refresh"] == (0xAA, _FakeCon.expected_refresh_flags())
 
 
 # ---- 穿透与显示状态切换：补显示判定（纯函数） ----------------------------------

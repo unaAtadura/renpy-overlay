@@ -7,9 +7,9 @@
   后续新功能 = 在此加菜单项 + 注入对应回调，宿主零改动；
 - 所有方法仅在 Qt 主线程调用（右键事件本就在主线程，菜单动作就地分发，
   不经过宿主的消息队列）；
-- 布局锁定（lock_layout/unlock_layout）与窗口双击锁定相互独立：前者只
-  屏蔽创建/销毁入口 + 全部窗口鼠标穿透，不改任何窗口的 ``is_locked``；
-  “已锁定窗口”（locked_windows）特指双击锁定（可识别）的窗口。
+- 布局锁定（lock_layout/unlock_layout）与窗口双击锁定相互独立：前者
+  整体隐藏/恢复全部截图窗口并屏蔽创建/销毁入口，不改任何窗口的
+  ``is_locked``；“已锁定窗口”（locked_windows）特指双击锁定（可识别）的窗口。
 """
 
 from __future__ import annotations
@@ -135,7 +135,14 @@ class QuickMenu:
             window.hide()
 
     def show_all(self) -> None:
-        """截图结束后恢复显示全部截图窗口。"""
+        """截图结束后恢复显示全部截图窗口。
+
+        布局锁定（快捷键模式）期间窗口被刻意整体隐藏，此时跳过恢复——
+        否则锁定期内触发一次截图翻译，本方法（翻译流程 finally 中无条件
+        调用）就会把窗口全部放出来。
+        """
+        if self._layout_locked:
+            return
         for window in self._windows:
             window.show()
 
@@ -171,25 +178,32 @@ class QuickMenu:
         self._hotkey_mode = hotkey_mode
 
     def lock_layout(self) -> None:
-        """锁定截图布局：屏蔽创建/销毁入口 + 全部截图窗口鼠标穿透。
+        """锁定截图布局：整体隐藏全部截图窗口 + 屏蔽创建/销毁入口。
 
-        只影响布局，不改任何窗口的双击锁定状态（两组接口彼此独立，也不
-        影响已有的截图识别与翻译流程）；幂等：重复调用无额外副作用。
+        窗口彻底隐藏（不显示、不参与命中测试、不接收任何鼠标事件），
+        从根本上保证不阻挡鼠标与屏幕交互；框选矩形保留在窗口对象上
+        （``GetWindowRect`` 对隐藏窗口仍返回几何），快捷键触发截图翻译
+        时现取坐标。只影响布局，不改任何窗口的双击锁定状态；幂等：
+        重复调用无额外副作用。
         """
         self._layout_locked = True
-        for window in self._windows:
-            window.set_clickthrough(True)
+        self.hide_all()
         logger.info(
-            "截图布局已锁定（%d 个窗口鼠标穿透，创建/销毁入口已屏蔽）",
+            "截图布局已锁定（%d 个窗口已隐藏，创建/销毁入口已屏蔽）",
             len(self._windows),
         )
 
     def unlock_layout(self) -> None:
-        """解锁截图布局：恢复创建/销毁入口 + 取消全部截图窗口鼠标穿透。"""
+        """解锁截图布局：恢复显示全部截图窗口 + 恢复创建/销毁入口。
+
+        hide/show 不触碰窗口样式、标志与几何，边框、位置、尺寸、双击
+        锁定态视觉与全部鼠标交互在恢复后与锁定前完全一致（hide_all/
+        show_all 即截图翻译流程反复验证的同一对原语），多轮开启/关闭
+        稳定一致。
+        """
         self._layout_locked = False
-        for window in self._windows:
-            window.set_clickthrough(False)
-        logger.info("截图布局已解锁（恢复创建/销毁与窗口鼠标交互）")
+        self.show_all()
+        logger.info("截图布局已解锁（窗口已恢复显示，创建/销毁入口已恢复）")
 
     def locked_windows(self) -> list[ScreenshotWindow]:
         """全部双击锁定的截图窗口（栈序；边框色可作窗口唯一标识）。
