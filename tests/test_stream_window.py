@@ -2,17 +2,23 @@
 
 悬浮窗定位的核心是两组纯计算 —— "给定游戏窗口矩形 → 整体几何"的
 ``compute_geometry`` 与 "整体几何 → 标题/正文几何"的 ``pair_layout``，
-以及正文窗滚动方式的纯计算（``body_scroll_target`` / ``body_wheel_target``），
+以及正文窗滚动方式的纯计算（``body_scroll_target`` / ``body_wheel_target`` /
+``body_drag_scroll_rate``），
 这里把它们当成数学函数来验证（不实例化 QWidget，无需显示环境）。
 """
 
 from __future__ import annotations
 
 from renpy_overlay.stream_window import (
+    DRAG_SCROLL_DEBOUNCE_PX,
+    DRAG_SCROLL_FAST_FACTOR,
+    DRAG_SCROLL_FAST_PX,
+    DRAG_SCROLL_SLOW_NOTCHES_PER_SEC,
     MARGIN,
     MASK_PAD_X,
     MASK_PAD_Y,
     WHEEL_LINES_PER_NOTCH,
+    body_drag_scroll_rate,
     body_mask_bands,
     body_scroll_target,
     body_wheel_target,
@@ -257,3 +263,33 @@ def test_wheel_short_content_stays_at_top():
     target, follow = body_wheel_target(0.0, 1.0, LINE_H, 0.0)
     assert target == 0.0
     assert follow is True
+
+
+def test_drag_scroll_rate_debounce_zone():
+    """防抖区（|dy| <= 12px）：速率为 0，不触发滚动。"""
+    assert body_drag_scroll_rate(0.0, LINE_H) == 0.0
+    assert body_drag_scroll_rate(DRAG_SCROLL_DEBOUNCE_PX, LINE_H) == 0.0
+    assert body_drag_scroll_rate(-DRAG_SCROLL_DEBOUNCE_PX, LINE_H) == 0.0
+
+
+def test_drag_scroll_rate_slow_zone():
+    """慢速区：每秒 1 格滚轮；上滑看后文（正），下滑回看上文（负）。"""
+    dy = DRAG_SCROLL_DEBOUNCE_PX + 1.0
+    slow = DRAG_SCROLL_SLOW_NOTCHES_PER_SEC * WHEEL_LINES_PER_NOTCH * LINE_H
+    assert body_drag_scroll_rate(-dy, LINE_H) == slow
+    assert body_drag_scroll_rate(dy, LINE_H) == -slow
+    # 分界值：恰好慢速区上沿（不超过 FAST_PX）仍是慢速
+    assert body_drag_scroll_rate(-DRAG_SCROLL_FAST_PX, LINE_H) == slow
+
+
+def test_drag_scroll_rate_fast_zone():
+    """快速区（超过 120px）：慢速的 5 倍，即每 0.2 秒 1 格滚轮。"""
+    dy = DRAG_SCROLL_FAST_PX + 1.0
+    fast = (
+        DRAG_SCROLL_FAST_FACTOR
+        * DRAG_SCROLL_SLOW_NOTCHES_PER_SEC
+        * WHEEL_LINES_PER_NOTCH
+        * LINE_H
+    )
+    assert body_drag_scroll_rate(-dy, LINE_H) == fast
+    assert body_drag_scroll_rate(dy, LINE_H) == -fast

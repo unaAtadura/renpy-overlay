@@ -17,7 +17,8 @@
    移动，拖动时把 Qt 鼠标逻辑坐标乘 ``devicePixelRatioF`` 换算回物理像素。
 
 3. **交互**。左键按住标题或正文任一窗口拖动即整体联动；双击切换位置锁定
-   （中止在途翻译）；锁定态单击把最近捕获的对话原文经 SSE 流式接口发给
+   （中止在途翻译）；锁定态按住正文文字上下滑动即拖拽滚动文本（两档速度，
+   防抖区内不滚动）；锁定态单击把最近捕获的对话原文经 SSE 流式接口发给
    OpenAI 兼容服务，译文逐块流入正文窗；``auto_translate`` 开启时锁定状态
    按间隔自动翻译（两级缓存命中直接上屏）。单击/双击用"延迟判定"区分。
 
@@ -85,6 +86,12 @@ SPAWN_DURATION = 0.55  # 单字出现动画时长（秒）
 TYPE_INTERVAL_MS = 16  # 打字机节拍（~60 字/秒，积压越多消化越快）
 RENDER_INTERVAL_MS = 16  # 动画刷新周期
 WHEEL_LINES_PER_NOTCH = 3.0  # 滚轮每格回退/推进的行数
+#: 锁定态拖拽滚动（按住正文文字上下滑动）：以按下点为基准的垂直偏移分档
+DRAG_SCROLL_DEBOUNCE_PX = 12.0  # 防抖区：不触发滚动（过滤手抖与误触微动）
+DRAG_SCROLL_FAST_PX = 120.0  # 超过该偏移进入快速滚动档
+DRAG_SCROLL_SLOW_NOTCHES_PER_SEC = 1.0  # 慢速档：每秒滚动 1 格滚轮
+DRAG_SCROLL_FAST_FACTOR = 5.0  # 快速档：慢速的 5 倍（每 0.2 秒 1 格滚轮）
+DRAG_SCROLL_INTERVAL_MS = 16  # 拖拽滚动步进周期（与渲染节拍一致）
 TITLE_MARGIN_X = 16.0  # 标题文本左起点（逻辑像素）
 TITLE_GLOW_FACTOR = 1.7  # 标题窗高度余量的字号倍数（保持既有几何外观）
 BODY_FILL_COLOR = "#ADD8E6"  # 标题与正文统一的淡蓝色填充
@@ -257,6 +264,23 @@ def body_wheel_target(
     return target, follow
 
 
+def body_drag_scroll_rate(dy: float, line_h: float) -> float:
+    """由按住后鼠标的垂直偏移量计算拖拽滚动速率（逻辑像素/秒，含方向）。
+
+    锁定态拖拽滚动的速度分档：防抖区（|dy| <= DRAG_SCROLL_DEBOUNCE_PX）
+    返回 0 不滚动；慢速区每秒滚动 1 格滚轮（WHEEL_LINES_PER_NOTCH 行）；
+    超过 DRAG_SCROLL_FAST_PX 进入快速档（慢速 5 倍）。方向与触屏直觉一致：
+    上滑（dy < 0）看后文（偏移增大），下滑（dy > 0）回看上文（偏移减小）。
+    抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
+    """
+    if abs(dy) <= DRAG_SCROLL_DEBOUNCE_PX:
+        return 0.0
+    notches_per_sec = DRAG_SCROLL_SLOW_NOTCHES_PER_SEC
+    if abs(dy) > DRAG_SCROLL_FAST_PX:
+        notches_per_sec *= DRAG_SCROLL_FAST_FACTOR
+    return -math.copysign(notches_per_sec * WHEEL_LINES_PER_NOTCH * line_h, dy)
+
+
 def choice_translation_text(items: list[str]) -> str:
     """分支选项的翻译输入：编号逐行拼接（与正文里的编号选项列表一致）。
 
@@ -409,6 +433,10 @@ class BodyWindow(_StreamWindowBase):
         self._scroll = 0.0  # 当前平滑滚动偏移（像素）
         self._scroll_target = 0.0  # 滚动目标：固定首行与滚轮回看共用的收敛点
         self._follow = True  # True=固定显示第一行；滚轮下翻回看时暂停
+        # 锁定态拖拽滚动（按住正文文字上下滑动）：档位速率由垂直偏移决定
+        self._drag_scroll_active = False
+        self._drag_scroll_origin_y = 0.0  # 按下点纵坐标（防抖基准）
+        self._drag_scroll_rate = 0.0  # 当前档位速率（逻辑像素/秒；0=防抖区）
 
         self._typing_timer = QTimer(self)
         self._typing_timer.setInterval(TYPE_INTERVAL_MS)
@@ -418,8 +446,16 @@ class BodyWindow(_StreamWindowBase):
         self._render_timer.setInterval(RENDER_INTERVAL_MS)
         self._render_timer.timeout.connect(self.update)
         self._render_timer.start()
+        self._drag_scroll_timer = QTimer(self)
+        self._drag_scroll_timer.setInterval(DRAG_SCROLL_INTERVAL_MS)
+        self._drag_scroll_timer.timeout.connect(self._tick_drag_scroll)
 
     # ---- 对外接口 ---------------------------------------------------------
+
+    @property
+    def drag_scroll_active(self) -> bool:
+        """锁定态拖拽滚动进行中（宿主据此把 motion 喂给拖拽滚动而非窗口拖动）。"""
+        return self._drag_scroll_active
 
     def begin_stream(self) -> None:
         """开始一段新的内容：清屏并恢复固定显示第一行（由宿主在内容切换时调用）。"""
@@ -438,6 +474,7 @@ class BodyWindow(_StreamWindowBase):
         self._scroll = 0.0
         self._scroll_target = 0.0
         self._follow = True
+        self.end_drag_scroll()
         self.update()
 
     # ---- 打字机节拍 -------------------------------------------------------
@@ -557,6 +594,47 @@ class BodyWindow(_StreamWindowBase):
             self._scroll_target, notches, self._line_h, self._max_scroll()
         )
         event.accept()
+
+    # ---- 锁定态拖拽滚动 -------------------------------------------------
+
+    def begin_drag_scroll(self, y: float) -> None:
+        """锁定态左键按住正文文本：进入拖拽滚动，记下防抖基准纵坐标。"""
+        self._drag_scroll_active = True
+        self._drag_scroll_origin_y = y
+        self._drag_scroll_rate = 0.0
+
+    def update_drag_scroll(self, y: float) -> None:
+        """按当前纵坐标更新速度档位：离开防抖区后按档位速率持续滚动。"""
+        if not self._drag_scroll_active:
+            return
+        self._drag_scroll_rate = body_drag_scroll_rate(
+            y - self._drag_scroll_origin_y, self._line_h
+        )
+        if self._drag_scroll_rate == 0.0:
+            self._drag_scroll_timer.stop()
+            return
+        self._follow = False  # 拖拽滚动 = 主动离开固定首行（滚回顶部再恢复）
+        if not self._drag_scroll_timer.isActive():
+            self._drag_scroll_timer.start()
+
+    def end_drag_scroll(self) -> None:
+        """结束拖拽滚动（未激活时为无害调用）：停步进、清档位。"""
+        self._drag_scroll_active = False
+        self._drag_scroll_rate = 0.0
+        self._drag_scroll_timer.stop()
+
+    def _tick_drag_scroll(self) -> None:
+        """拖拽滚动步进：按当前档位速率推进滚动目标（钳在 [0, max_scroll]），
+        滚回顶部即恢复固定首行；重绘由常开的渲染定时器统一驱动。"""
+        if self._drag_scroll_rate == 0.0:
+            return
+        dt = DRAG_SCROLL_INTERVAL_MS / 1000.0
+        self._scroll_target = min(
+            max(self._scroll_target + self._drag_scroll_rate * dt, 0.0),
+            self._max_scroll(),
+        )
+        if self._scroll_target <= 0.5:
+            self._follow = True
 
 
 class StreamOverlayWindow:
@@ -1058,7 +1136,12 @@ class StreamOverlayWindow:
         pos = self._physical_mouse(window, event)
         self._press_pos = pos
         if self._locked:
-            logger.debug("位置已锁定，忽略拖动按下")
+            if window is self._body_window:
+                # 锁定态按住正文文字拖动 = 拖拽滚动（仅锁定时生效，避免与
+                # 未锁定时的整体拖动冲突）；单击判定照旧由 release 处理
+                self._body_window.begin_drag_scroll(event.position().y())
+            else:
+                logger.debug("位置已锁定，忽略拖动按下")
             return
         left, top, right, bottom = win32api.window_rect(self._body_hwnd)
         self._dragging = True
@@ -1075,6 +1158,10 @@ class StreamOverlayWindow:
 
     def on_window_motion(self, window: QWidget, event) -> None:
         """拖动中：两窗跟随鼠标整体移动（保持抓取点相对位置不变）。"""
+        if self._body_window.drag_scroll_active:
+            # 锁定态拖拽滚动进行中：纵坐标喂给正文窗更新速度档位
+            self._body_window.update_drag_scroll(event.position().y())
+            return
         if not self._dragging:
             return
         pos = self._physical_mouse(window, event)
@@ -1105,6 +1192,7 @@ class StreamOverlayWindow:
     def on_window_release(self, window: QWidget, event) -> None:
         if self._closed:
             return
+        self._body_window.end_drag_scroll()  # 未在拖拽滚动时为无害调用
         if self._dragging:
             self._finish_drag()
         press_pos = self._press_pos
