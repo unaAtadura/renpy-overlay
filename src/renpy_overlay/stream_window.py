@@ -45,6 +45,7 @@ from . import config, translation_store, translator, win32api
 from .quick_menu import QuickMenu
 from .screenshot import (
     AIChatWindow,
+    ChatHistoryWindow,
     HotkeyMode,
     ScreenshotHistoryWindow,
     capture_region,
@@ -69,6 +70,7 @@ from .song_recognition import (
 )
 from .song_recognition.store import open_store as open_song_store
 from .translation_cache import TranslationCache
+from .translation_history_window import TranslationHistoryWindow
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -737,6 +739,8 @@ class StreamOverlayWindow:
             on_recognize_song=self.request_song_recognition,
             on_open_song_history=self._open_song_history,
             on_open_chat=self._open_chat,
+            on_open_chat_history=self._open_chat_history,
+            on_open_translation_history=self._open_translation_history,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
         # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
@@ -750,6 +754,8 @@ class StreamOverlayWindow:
         self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
+        self._chat_history_window: ChatHistoryWindow | None = None
+        self._translation_history_window: TranslationHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
         self._context_menu_open = False  # 右键菜单打开期间暂停周期性置顶重申
         self._last_translation_input: str | None = None
@@ -876,6 +882,18 @@ class StreamOverlayWindow:
             except Exception:  # pragma: no cover
                 pass
             self._song_history_window = None
+        if self._chat_history_window is not None:
+            try:
+                self._chat_history_window.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._chat_history_window = None
+        if self._translation_history_window is not None:
+            try:
+                self._translation_history_window.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._translation_history_window = None
         if self._chat_window is not None:
             try:
                 self._chat_window.deleteLater()
@@ -1471,6 +1489,34 @@ class StreamOverlayWindow:
         self._song_history_window.raise_()
         self._song_history_window.activateWindow()
         logger.info("已打开识曲历史窗口")
+
+    def _open_chat_history(self) -> None:
+        """打开对话历史窗口（单例复用，每次刷新数据）。"""
+        if self._chat_store is None:
+            self.hint("对话历史不可用：未定位到游戏目录或数据库初始化失败。")
+            return
+        if self._chat_history_window is None:
+            self._chat_history_window = ChatHistoryWindow(self._chat_store)
+        self._chat_history_window.refresh()
+        self._chat_history_window.show()
+        self._chat_history_window.raise_()
+        self._chat_history_window.activateWindow()
+        logger.info("已打开对话历史窗口")
+
+    def _open_translation_history(self) -> None:
+        """打开翻译历史窗口（单例复用，每次刷新数据）。"""
+        if self._translation_store is None:
+            self.hint("翻译历史不可用：未定位到游戏目录或数据库初始化失败。")
+            return
+        if self._translation_history_window is None:
+            self._translation_history_window = TranslationHistoryWindow(
+                self._translation_store
+            )
+        self._translation_history_window.refresh()
+        self._translation_history_window.show()
+        self._translation_history_window.raise_()
+        self._translation_history_window.activateWindow()
+        logger.info("已打开翻译历史窗口")
 
     # -- AI 对话（右键菜单打开窗口；OCR/发送与翻译/识曲共用同一互斥原则）
 

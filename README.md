@@ -145,6 +145,16 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   对话不保存上下文，成功后用户消息与回复成对存入
   `renpy_overlay_cache/chat.db`；OCR/发送与翻译/识曲共用“同时只允许一个
   API 调用”互斥（冲突时忽略点击且不更新提示）；
+- **对话历史**：快捷菜单「查看历史 → 对话历史」—— 常规窗口按写入顺序浏览
+  `chat.db` 的对话成对记录（两列表格：用户消息/AI 回复，外观如两列 Excel）；
+  查找为部分文字匹配、不区分大小写（两列都参与），上一个/下一个循环跳转到
+  匹配行并整行高亮，左键点击选中，Ctrl+C 复制选中格；删除选中行同步删除
+  数据库记录并原位回选；
+- **翻译历史**：快捷菜单「查看历史 → 翻译历史」—— 常规窗口按写入顺序浏览
+  `translations.db` 的分桶翻译记录（两列表格：原文/译文；同一哈希下多条
+  不同原文的记录逐行展开）；查找/复制/选中交互与对话历史一致，删除仅移除
+  选中的一组 (哈希, 原文) 记录——同桶其它原文的记录保留，桶空则整个条目
+  随之消失；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；
@@ -234,7 +244,7 @@ uv run renpy-overlay --pid 12345
 | 左键双击 | 锁定 / 解锁窗口位置（锁定后不响应拖动；双击同时中止在途翻译与听歌识曲） |
 | 锁定状态下单击 | 翻译当前对话原文，译文增量流入正文窗（未锁定不触发） |
 | 锁定状态下按住正文文字上下滑动 | 拖拽滚动文本：偏离按下点 12px 内防抖不滚，慢速每秒 1 格滚轮，超过 120px 提速 5 倍（未锁定时按住拖动为移动窗口） |
-| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史、对话、听歌识曲、查看识曲历史 |
+| 右键（标题/正文文字处） | 快捷菜单：创建/销毁截图窗口、查看截图历史、查看历史（对话历史/翻译历史）、对话、听歌识曲、查看识曲历史 |
 | 截图窗双击 | 锁定/解锁截图窗口（锁定后单击即截图翻译） |
 | 鼠标滚轮（悬浮窗内任意位置） | 回看当前对话全文，滚回顶部恢复固定显示第一行（输出过程固定首行；窗口只显示最新一条） |
 
@@ -424,12 +434,14 @@ renpygameread/
 │  │  ├─ store.py              # screenshot.db 存取（可降级，仅主线程读写）
 │  │  ├─ chat_store.py         # chat.db 存取（AI 对话成对记录，可降级，仅主线程读写）
 │  │  ├─ chat_window.py        # AI 对话窗口（复选框+锁定窗口色块下拉+OCR/发送）
+│  │  ├─ chat_history_window.py # 对话历史浏览窗口（两列表格：查找/删除/复制）
 │  │  ├─ window.py             # 单个截图窗口（8 色边框、八向拉伸、双击锁定）
 │  │  ├─ window_visual.py      # 截图窗绘制与边缘检测纯函数
 │  │  └─ history_window.py     # 截图历史浏览窗口（缩略图条带+原图+译文）
 │  ├─ translator.py            # LM Studio 翻译客户端（OpenAI 兼容，标准库 urllib，支持 SSE 流式）
 │  ├─ translation_cache.py     # 翻译内存缓存（哈希键→(原文,译文)，FIFO，仅主线程读写）
 │  ├─ translation_store.py     # 翻译 SQLite 持久化（游戏目录 renpy_overlay_cache/，可降级）
+│  ├─ translation_history_window.py # 翻译历史浏览窗口（分桶展开两列表格：查找/删除/复制）
 │  ├─ config.py                # 本地配置加载（config.json：窗口尺寸 / 自动翻译 / API / 截图）
 │  ├─ song_recognition/        # 听歌识曲功能包（纯后台识别 + 历史浏览）
 │  │  ├─ recorder.py           # 系统音频录制（三重回退：环回/立体声混音，可中断）
@@ -453,6 +465,8 @@ renpygameread/
    ├─ test_screenshot_vision.py
    ├─ test_chat_store.py
    ├─ test_chat_window.py
+   ├─ test_chat_history.py
+   ├─ test_translation_history.py
    ├─ test_song_recognition.py
    ├─ test_song_recognition_store.py
    ├─ test_song_recognition_history.py
