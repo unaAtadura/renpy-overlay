@@ -180,6 +180,8 @@ class Session:
         self._console: threading.Thread | None = None
         self._monitor: threading.Thread | None = None
         self._say_count = 0
+        # 悬浮窗就绪前到达的 say 暂存（只保留最新一条，就绪后补推，不再静默丢弃）
+        self._pending_say: dict | None = None
 
     # ------------------------------------------------------------ 启动
 
@@ -223,6 +225,21 @@ class Session:
             return self._run_console_mode()
         return self._run_overlay_mode()
 
+    def _flush_pending_say(self) -> None:
+        """悬浮窗就绪后补推暂存的最新一条 say（注入时正显示的台词最常见）。
+
+        此前该窗口内的 say 会被静默丢弃，且游戏端去重已记发布、无法重发，
+        导致该句永远不被翻译；暂存补推修复这一缺陷。
+        """
+        pending = self._pending_say
+        if pending is None or self.overlay is None:
+            return
+        self._pending_say = None
+        self.overlay.push_say(
+            pending["who"], pending["what"], source=pending["src"], ts=pending["ts"]
+        )
+        self.log.info("已补推悬浮窗就绪前捕获的台词：%.40r", pending["what"])
+
     def _run_overlay_mode(self) -> int:
         app_config = config.load_config()  # 本地 config.json（窗口尺寸 / 自动翻译 / API）
         game_dir = os.path.dirname(self.target.exe) if self.target.exe else ""
@@ -236,6 +253,7 @@ class Session:
             game_dir=game_dir,
             on_quit=self._request_stop,
         )
+        self._flush_pending_say()  # 补推就绪前捕获的台词（此窗口内丢失的根治）
         self.overlay.set_status(self._status_text("等待游戏端上报…"))
         self.overlay.hint(
             f"已注入 pid={self.target.pid}（{self.target.name}）。"
@@ -274,6 +292,15 @@ class Session:
                 print(f"[{who or '-'}] {what}")
             if self.overlay is not None:
                 self.overlay.push_say(who, what, source=str(message.get("src") or ""))
+            else:
+                # 悬浮窗尚在构造（注入时正显示的台词最常见）：暂存最新一条，
+                # 就绪后由 _flush_pending_say 补推，不再静默丢弃
+                self._pending_say = {
+                    "who": who,
+                    "what": what,
+                    "src": str(message.get("src") or ""),
+                    "ts": message.get("ts"),
+                }
         elif kind == "choice":
             items = [str(item) for item in message.get("items") or []]
             if self.args.no_overlay:
