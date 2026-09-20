@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 from . import config, translation_store, translator, win32api
 from .quick_menu import QuickMenu
 from .screenshot import (
+    AIChatWindow,
     HotkeyMode,
     ScreenshotHistoryWindow,
     capture_region,
@@ -51,6 +52,7 @@ from .screenshot import (
     encode_jpeg_base64,
     encode_jpeg_bytes,
     make_thumbnail,
+    open_chat_store,
     open_store,
     scale_to_percent,
 )
@@ -723,11 +725,18 @@ class StreamOverlayWindow:
         self._screenshot_store = open_store(game_dir or None)
         # 听歌识曲：成功识别结果独立落库（game_song.db，与 screenshot.db 同目录）
         self._song_store = open_song_store(game_dir or None)
+        # AI 对话：用户消息与回复成对落库（chat.db，与 screenshot.db 同目录）
+        self._chat_store = open_chat_store(game_dir or None)
+        # AI 对话（OCR/发送）与翻译/识曲共用「同时只允许一个 API 调用」互斥：
+        # 对话侧经 _acquire/_release_chat_slot 占用，三个既有入口同样检查它
+        self._chat_busy = False
+        self._chat_window: AIChatWindow | None = None
         self._quick_menu = QuickMenu(
             on_capture_click=self.request_screenshot_translation,
             on_open_history=self._open_history,
             on_recognize_song=self.request_song_recognition,
             on_open_song_history=self._open_song_history,
+            on_open_chat=self._open_chat,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
         # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
@@ -850,6 +859,9 @@ class StreamOverlayWindow:
         if self._song_store is not None:
             self._song_store.close()
             self._song_store = None
+        if self._chat_store is not None:
+            self._chat_store.close()
+            self._chat_store = None
         self._hotkey_mode.shutdown()
         self._quick_menu.close_all()
         if self._history_window is not None:
@@ -864,6 +876,12 @@ class StreamOverlayWindow:
             except Exception:  # pragma: no cover
                 pass
             self._song_history_window = None
+        if self._chat_window is not None:
+            try:
+                self._chat_window.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._chat_window = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -1300,8 +1318,8 @@ class StreamOverlayWindow:
     def _start_translation(self, origin: str = "manual") -> None:
         """发起流式翻译请求（仅主线程调用）。同一时刻只允许一条在途请求。"""
         label = "自动触发" if origin == "auto" else "单击触发"
-        if self._translating or self._recognizing:
-            logger.info("已有请求在途（翻译/识曲），忽略本次%s翻译", label)
+        if self._translating or self._recognizing or self._chat_busy:
+            logger.info("已有请求在途（翻译/识曲/对话），忽略本次%s翻译", label)
             return
         say = self._last_say or {}
         what = str(say.get("what") or "").strip()
@@ -1454,17 +1472,90 @@ class StreamOverlayWindow:
         self._song_history_window.activateWindow()
         logger.info("已打开识曲历史窗口")
 
+    # -- AI 对话（右键菜单打开窗口；OCR/发送与翻译/识曲共用同一互斥原则）
+
+    def _open_chat(self) -> None:
+        """打开 AI 对话窗口（单例复用，每次打开重置交互状态并重建下拉列表）。"""
+        if self._chat_window is None:
+            self._chat_window = AIChatWindow(
+                store=self._chat_store,
+                controller=self._quick_menu,
+                app_config=self._config,
+                notify=self._update_title,
+                display_reply=self._display_chat_reply,
+                api_available=self._chat_api_available,
+                api_acquire=self._acquire_chat_slot,
+                api_release=self._release_chat_slot,
+                capture_locked=self._capture_locked_region,
+            )
+        self._chat_window.refresh()
+        self._chat_window.show()
+        self._chat_window.raise_()
+        self._chat_window.activateWindow()
+        logger.info("已打开 AI 对话窗口")
+
+    def _chat_api_available(self) -> bool:
+        """互斥出口：翻译/识曲/对话任一在途即不可发起新的 API 请求。"""
+        return not (self._translating or self._recognizing or self._chat_busy)
+
+    def _acquire_chat_slot(self) -> None:
+        """对话侧占用互斥槽（占用后翻译/识曲的既有入口同样被拦截）。"""
+        self._chat_busy = True
+
+    def _release_chat_slot(self) -> None:
+        self._chat_busy = False
+
+    def _display_chat_reply(self, text: str) -> None:
+        """AI 回复上屏：整段替换正文窗内容（打字机呈现，与识曲结果同路径）。"""
+        self._display_text(text + "\n")
+
+    def _capture_locked_region(self, window, on_done) -> None:
+        """隐藏窗口抓取双击锁定截图窗口区域的干净画面（主线程，AI 对话 OCR 用）。
+
+        与截图翻译同一时序（需求「逻辑一致性」）：识别画面不能包含截图窗自身
+        的半透明遮罩与彩色边框，也须防流式窗与截图窗重叠时的残影混入 —— 先
+        隐藏截图窗与流式窗，等 DWM 移除旧帧后抓屏，再按 hide 前几何恢复显示。
+        ``on_done(image | None)`` 在主线程回调；过程不占用翻译互斥（调用方已
+        持有对话互斥槽），失败同样回调 None 由调用方收尾。
+        """
+        if self._closed:
+            on_done(None)
+            return
+        try:
+            bbox = win32api.window_rect(window.hwnd)
+        except Exception:  # pragma: no cover - 窗口销毁竞态
+            logger.warning("无法定位截图窗口区域，取消本次抓屏")
+            on_done(None)
+            return
+        self._screenshot_suppress = True
+        self._quick_menu.hide_all()
+        was_visible = self._visible
+        saved_rects = None
+        if was_visible:
+            try:
+                saved_rects = (
+                    win32api.window_xywh(self._body_hwnd),
+                    win32api.window_xywh(self._title_hwnd),
+                )
+            except Exception:  # pragma: no cover - 窗口销毁竞态
+                saved_rects = None
+            self._set_visible(False)
+        QTimer.singleShot(
+            int(SCREENSHOT_DWM_SETTLE_SECONDS * 1000),
+            lambda: self._capture_restore_then(bbox, on_done, saved_rects, was_visible),
+        )
+
     def request_screenshot_translation(self, window) -> None:
         """截图窗口锁定态单击（主线程）：互斥检查 → 隐藏 → 截图 → 恢复 → 后台翻译。
 
-        与单击/自动翻译共用 ``_translating`` 互斥：存在任意在途翻译则既不
-        调 API 也不截图（防止译文被意外覆盖）。截图始终走 API、不检索缓存，
-        成功不写两级缓存（需求）。
+        与单击/自动翻译共用 ``_translating`` 互斥：存在任意在途翻译（含 AI
+        对话、识曲）则既不调 API 也不截图（防止译文被意外覆盖）。截图始终
+        走 API、不检索缓存，成功不写两级缓存（需求）。
         """
         if self._closed:
             return
-        if self._translating or self._recognizing:
-            logger.info("已有请求在途（翻译/识曲），忽略本次截图翻译")
+        if self._translating or self._recognizing or self._chat_busy:
+            logger.info("已有请求在途（翻译/识曲/对话），忽略本次截图翻译")
             return
         try:
             bbox = win32api.window_rect(window.hwnd)
@@ -1505,25 +1596,15 @@ class StreamOverlayWindow:
 
     def _capture_after_hide(self, seq: int, bbox, stop, saved_rects, was_visible: bool) -> None:
         """延迟抓屏终点（主线程）：抓屏 -> 恢复窗口显示 -> 起后台翻译线程。"""
-        if self._closed:
-            return
-        image = None
-        try:
-            image = capture_region(bbox)
-        except Exception as exc:
-            logger.warning("屏幕截图失败：%s", exc)
-        finally:
-            self._screenshot_suppress = False
-            self._quick_menu.show_all()
-            if was_visible:
-                self._set_visible(True)
-                if saved_rects is not None:
-                    # 用 hide 前的物理几何原样恢复（锁定态无人矫正几何，必须显式还原）
-                    try:
-                        win32api.move_window(self._body_hwnd, *saved_rects[0], topmost=True)
-                        win32api.move_window(self._title_hwnd, *saved_rects[1], topmost=True)
-                    except Exception:  # pragma: no cover - 窗口销毁竞态
-                        pass
+        self._capture_restore_then(
+            bbox,
+            lambda image: self._start_screenshot_worker(seq, image, stop),
+            saved_rects,
+            was_visible,
+        )
+
+    def _start_screenshot_worker(self, seq: int, image, stop: threading.Event) -> None:
+        """抓屏回调（主线程）：失败收敛为翻译失败，成功则起后台翻译线程。"""
         if image is None:
             self._translating = False
             self._update_title("翻译失败")
@@ -1552,6 +1633,34 @@ class StreamOverlayWindow:
             daemon=True,
         )
         thread.start()
+
+    def _capture_restore_then(self, bbox, on_done, saved_rects, was_visible) -> None:
+        """抓屏并恢复窗口显示（主线程）：失败回调 None，成功回调 PIL Image。
+
+        截图翻译与 AI 对话 OCR 共用的抓屏时序终点：finally 中的恢复逻辑
+        （截图窗 show_all、流式窗按 hide 前物理几何原样还原）与隐藏侧
+        一一对应；窗口已关闭时直接返回、不再回调。回调在主线程同步执行。
+        """
+        if self._closed:
+            return
+        image = None
+        try:
+            image = capture_region(bbox)
+        except Exception as exc:
+            logger.warning("屏幕截图失败：%s", exc)
+        finally:
+            self._screenshot_suppress = False
+            self._quick_menu.show_all()
+            if was_visible:
+                self._set_visible(True)
+                if saved_rects is not None:
+                    # 用 hide 前的物理几何原样恢复（锁定态无人矫正几何，必须显式还原）
+                    try:
+                        win32api.move_window(self._body_hwnd, *saved_rects[0], topmost=True)
+                        win32api.move_window(self._title_hwnd, *saved_rects[1], topmost=True)
+                    except Exception:  # pragma: no cover - 窗口销毁竞态
+                        pass
+        on_done(image)
 
     def _screenshot_worker(self, seq: int, image, stop: threading.Event, api_options: dict) -> None:
         """后台线程：宽高比约束副本 → 压缩至配置百分比 → vision API → 结果入队。
@@ -1635,8 +1744,8 @@ class StreamOverlayWindow:
         """
         if self._closed:
             return
-        if self._translating or self._recognizing:
-            logger.info("已有请求在途（翻译/识曲），忽略本次听歌识曲")
+        if self._translating or self._recognizing or self._chat_busy:
+            logger.info("已有请求在途（翻译/识曲/对话），忽略本次听歌识曲")
             return
         missing = []
         if not SHAZAMIO_AVAILABLE:
@@ -1810,6 +1919,9 @@ class StreamOverlayWindow:
         if self._recognizing:
             # 听歌识曲在途：识曲结果即将整屏替换正文，缓存命中也不上屏
             self._auto_note_skip("听歌识曲进行中")
+            return
+        if self._chat_busy:
+            self._auto_note_skip("AI 对话请求在途")
             return
 
         # 缓存命中优先：依次查内存与数据库，任一级命中则直接上屏并记录"已翻译"
