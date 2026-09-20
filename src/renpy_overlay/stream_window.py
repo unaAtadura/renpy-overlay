@@ -985,11 +985,26 @@ class StreamOverlayWindow:
             logger.debug("显示对话：[%s] %s", who or "-", what[:60])
         else:
             # 正文区不刷新，但原文已记录，翻译/自动翻译链路不受影响
+            # 诊断：上报延迟 = 工具端处理时刻 - 代理发布时刻（ts 同一时钟源），
+            # 用于定量区分「捕获晚 / 传输晚 / 触发晚」；异常或越界时降级为未知
+            try:
+                delay_ms = (time.time() - float(payload.get("ts"))) * 1000
+                delay_text = (
+                    f"；上报延迟={delay_ms:.1f}ms"
+                    if 0 <= delay_ms < 10 * 60 * 1000
+                    else "；上报延迟=未知"
+                )
+            except (TypeError, ValueError):
+                delay_text = "；上报延迟=未知"
             logger.debug(
-                "已捕获对话（show_original_text=false，正文区不更新）：[%s] %s",
+                "已捕获对话（show_original_text=false，正文区不更新）：[%s] %s%s",
                 who or "-",
                 what[:60],
+                delay_text,
             )
+        # 事件驱动触发：新捕获的对话到达即评估自动翻译（不再等下一个轮询 tick，
+        # 缩短「台词显示→译文上屏」的感知延迟；条件判断与轮询版共用）
+        self._auto_translate_check(immediate=True)
 
     def _display_text(self, text: str) -> None:
         """用打字机方式整段替换正文内容（窗口只保留最新一条，不累积历史）。"""
@@ -2025,14 +2040,22 @@ class StreamOverlayWindow:
         except Exception:  # pragma: no cover - 轮询异常不应终止循环
             logger.exception("自动翻译轮询出错")
 
-    def _auto_translate_check(self) -> None:
-        """条件全部满足时自动发起一次翻译；任一不满足则跳过（原因去重记日志）。"""
+    def _auto_translate_check(self, immediate: bool = False) -> None:
+        """条件全部满足时自动发起一次翻译；任一不满足则跳过（原因去重记日志）。
+
+        ``immediate=True``（事件驱动路径：新 say 刚到达时调用）跳过「刚进入
+        锁定」间隔门——新捕获的文本是刚显示的台词，不存在锁定时立即翻译陈旧
+        文本的问题；轮询路径（``immediate=False``）保持原间隔门不变。
+        """
         if not self._config.auto_translate:
             return
         if not self._locked:
             self._auto_note_skip("未锁定")
             return
-        if time.time() - self._lock_started_at < self._config.auto_translate_interval:
+        if (
+            not immediate
+            and time.time() - self._lock_started_at < self._config.auto_translate_interval
+        ):
             self._auto_note_skip("刚进入锁定，等待一个完整轮询间隔")
             return
         say = self._last_say or {}
