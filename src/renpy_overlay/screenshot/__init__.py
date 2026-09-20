@@ -11,6 +11,7 @@
 - :mod:`frame_overlay` —— 快捷键模式框选提示覆盖层（整窗穿透线框，PyQt6）
 - :mod:`hotkeys`    —— 快捷键模式（全局热键主开关 + 8 窗口键，联动布局锁定）
 - :mod:`history_window` —— 截图历史浏览窗口（缩略图条带 + 原图 + 译文）
+- :mod:`chat_history_window` —— 对话历史浏览窗口（两列表格：查找/删除/复制）
 - :mod:`viewer_window`  —— 原图全尺寸查看弹窗（拖拽移动，单击关闭）
 - :mod:`chat_window`    —— AI 对话窗口（复选框 + 锁定窗口下拉 + OCR / 发送）
 
@@ -19,6 +20,7 @@
 """
 
 from .capture import capture_region
+from .chat_history_window import ChatHistoryWindow
 from .chat_store import ChatStore
 from .chat_store import open_store as open_chat_store
 from .chat_window import AIChatWindow, color_label, color_swatch_pixmap
@@ -39,6 +41,7 @@ from .window import ScreenshotWindow
 
 __all__ = [
     "AIChatWindow",
+    "ChatHistoryWindow",
     "ChatStore",
     "FrameOverlayLayer",
     "ImageViewerWindow",

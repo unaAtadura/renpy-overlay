@@ -41,6 +41,8 @@ class QuickMenu:
         on_recognize_song=None,
         on_open_song_history=None,
         on_open_chat=None,
+        on_open_chat_history=None,
+        on_open_translation_history=None,
         frame_overlay_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
@@ -48,6 +50,8 @@ class QuickMenu:
         self._on_recognize_song = on_recognize_song
         self._on_open_song_history = on_open_song_history
         self._on_open_chat = on_open_chat
+        self._on_open_chat_history = on_open_chat_history
+        self._on_open_translation_history = on_open_translation_history
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
@@ -78,6 +82,10 @@ class QuickMenu:
             )
         menu.addSeparator()
         history_action = menu.addAction("查看截图历史")
+        # 查看历史二级菜单：同类历史阅读入口的分组（对话历史 / 翻译历史）
+        view_history_menu = menu.addMenu("查看历史")
+        chat_history_action = view_history_menu.addAction("对话历史")
+        translation_history_action = view_history_menu.addAction("翻译历史")
         chat_action = menu.addAction("对话")
         menu.addSeparator()
         song_action = menu.addAction("听歌识曲")
@@ -91,6 +99,12 @@ class QuickMenu:
             self._hotkey_mode.toggle()
         elif chosen is history_action and callable(self._on_open_history):
             self._on_open_history()
+        elif chosen is chat_history_action and callable(self._on_open_chat_history):
+            self._on_open_chat_history()
+        elif chosen is translation_history_action and callable(
+            self._on_open_translation_history
+        ):
+            self._on_open_translation_history()
         elif chosen is chat_action and callable(self._on_open_chat):
             self._on_open_chat()
         elif chosen is song_action and callable(self._on_recognize_song):
