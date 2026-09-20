@@ -22,6 +22,9 @@
 - ``config.say_menu_text_filter``：链式包装，在 Say.execute 进正文显示之前拿到
   当句原文（旧版本引擎上 ``_history_list`` 要等交互结束才入账，靠它保证
   「显示即达」；预测路径的调用已判别排除，不会提前上报未来台词）。
+- ``renpy.store._last_say_what``：轮询直读，Say.execute 写入的当前句原文显示
+  期间常驻（finally 只清 _last_raw_what），可覆盖「注入时该句已在屏」的盲区
+  （该句执行早于注入，过滤器不会再触发；偏移 0，不前后取句）。
 - ``renpy.exports.menu``：链式包装，所有 menu 语句（分支选项）的唯一入口 ——
   进入时捕获选项原文（玩家当前语言下所见文本）与触发对话上下文，返回时
   捕获玩家所选；游戏自定义 choice screen 也经过它。
@@ -242,6 +245,27 @@ def _scan_statement():
         return None
 
 
+def _scan_last_say_store():
+    """store._last_say_what 直读：偏移 0 精确命中正在显示的台词。
+
+    引擎在 Say.execute 进正文显示之前写入该值，显示期间常驻（finally 只清
+    _last_raw_what）——「注入时该句已经在屏上」的场景（该句执行早于注入，
+    text_filter 不会再触发）也能取到当前句，补上最后的盲区。who 取配套的
+    _last_say_who，经 store 解析为展示名，与 history/过滤器源去重键一致。
+    """
+    try:
+        import renpy
+
+        what = getattr(renpy.store, "_last_say_what", None)
+        who = getattr(renpy.store, "_last_say_who", None)
+    except BaseException:
+        return None
+    what = _to_text(what)
+    if not what:
+        return None
+    return (_who_from_raw(who), what)
+
+
 def _resolve_who(explicit):
     """说话人名字的来源优先级：回调显式给出 > say 界面 > 历史 > 当前语句 > 缓存。"""
     who = _to_text(explicit)
@@ -330,16 +354,15 @@ def _say_arguments_callback(character, *args, **kwargs):
     return (args, kwargs)
 
 
-def _who_from_statement(node):
-    """从 Say 节点解析展示用说话人：``node.who`` 为角色变量名时经 store 取角色名。
+def _who_from_raw(raw):
+    """把 who 原始表达式解析为展示名：简单变量名经 store 取角色名。
 
-    与轮询源（history 的 who 即展示名）保持一致，保证两路去重键相同、
-    同一句不会被重复上报。解析失败时返回空串（不误报旧角色）。
+    与 history/过滤器源的口径一致（同为展示名），保证各路去重键相同；
+    解析失败（旁白/复杂表达式）返回空串，不误报旧角色。
     """
     try:
         import renpy
 
-        raw = getattr(node, "who", None)
         if not raw:
             return ""
         character = getattr(renpy.store, raw, None)
@@ -348,6 +371,11 @@ def _who_from_statement(node):
         return _clean_text(_to_text(getattr(character, "name", None) or ""))
     except BaseException:
         return ""
+
+
+def _who_from_statement(node):
+    """从 Say 节点解析展示用说话人（``node.who`` 为角色变量名时经 store 取角色名）。"""
+    return _who_from_raw(getattr(node, "who", None))
 
 
 def _say_text_filter(text):
@@ -394,12 +422,20 @@ def _periodic_callback():
         interval = 1.0 / max(1.0, float(config.get("poll_hz", 7.0)))
         if now - _STATE["last_publish"] < interval * 0.5:
             return
-        for scanner in (_scan_screen, _scan_history, _scan_statement):
+        # 两层扫描：当前句源（say 界面 / store 直读 / 语句节点）优先——任一有值
+        # 即停（是否新值交给去重判定）；仅当它们都无值时才轮到历史兜底源。
+        # 这样旧值（典型为 history 的上一句）既不会占据优先位饿死当前句源，
+        # 也不会在当前句已发布后翻旧账造成乒乓重复上报
+        for scanner in (_scan_screen, _scan_last_say_store, _scan_statement):
             found = scanner()
             if not found:
                 continue
             _publish(found[0], found[1], "poll")
             break
+        else:
+            found = _scan_history()
+            if found:
+                _publish(found[0], found[1], "poll")
         _scan_choice_screen()
         _ensure_installed()
     except BaseException as exc:

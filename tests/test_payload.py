@@ -449,6 +449,87 @@ def test_say_text_filter_skips_predict_and_menu_and_chains(agent_text, monkeypat
     assert calls == ["当前句。"]
 
 
+# ---- store 直读与两层扫描（「注入时已在屏」盲区 + 防翻旧账） -----------------
+
+
+def test_scan_last_say_store_reads_displayed_line(agent_text, monkeypatch):
+    """store 直读：显示中的当前句偏移 0 可读（含注入前已在屏的句子）。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(
+        c=types.SimpleNamespace(name="Charles"),
+        _last_say_what="Good morning Dad.",
+        _last_say_who="c",
+    )
+    monkeypatch.setitem(sys.modules, "renpy", types.SimpleNamespace(store=store))
+
+    assert module._scan_last_say_store() == ("Charles", "Good morning Dad.")
+    # 为空时不产出
+    store._last_say_what = ""
+    assert module._scan_last_say_store() is None
+    # 旁白（who 为 None）不误报旧角色
+    store._last_say_what = "旁白。"
+    store._last_say_who = None
+    assert module._scan_last_say_store() == ("", "旁白。")
+
+
+def test_periodic_scan_stops_at_current_sources_before_history(agent_text, monkeypatch):
+    """扫描分层：当前句源有值（即使旧值被去重）即停，不翻 history 旧账。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(
+        c=types.SimpleNamespace(name="Charles"),
+        _last_say_what="当前句。",
+        _last_say_who="c",
+        _history_list=[types.SimpleNamespace(who="Charles", what="上一句。")],
+    )
+    fake = types.SimpleNamespace(
+        store=store,
+        get_screen=lambda name: None,
+        game=types.SimpleNamespace(context=lambda: types.SimpleNamespace(current=None)),
+    )
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+    # 过滤器已发布过当前句：store 直读为去重命中
+    module._STATE["last_who"] = "Charles"
+    module._STATE["last_what"] = "当前句。"
+
+    module._periodic_callback()
+
+    says = [m for m in module._STATE["queue"] if m["t"] == "say"]
+    assert says == []  # 不翻 history 旧账重复上报「上一句。」
+
+
+def test_periodic_scan_falls_back_to_history_when_current_sources_empty(
+    agent_text, monkeypatch
+):
+    """当前句源都无值（store 无 _last_say_what、屏幕不在、语句源不可用）时，
+    历史兜底仍生效。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(
+        _history_list=[types.SimpleNamespace(who="Charles", what="上一句。")]
+    )
+    fake = types.SimpleNamespace(
+        store=store,
+        get_screen=lambda name: None,
+        game=types.SimpleNamespace(context=lambda: types.SimpleNamespace(current=None)),
+    )
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    module._periodic_callback()
+
+    says = [m for m in module._STATE["queue"] if m["t"] == "say"]
+    assert len(says) == 1
+    assert says[0]["what"] == "上一句。"
+    assert says[0]["src"] == "poll"
+
+
 # ------------------------------------------------------------------ 版本推断
 
 
