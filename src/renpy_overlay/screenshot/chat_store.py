@@ -72,6 +72,37 @@ class ChatStore:
         )
         return int(cursor.lastrowid)
 
+    def entries(self) -> list[tuple[int, str, str]]:
+        """全部记录的 ``(id, user_msg, ai_msg)``，按自增 id 升序（写入顺序，即表格浏览顺序）。"""
+        if self._broken:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT id, user_msg, ai_msg FROM chat ORDER BY id ASC"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            self._degrade("查询记录列表", exc)
+            return []
+        return [(int(row[0]), str(row[1] or ""), str(row[2] or "")) for row in rows]
+
+    def delete(self, record_id: int) -> bool:
+        """按 id 删除一条对话记录，返回是否删除成功（id 不存在返回 False）。"""
+        if self._broken:
+            return False
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM chat WHERE id = ?", (int(record_id),)
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._degrade("删除", exc)
+            return False
+        if cursor.rowcount == 0:
+            logger.debug("删除对话记录未命中（id=%s）：%s", record_id, self._db_path)
+            return False
+        logger.debug("对话记录已删除（id=%s）：%s", record_id, self._db_path)
+        return True
+
     def count(self) -> int:
         """表内记录数（诊断用）；查询失败返回 -1。"""
         if self._broken:

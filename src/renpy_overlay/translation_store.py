@@ -127,6 +127,48 @@ class TranslationStore:
             return -1
         return int(row[0]) if row else 0
 
+    def entries(self) -> list[tuple[str, str, str]]:
+        """全部记录的 ``(hash, original, translated)``，按写入顺序（rowid 升序）。
+
+        分桶存储：同一哈希下可共存多条不同原文的记录，每条记录占一行，
+        浏览时逐行展开（每行即一组原文译文）。
+        """
+        if self._broken:
+            return []
+        try:
+            rows = self._conn.execute(
+                "SELECT hash, original, translated FROM translations ORDER BY rowid ASC"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            self._degrade("查询记录列表", exc)
+            return []
+        return [(str(row[0]), str(row[1] or ""), str(row[2] or "")) for row in rows]
+
+    def delete(self, original: str) -> bool:
+        """删除同一原文的一条翻译记录，返回是否删除成功（未命中返回 False）。
+
+        分桶语义（需求）：仅删除这一组数据 —— 按复合主键 ``(hash, original)``
+        精确匹配，同桶内其它原文的记录不受影响；桶内无剩余记录时整个条目
+        随之消失（桶即该哈希下全部记录的集合）。
+        """
+        if not original or self._broken:
+            return False
+        key = self._hash_func(original)
+        try:
+            cursor = self._conn.execute(
+                "DELETE FROM translations WHERE hash = ? AND original = ?",
+                (key, original),
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._degrade("删除", exc)
+            return False
+        if cursor.rowcount == 0:
+            logger.debug("删除翻译记录未命中：%s…", original[:24])
+            return False
+        logger.debug("翻译记录已删除（原文 %d 字）：%s", len(original), self._db_path)
+        return True
+
     def close(self) -> None:
         try:
             self._conn.close()

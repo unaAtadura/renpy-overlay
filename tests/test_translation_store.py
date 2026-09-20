@@ -112,3 +112,47 @@ def test_close_is_idempotent(tmp_path):
     store = open_store(tmp_path)
     store.close()
     store.close()  # 重复关闭不应抛异常
+
+
+# ---------------------------------------------------------------- 历史浏览（entries/delete）
+
+
+def test_entries_lists_all_records_in_insertion_order(tmp_path):
+    store = open_store(tmp_path)
+    try:
+        store.put("B 原文", "译B")
+        store.put("A 原文", "译A")
+        entries = store.entries()
+        assert [row[1] for row in entries] == ["B 原文", "A 原文"]  # 写入顺序（rowid）
+        assert [row[2] for row in entries] == ["译B", "译A"]
+        assert all(row[0] for row in entries)  # 分桶哈希键非空
+    finally:
+        store.close()
+
+
+def test_delete_removes_only_target_pair_and_keeps_bucket_siblings(tmp_path):
+    # 分桶语义：仅删除选中的一组 (hash, original)，同桶内其它原文的记录保留
+    store = open_store(tmp_path, hash_func=lambda _text: "same-key")
+    try:
+        store.put("原文A", "译文A")
+        store.put("原文B", "译文B")
+        assert store.delete("原文A") is True
+        assert store.get("原文A") is None
+        assert store.get("原文B") == "译文B", "同桶内其它原文的记录不受影响"
+        assert [row[1] for row in store.entries()] == ["原文B"]
+        assert store.delete("原文A") is False  # 未命中
+        assert store.delete("") is False  # 空原文直接拒绝
+    finally:
+        store.close()
+
+
+def test_delete_last_record_empties_the_bucket(tmp_path):
+    # 桶空才删整个条目：删除桶内唯一记录后，不再有任何该桶的行
+    store = open_store(tmp_path, hash_func=lambda _text: "solo-key")
+    try:
+        store.put("唯一原文", "唯一译文")
+        assert store.delete("唯一原文") is True
+        assert store.entries() == []
+        assert store.count() == 0
+    finally:
+        store.close()

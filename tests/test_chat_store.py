@@ -45,6 +45,33 @@ def test_schema_matches_specification(tmp_path):
     }
 
 
+def test_entries_lists_records_in_insertion_order(tmp_path):
+    store = open_store(str(tmp_path))
+    store.insert("第一条", "回复一")
+    store.insert("第二条", "回复二")
+    # 按自增 id 升序 = 写入顺序，即对话历史表格的浏览顺序
+    assert store.entries() == [
+        (1, "第一条", "回复一"),
+        (2, "第二条", "回复二"),
+    ]
+    store.close()
+
+
+def test_delete_removes_only_target_record(tmp_path):
+    store = open_store(str(tmp_path))
+    store.insert("第一条", "回复一")
+    second = store.insert("第二条", "回复二")
+    store.insert("第三条", "回复三")
+    assert store.delete(second) is True
+    assert store.count() == 2
+    entries = store.entries()
+    assert [rid for rid, _u, _a in entries] == [1, 3]  # 其余记录保留且顺序不变
+    assert entries[1][2] == "回复三"
+    assert store.delete(second) is False  # 已删除：再次删除未命中
+    assert store.delete(999) is False  # id 不存在：未命中
+    store.close()
+
+
 def test_open_degrades_when_dir_uncreatable(tmp_path):
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")  # 文件占位 → mkdir 失败
