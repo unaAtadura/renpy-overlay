@@ -355,6 +355,100 @@ def test_templates_write_result_with_memmove():
         assert re.search(r"\+ b\"\\x00\"", source), "结果必须 NUL 结尾（工具端按 C 字符串读回）"
 
 
+# ------------------------------------------------------------------ say 发布
+
+
+def test_publish_dedup_blocks_repeats_and_allows_new_text(agent_text):
+    module = _fresh_queue_module(agent_text)
+    assert module._publish("Charles", "Same.", "poll") is True
+    assert module._publish("Charles", "Same.", "poll") is False  # 重复文本被去重
+    assert module._publish("Charles", "Other.", "poll") is True
+    assert module._STATE["captured"] == 2
+
+
+def test_publish_rolls_back_dedup_when_emit_fails(agent_text):
+    """入队失败（队列未就绪）时回退去重标记：同一句可被后续轮询重发。"""
+    import collections
+
+    module = _load_agent_module(agent_text)
+    module._STATE["queue"] = None  # 队列未就绪：_emit 直接失败
+    assert module._publish("Charles", "Hello.", "poll") is False
+    assert module._STATE["last_what"] == ""  # 去重标记回退
+    assert module._STATE["captured"] == 0  # 计数同步回退
+
+    module._STATE["queue"] = collections.deque()
+    assert module._publish("Charles", "Hello.", "poll") is True  # 就绪后重发成功
+    assert module._STATE["last_what"] == "Hello."
+    assert module._STATE["captured"] == 1
+
+
+# ---- say_menu_text_filter：显示瞬间捕获（旧引擎「落后一句」根治） ---------------
+
+
+def _node(class_name: str, what, who=""):
+    """伪造 AST 节点：类名即判别依据（Say / Menu）。"""
+    node = type(class_name, (), {})()
+    node.what = what
+    node.who = who
+    return node
+
+
+def _fake_renpy(current_node, store=None):
+    import types
+
+    context = types.SimpleNamespace(current=current_node)
+    return types.SimpleNamespace(
+        store=store or types.SimpleNamespace(),
+        game=types.SimpleNamespace(context=lambda: context),
+        config=types.SimpleNamespace(say_menu_text_filter=None),
+    )
+
+
+def test_say_text_filter_publishes_at_display(agent_text, monkeypatch):
+    """Say.execute 过滤调用：显示瞬间上报，who 经 store 解析为展示名，文本原样透传。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Charles"))
+    fake = _fake_renpy(_node("Say", "Good morning Dad.", who="c"), store)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._say_text_filter("Good morning Dad.") == "Good morning Dad."
+    message = module._STATE["queue"][-1]
+    assert message["t"] == "say"
+    assert message["who"] == "Charles"  # 与轮询源的展示名一致，去重键可匹合
+    assert message["what"] == "Good morning Dad."
+    assert message["src"] == "text_filter"
+
+
+def test_say_text_filter_skips_predict_and_menu_and_chains(agent_text, monkeypatch):
+    """预测调用（文本与当前节点不一致）与 Menu 过滤不发布；原过滤器链式透传。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Charles"))
+    fake = _fake_renpy(_node("Say", "当前句。", who="c"), store)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    # 预测路径：传入未来句文本与当前执行节点原文不一致 → 不发布（防剧透）
+    module._say_text_filter("未来句。")
+    assert len(module._STATE["queue"]) == 0
+
+    # 菜单节点的过滤调用（选项文本）→ 不发布（由 menu 钩子负责）
+    fake.game.context().current = _node("Menu", "选项甲")
+    module._say_text_filter("选项甲")
+    assert len(module._STATE["queue"]) == 0
+
+    # 链式：原有过滤器存在时调用并透传其返回值
+    calls = []
+    module._STATE["say_text_filter_prev"] = lambda text: calls.append(text) or text + "!"
+    fake.game.context().current = _node("Say", "当前句。", who="c")
+    assert module._say_text_filter("当前句。") == "当前句。!"
+    assert calls == ["当前句。"]
+
+
 # ------------------------------------------------------------------ 版本推断
 
 
