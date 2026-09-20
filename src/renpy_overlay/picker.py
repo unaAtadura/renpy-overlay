@@ -2,6 +2,10 @@
 
 选择窗刻意显示"分数 + 判定依据"，而不是只给一个进程名列表 —— 识别策略总会有
 误判（例如某些游戏的 exe 叫 python.exe），把依据摊开给用户看，比让用户猜更可靠。
+
+另提供「跳过注入」入口（需求 .raw_plans/future_跳过注入.txt）：向非 Ren'Py
+游戏提供部分功能 —— 点击后经 IFileOpenDialog 选择数据目录，选择期间选择窗
+保持打开，取消则留在选择窗，选定后以 :class:`SkipSelection` 作为选择结果。
 """
 
 from __future__ import annotations
@@ -9,20 +13,48 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from .discovery import Candidate, print_candidates
+from .translation_store import CACHE_DIR_NAME
 
 logger = logging.getLogger("renpy_overlay.picker")
 
 _CJK_FONT = ("Microsoft YaHei UI", 9)
 
 
+class SkipSelection:
+    """选择窗「跳过注入」的结果：``path`` 为用户选择的数据目录（原始路径）。"""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+def resolve_cache_dir(selected: Path) -> Path:
+    """跳过注入模式：把用户选择的目录解析为数据缓存目录（纯函数，便于离线单测）。
+
+    需求三规则：
+    1. 目录名即为 ``renpy_overlay_cache`` → 使用当前目录；
+    2. 目录名不同但其下已包含 ``renpy_overlay_cache`` → 使用该子目录；
+    3. 其下不包含 → 使用（随后由存储管线自动创建的）``renpy_overlay_cache``。
+
+    情况 1/2 目录与数据库已存在，各存储以 ``CREATE TABLE IF NOT EXISTS`` 打开，
+    不覆盖既有数据库；情况 3 由存储管线自动建目录并新建数据库。既有存储管线
+    约定 ``game_dir`` 下固定挂 ``renpy_overlay_cache/``，故调用方以
+    ``resolve_cache_dir(selected).parent`` 作为 game_dir 传入即可命中全部三种
+    情况的正确目录。
+    """
+    if selected.name == CACHE_DIR_NAME:
+        return selected
+    return selected / CACHE_DIR_NAME
+
+
 def choose_target(
     candidates: list[Candidate],
     refresh: Callable[[], list[Candidate]] | None = None,
     use_gui: bool = True,
-) -> Candidate | None:
-    """返回用户选中的候选，取消或没有候选时返回 None。"""
+) -> Candidate | SkipSelection | None:
+    """返回用户选中的候选或「跳过注入」结果，取消或没有候选时返回 None。"""
     if not candidates:
         print("未发现候选进程。请先启动 Ren'Py 游戏，或使用 --all 列出全部进程。")
         return None
@@ -39,7 +71,7 @@ def choose_target(
 
 def _choose_gui(
     candidates: list[Candidate], refresh: Callable[[], list[Candidate]] | None
-) -> Candidate | None:
+) -> Candidate | SkipSelection | None:
     import tkinter as tk
     from tkinter import font as tkfont
     from tkinter import ttk
@@ -123,9 +155,11 @@ def _choose_gui(
     inject_button = ttk.Button(buttons, text="注入选中项")
     cancel_button = ttk.Button(buttons, text="取消")
     refresh_button = ttk.Button(buttons, text="重新扫描")
+    skip_button = ttk.Button(buttons, text="跳过注入")
     inject_button.pack(side="right", padx=(6, 0))
     cancel_button.pack(side="right")
     refresh_button.pack(side="left")
+    skip_button.pack(side="left", padx=(6, 0))
 
     def fill(rows: list[Candidate]) -> None:
         tree.delete(*tree.get_children())
@@ -177,19 +211,46 @@ def _choose_gui(
         state["rows"] = rows
         fill(rows)
 
+    def on_skip() -> None:
+        """跳过注入：选数据目录后关闭选择窗；取消则留在选择窗（需求）。"""
+        from .folder_dialog import pick_folder
+
+        path = pick_folder(_root_hwnd(root))
+        if not path:
+            return  # 取消/失败：退回选择进程窗口（保持打开）
+        state["result"] = SkipSelection(path)
+        root.destroy()
+
     tree.bind("<<TreeviewSelect>>", on_select)
     tree.bind("<Double-1>", lambda _event: on_inject())
     tree.bind("<Return>", lambda _event: on_inject())
     inject_button.configure(command=on_inject)
     cancel_button.configure(command=on_cancel)
     refresh_button.configure(command=on_refresh, state=("normal" if refresh else "disabled"))
+    skip_button.configure(command=on_skip)
 
     fill(list(candidates))
     root.bind("<Escape>", lambda _event: on_cancel())
     root.mainloop()
 
     result = state["result"]
+    if isinstance(result, SkipSelection):
+        return result
     return result if isinstance(result, Candidate) else None
+
+
+def _root_hwnd(root) -> int:
+    """Tk 根窗口的原生句柄（作 IFileOpenDialog 的属主）；取不到回退 0。
+
+    Windows 上 ``winfo_id()`` 返回的是 Tk 子窗口，真正的顶层窗口是它的父窗口。
+    """
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+        return int(hwnd) if hwnd else int(root.winfo_id())
+    except Exception:  # pragma: no cover - 非 Windows / 句柄不可得
+        return 0
 
 
 # ---------------------------------------------------------------- 命令行菜单
