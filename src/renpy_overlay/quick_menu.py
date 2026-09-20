@@ -19,6 +19,7 @@ import logging
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtWidgets import QApplication, QMenu
 
+from .screenshot.frame_overlay import FrameOverlayLayer
 from .screenshot.hotkeys import HOTKEY_MODE_OFF_TEXT, HOTKEY_MODE_ON_TEXT
 from .screenshot.window import FRAME_COLORS, ScreenshotWindow
 
@@ -39,6 +40,7 @@ class QuickMenu:
         on_open_history,
         on_recognize_song=None,
         on_open_song_history=None,
+        frame_overlay_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
         self._on_open_history = on_open_history
@@ -47,6 +49,9 @@ class QuickMenu:
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
+        # 框选提示覆盖层（锁定期线框）：惰性创建；工厂可注入（离线测试用）
+        self._frame_overlay = None
+        self._frame_overlay_factory = frame_overlay_factory or FrameOverlayLayer
 
     # ---- 右键菜单 -----------------------------------------------------------
 
@@ -152,6 +157,9 @@ class QuickMenu:
             window.close()
             window.deleteLater()
         self._windows.clear()
+        if self._frame_overlay is not None:
+            self._frame_overlay.deleteLater()
+            self._frame_overlay = None
 
     def reassert_topmost(self) -> None:
         """把全部截图窗口重新压回最顶层（对抗独占全屏被激活时的覆盖）。"""
@@ -162,6 +170,11 @@ class QuickMenu:
                 win32api.set_topmost(window.hwnd)
             except Exception:  # pragma: no cover - 窗口销毁竞态
                 return
+        if self._frame_overlay is not None:  # 线框覆盖层随周期一并重申置顶
+            try:
+                win32api.set_topmost(self._frame_overlay.hwnd)
+            except Exception:  # pragma: no cover - 覆盖层销毁竞态
+                pass
 
     @property
     def window_count(self) -> int:
@@ -188,6 +201,7 @@ class QuickMenu:
         """
         self._layout_locked = True
         self.hide_all()
+        self._show_frame_overlay()
         logger.info(
             "截图布局已锁定（%d 个窗口已隐藏，创建/销毁入口已屏蔽）",
             len(self._windows),
@@ -203,7 +217,36 @@ class QuickMenu:
         """
         self._layout_locked = False
         self.show_all()
+        self._hide_frame_overlay()
         logger.info("截图布局已解锁（窗口已恢复显示，创建/销毁入口已恢复）")
+
+    def _show_frame_overlay(self) -> None:
+        """在屏幕上绘制锁定期框选提示线框（覆盖层整窗穿透，不阻挡交互）。
+
+        线框快照在锁定时刻生成：几何取各窗口 ``geometry()``（Qt 全局逻辑
+        坐标，进程 Per-Monitor DPI Aware、与物理像素一致），颜色取各自
+        ``border_color``；线框相对截图区域向外偏移绘制，不污染识别截图。
+        """
+        frames = [
+            (
+                (
+                    window.geometry().x(),
+                    window.geometry().y(),
+                    window.geometry().x() + window.geometry().width(),
+                    window.geometry().y() + window.geometry().height(),
+                ),
+                window.border_color,
+            )
+            for window in self._windows
+        ]
+        if self._frame_overlay is None:
+            self._frame_overlay = self._frame_overlay_factory()
+        self._frame_overlay.show_frames(frames)
+
+    def _hide_frame_overlay(self) -> None:
+        """清除锁定期全部线框（覆盖层隐藏，下次锁定重新快照）。"""
+        if self._frame_overlay is not None:
+            self._frame_overlay.hide_overlay()
 
     def locked_windows(self) -> list[ScreenshotWindow]:
         """全部双击锁定的截图窗口（栈序；边框色可作窗口唯一标识）。
