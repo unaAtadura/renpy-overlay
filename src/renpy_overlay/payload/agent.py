@@ -19,6 +19,9 @@
 - ``config.all_character_callbacks``：官方角色回调，``event == "begin"`` 时
   kwargs 里带完整的 ``what``，是最可靠的来源。
 - ``config.say_arguments_callback``：链式包装以取得当前发言角色对象。
+- ``config.say_menu_text_filter``：链式包装，在 Say.execute 进正文显示之前拿到
+  当句原文（旧版本引擎上 ``_history_list`` 要等交互结束才入账，靠它保证
+  「显示即达」；预测路径的调用已判别排除，不会提前上报未来台词）。
 - ``renpy.exports.menu``：链式包装，所有 menu 语句（分支选项）的唯一入口 ——
   进入时捕获选项原文（玩家当前语言下所见文本）与触发对话上下文，返回时
   捕获玩家所选；游戏自定义 choice screen 也经过它。
@@ -74,6 +77,7 @@ _STATE = {
     "last_heartbeat": 0.0,
     "say_arguments_prev": None,
     "say_arguments_had": False,
+    "say_text_filter_prev": None,
     "exports_menu_prev": None,
     "last_menu": None,
     "last_choice_captions": None,
@@ -259,7 +263,11 @@ def _resolve_who(explicit):
 
 
 def _publish(who, what, source, force=False):
-    """统一的出口：清洗文本 + 去重 + 入队。"""
+    """统一的出口：清洗文本 + 去重 + 入队。
+
+    入队失败（发送队列未就绪等）时回退去重标记与计数：允许后续轮询重新发布
+    同一句，避免这一句因一次入队失败就被永久吞掉。
+    """
     try:
         what = _clean_text(_to_text(what))
         if not what:
@@ -267,11 +275,13 @@ def _publish(who, what, source, force=False):
         who = _clean_text(_to_text(who))
         if not force and what == _STATE["last_what"] and who == _STATE["last_who"]:
             return False
+        previous_what = _STATE["last_what"]
+        previous_who = _STATE["last_who"]
         _STATE["last_what"] = what
         _STATE["last_who"] = who
         _STATE["last_publish"] = time.time()
         _STATE["captured"] = _STATE["captured"] + 1
-        return _emit(
+        if not _emit(
             {
                 "t": "say",
                 "who": who,
@@ -279,7 +289,12 @@ def _publish(who, what, source, force=False):
                 "src": source,
                 "ts": time.time(),
             }
-        )
+        ):
+            _STATE["last_what"] = previous_what
+            _STATE["last_who"] = previous_who
+            _STATE["captured"] = _STATE["captured"] - 1
+            return False
+        return True
     except BaseException as exc:
         _note_error("publish", exc)
         return False
@@ -313,6 +328,62 @@ def _say_arguments_callback(character, *args, **kwargs):
     if callable(prev):
         return prev(character, *args, **kwargs)
     return (args, kwargs)
+
+
+def _who_from_statement(node):
+    """从 Say 节点解析展示用说话人：``node.who`` 为角色变量名时经 store 取角色名。
+
+    与轮询源（history 的 who 即展示名）保持一致，保证两路去重键相同、
+    同一句不会被重复上报。解析失败时返回空串（不误报旧角色）。
+    """
+    try:
+        import renpy
+
+        raw = getattr(node, "who", None)
+        if not raw:
+            return ""
+        character = getattr(renpy.store, raw, None)
+        if character is None:
+            return ""
+        return _clean_text(_to_text(getattr(character, "name", None) or ""))
+    except BaseException:
+        return ""
+
+
+def _say_text_filter(text):
+    """链式包装 say_menu_text_filter：在台词显示瞬间捕获文本（「落后一句」根治）。
+
+    Ren'Py 在 ``Say.execute`` 进正文显示之前调用本过滤器，而 ``_history_list``
+    的当前句要等交互结束（do_done）才入账——在 7.3/8.0/8.1 等旧引擎上，这是
+    唯一能拿到显示瞬间当前句的公开钩子。双重判别：
+
+    - 当前执行节点必须是 Say（排除 Menu 选项文本等其他过滤调用）；
+    - 传入文本与当前节点原文必须一致（预测路径会用未来节点调用本过滤器，
+      不一致即预测调用，跳过以免提前上报未显示的台词）。
+
+    文本按原始原文上报（与既有扫描源一致，由 _clean_text 去标签）。
+    """
+    try:
+        import renpy
+
+        node = renpy.game.context().current
+        if type(node).__name__ == "Say" and getattr(node, "what", None) == text:
+            _publish(_who_from_statement(node), _to_text(text), "text_filter")
+    except BaseException:
+        pass
+    prev = _STATE.get("say_text_filter_prev")
+    if callable(prev):
+        return prev(text)
+    return text
+
+
+def _restore_say_text_filter():
+    try:
+        import renpy
+
+        renpy.config.say_menu_text_filter = _STATE.get("say_text_filter_prev")
+    except BaseException as exc:
+        _note_error("restore_say_text_filter", exc)
 
 
 def _periodic_callback():
@@ -553,6 +624,17 @@ def _install_now():
         except BaseException as exc:
             _note_error("say_arguments_callback", exc)
 
+        # 显示瞬间捕获（旧引擎「落后一句」的根治）：say_menu_text_filter 在
+        # Say.execute 进正文显示前被调用，比 _history_list 入账（do_done）
+        # 早整整一个交互周期；链式包装并记录原值，注销时还原
+        _STATE["say_text_filter_prev"] = getattr(config, "say_menu_text_filter", None)
+        try:
+            config.say_menu_text_filter = _say_text_filter
+            _STATE["remove_hooks"].append(_restore_say_text_filter)
+            layers.append("say_text_filter")
+        except BaseException as exc:
+            _note_error("say_text_filter", exc)
+
         # 分支选项：已实测验证读取 —— Ren'Py 8.2.1.24030407（脚本版本 (8, 2, 1)，
         # 构建于 2025-07-06，Python 3.9.10 / x64），测试游戏 Sicae-Ep.7。该版本中
         # menu 语句经 Menu.execute 调用 renpy.exports.menu(choices, ...)（唯一入口，
@@ -783,6 +865,7 @@ def start(config_json=None):
     _STATE["last_what"] = ""
     _STATE["last_who"] = ""
     _STATE["who_hint"] = ""
+    _STATE["say_text_filter_prev"] = None
     _STATE["exports_menu_prev"] = None
     _STATE["last_menu"] = None
     _STATE["last_choice_captions"] = None
