@@ -47,6 +47,10 @@ def test_missing_file_creates_defaults(tmp_path):
         "hotkey_window_6": "6",
         "hotkey_window_7": "7",
         "hotkey_window_8": "8",
+        "api_base_url_stanby": "",
+        "model_stanby": "",
+        "api_key_stanby": "",
+        "screenshot_model_stanby": "",
     }
 
 
@@ -87,11 +91,18 @@ def test_screenshot_model_loaded_and_fallback(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"screenshot_model": "qwen-vl"}), encoding="utf-8")
     assert config.load_config(target).screenshot_model == "qwen-vl"
-    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（运行时回退 model）
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串
     assert config.load_config(target).screenshot_model == ""
     for bad in (123, None, ["vl"]):
         target.write_text(json.dumps({"screenshot_model": bad}), encoding="utf-8")
         assert config.load_config(target).screenshot_model == "", f"{bad!r}"
+
+
+def test_resolve_screenshot_model_fallback_rule():
+    # 退避规则：screenshot_model 留空回退 model；主/备链路共用同一规则
+    assert config.resolve_screenshot_model("qwen-vl", "text-model") == "qwen-vl"
+    assert config.resolve_screenshot_model("", "text-model") == "text-model"
+    assert config.resolve_screenshot_model("", "") == ""
 
 
 # ---------------------------------------------------------------- 听歌识曲
@@ -162,6 +173,59 @@ def test_hotkey_invalid_type_falls_back(tmp_path):
     loaded = config.load_config(target)
     assert loaded.hotkey_main == "ctrl+alt+p"
     assert loaded.hotkey_windows[2] == "3"
+
+
+# ---------------------------------------------------------------- 备选 API 链路
+
+
+def test_standby_defaults_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    # 全部默认留空：备选链路不启用
+    assert loaded.api_base_url_stanby == ""
+    assert loaded.model_stanby == ""
+    assert loaded.api_key_stanby == ""
+    assert loaded.screenshot_model_stanby == ""
+
+
+def test_standby_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url_stanby": "https://example.com/v1",
+                "model_stanby": "stanby-model",
+                "api_key_stanby": "sk-stanby",
+                "screenshot_model_stanby": "stanby-vl",
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url_stanby == "https://example.com/v1"
+    assert loaded.model_stanby == "stanby-model"
+    assert loaded.api_key_stanby == "sk-stanby"
+    assert loaded.screenshot_model_stanby == "stanby-vl"
+
+
+def test_standby_invalid_types_fall_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url_stanby": 123,
+                "model_stanby": None,
+                "api_key_stanby": ["k"],
+                "screenshot_model_stanby": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url_stanby == ""  # 回退留空 = 不启用备选链路
+    assert loaded.model_stanby == ""
+    assert loaded.api_key_stanby == ""
+    assert loaded.screenshot_model_stanby == ""
 
 
 def test_reasoning_effort_invalid_falls_back(tmp_path):

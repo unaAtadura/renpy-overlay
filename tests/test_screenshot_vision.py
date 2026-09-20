@@ -283,3 +283,45 @@ def test_recognize_exported_from_package_root():
     from renpy_overlay.screenshot import recognize_image
 
     assert recognize_image is vision.recognize_image
+
+
+# ---- 备选 API 链路：主链路不可达时自动降级 -------------------------------------
+
+
+def test_translate_image_falls_back_to_standby(stub_server):
+    base, received = stub_server
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # 关闭后该端口大概率无人监听
+    dead = f"http://127.0.0.1:{port}"
+    result = vision.translate_image(
+        _tiny_base64(),
+        base_url=dead,
+        timeout=5,
+        base_url_stanby=base,
+        model_stanby="stanby-vl",
+    )
+    assert result == "识别到的中文译文"  # 备选链路完成识图翻译
+    assert len(received) == 1  # model_stanby 显式：跳过备选端点的模型发现
+    assert received[0]["body"]["model"] == "stanby-vl"
+
+
+def test_translate_image_with_v1_suffixed_base(stub_server):
+    # 基址自带 /v1（如阿里云 compatible-mode）：请求路径不重复追加
+    base, received = stub_server
+    result = vision.translate_image(
+        _tiny_base64(), base_url=f"{base}/v1", timeout=5, model="m"
+    )
+    assert result == "识别到的中文译文"
+    assert received[0]["path"] == "/v1/chat/completions"
+
+
+def test_translate_image_without_standby_raises(stub_server):
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    dead = f"http://127.0.0.1:{port}"
+    with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
+        vision.translate_image(_tiny_base64(), base_url=dead, timeout=2)  # 未启用备选

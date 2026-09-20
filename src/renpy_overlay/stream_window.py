@@ -1323,6 +1323,10 @@ class StreamOverlayWindow:
             "api_key": self._config.api_key,
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
+            # 备选链路：主链路不可达时自动切换（base_url 留空即不启用）
+            "base_url_stanby": self._config.api_base_url_stanby,
+            "api_key_stanby": self._config.api_key_stanby,
+            "model_stanby": self._config.model_stanby,
         }
         thread = threading.Thread(
             target=self._translate_worker,
@@ -1528,10 +1532,18 @@ class StreamOverlayWindow:
         api_options = {  # 连接参数来自 config.json；模型用截图专用配置（可回退 model）
             "base_url": self._config.api_base_url,
             "timeout": self._config.api_timeout,
-            "model": self._config.screenshot_model,
+            "model": config.resolve_screenshot_model(
+                self._config.screenshot_model, self._config.model
+            ),
             "api_key": self._config.api_key,
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
+            # 备选链路：截图模型留空回退 model_stanby（与 screenshot_model 退避一致）
+            "base_url_stanby": self._config.api_base_url_stanby,
+            "api_key_stanby": self._config.api_key_stanby,
+            "model_stanby": config.resolve_screenshot_model(
+                self._config.screenshot_model_stanby, self._config.model_stanby
+            ),
         }
         thread = threading.Thread(
             target=self._screenshot_worker,

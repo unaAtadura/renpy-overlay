@@ -32,6 +32,26 @@ class TranslationError(RuntimeError):
     """翻译请求失败（服务不可达、协议不符、响应缺字段等）。"""
 
 
+class EndpointUnavailable(TranslationError):
+    """服务端点不可达（连接失败/超时）。
+
+    与普通请求失败（HTTP 错误、响应协议不符等）区分：仅这类错误会触发
+    备选链路降级（服务可达但请求出错时，换链路重试无意义）。
+    """
+
+
+def _api_url(base_url: str, path: str) -> str:
+    """拼接 OpenAI 兼容端点 URL（``path`` 如 ``/chat/completions`` / ``/models``）。
+
+    基址以 ``/v1`` 结尾时（如阿里云 compatible-mode 的 ``.../compatible-mode/v1``）
+    不重复追加 ``/v1``——否则拼出 ``/v1/v1/...``，网关直接返回空体 404（实测）。
+    """
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}{path}"
+    return f"{base}/v1{path}"
+
+
 def _chat_headers(api_key: str) -> dict[str, str]:
     """OpenAI 兼容请求头；api_key 为空时不附加鉴权头（本地服务无需鉴权）。"""
     headers = {"Content-Type": "application/json"}
@@ -55,7 +75,7 @@ def _request_json(url: str, payload: dict | None, timeout: float, api_key: str =
         detail = exc.read()[:200]
         raise TranslationError(f"HTTP {exc.code}：{detail!r}") from exc
     except urllib.error.URLError as exc:
-        raise TranslationError(f"无法连接 {url}：{exc.reason}") from exc
+        raise EndpointUnavailable(f"无法连接 {url}：{exc.reason}") from exc
     try:
         parsed = json.loads(body.decode("utf-8", "replace"))
     except ValueError as exc:
@@ -71,7 +91,7 @@ def first_model(
     api_key: str = "",
 ) -> str:
     """``GET /v1/models`` 取第一个模型 id（LM Studio 至少加载了一个模型时可用）。"""
-    data = _request_json(f"{base_url.rstrip('/')}/v1/models", None, timeout, api_key)
+    data = _request_json(_api_url(base_url, "/models"), None, timeout, api_key)
     models = data.get("data")
     if not isinstance(models, list) or not models:
         raise TranslationError("LM Studio 未返回任何已加载模型（/v1/models 为空）")
@@ -129,7 +149,7 @@ def _open_stream(url: str, payload: dict, timeout: float, api_key: str):
         detail = exc.read()[:200]
         raise TranslationError(f"HTTP {exc.code}：{detail!r}") from exc
     except urllib.error.URLError as exc:
-        raise TranslationError(f"无法连接 {url}：{exc.reason}") from exc
+        raise EndpointUnavailable(f"无法连接 {url}：{exc.reason}") from exc
 
 
 def translate_text(
@@ -141,6 +161,9 @@ def translate_text(
     api_key: str = "",
     enable_thinking: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    base_url_stanby: str = "",
+    api_key_stanby: str = "",
+    model_stanby: str = "",
 ) -> str:
     """把 ``text`` 翻译成简体中文并返回译文。
 
@@ -151,21 +174,44 @@ def translate_text(
     （reasoning）模式，默认关闭，经多平台方言一并声明；关闭思考时使用的
     ``reasoning_effort``（默认 ``"none"``，LM Studio 等本地服务靠它真正关闭）
     同样可注入。空文本抛 ``ValueError``（调用方应先跳过）。
+
+    备选链路：``base_url_stanby`` 非空时启用——主链路发生
+    :class:`EndpointUnavailable`（连接失败/超时）时自动切换到备选端点重试
+    （鉴权用 ``api_key_stanby``、模型用 ``model_stanby``，留空则同样自动
+    发现）；备选端点也失败则抛出末次异常。服务可达但请求出错（HTTP 错误、
+    响应缺字段等）不触发切换。
     """
     if not text or not text.strip():
         raise ValueError("没有可翻译的文本")
-    if not model:
-        model = first_model(base_url, timeout, api_key)
-    payload = _chat_payload(text, model, system_prompt, enable_thinking, reasoning_effort, False)
-    data = _request_json(f"{base_url.rstrip('/')}/v1/chat/completions", payload, timeout, api_key)
+
+    def _request(base_url: str, api_key: str, model: str) -> str:
+        model = model or first_model(base_url, timeout, api_key)
+        payload = _chat_payload(
+            text, model, system_prompt, enable_thinking, reasoning_effort, False
+        )
+        data = _request_json(
+            _api_url(base_url, "/chat/completions"), payload, timeout, api_key
+        )
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise TranslationError(
+                f"响应缺少 choices[0].message.content：{str(data)[:200]}"
+            ) from exc
+        result = str(content or "").strip()
+        if not result:
+            raise TranslationError("模型返回了空译文")
+        return result
+
     try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise TranslationError(f"响应缺少 choices[0].message.content：{str(data)[:200]}") from exc
-    result = str(content or "").strip()
-    if not result:
-        raise TranslationError("模型返回了空译文")
-    return result
+        return _request(base_url, api_key, model)
+    except EndpointUnavailable:
+        if not base_url_stanby:
+            raise
+        logger.warning(
+            "主链路不可达（%s），切换备选链路（%s）", base_url, base_url_stanby
+        )
+        return _request(base_url_stanby, api_key_stanby, model_stanby)
 
 
 def translate_text_stream(
@@ -177,6 +223,9 @@ def translate_text_stream(
     api_key: str = "",
     enable_thinking: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    base_url_stanby: str = "",
+    api_key_stanby: str = "",
+    model_stanby: str = "",
 ) -> Iterator[str]:
     """流式版 ``translate_text``：逐块产出模型增量输出（SSE，``stream=True``）。
 
@@ -186,14 +235,33 @@ def translate_text_stream(
     思考型模型输出的 reasoning 内容不在 ``delta.content`` 中，天然被跳过。
     空 ``delta`` / 空块 / 非 JSON 行一律跳过；``data: [DONE]`` 结束。连接与
     协议错误抛 :class:`TranslationError`；迭代中途连接中断同样收敛为该异常。
+
+    备选链路：``base_url_stanby`` 非空时启用——主链路建连阶段（模型自动
+    发现 / 发起流式请求）发生 :class:`EndpointUnavailable` 时自动切换到
+    备选端点；切换只发生在建连阶段，流式迭代中途断开不切换（避免重复
+    输出前半段）。
     """
     if not text or not text.strip():
         raise ValueError("没有可翻译的文本")
-    if not model:
-        model = first_model(base_url, timeout, api_key)
-    payload = _chat_payload(text, model, system_prompt, enable_thinking, reasoning_effort, True)
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
-    response = _open_stream(url, payload, timeout, api_key)
+
+    def _open(url: str, api_key: str, model: str):
+        model = model or first_model(url, timeout, api_key)
+        payload = _chat_payload(
+            text, model, system_prompt, enable_thinking, reasoning_effort, True
+        )
+        return _open_stream(
+            _api_url(url, "/chat/completions"), payload, timeout, api_key
+        )
+
+    try:
+        response = _open(base_url, api_key, model)
+    except EndpointUnavailable:
+        if not base_url_stanby:
+            raise
+        logger.warning(
+            "主链路不可达（%s），切换备选链路（%s）", base_url, base_url_stanby
+        )
+        response = _open(base_url_stanby, api_key_stanby, model_stanby)
     with response:
         try:
             for raw in response:  # 按行阻塞读取，每行尽快产出，降低显示延迟

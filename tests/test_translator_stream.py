@@ -167,3 +167,50 @@ def test_stream_unreachable_service_raises():
     probe.close()  # 关闭后该端口大概率无人监听
     with pytest.raises(translator.TranslationError, match="无法连接"):
         list(translator.translate_text_stream("hi", base_url=f"http://127.0.0.1:{port}", timeout=2))
+
+
+# ---- 备选 API 链路：主链路不可达时自动降级 -------------------------------------
+
+
+def _closed_port() -> int:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # 关闭后该端口大概率无人监听
+    return port
+
+
+def test_stream_falls_back_to_standby(stub_server):
+    base, received = stub_server
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    chunks = list(
+        translator.translate_text_stream(
+            "hi",
+            base_url=dead,
+            timeout=5,
+            base_url_stanby=base,
+            model_stanby="stanby-model",
+        )
+    )
+    assert chunks == ["你好", "，世界"]  # 备选链路完成流式翻译
+    assert len(received) == 1  # model_stanby 显式：跳过备选端点的模型发现
+    assert received[0]["body"]["model"] == "stanby-model"
+    assert received[0]["accept"] == "text/event-stream"
+
+
+def test_stream_without_standby_raises():
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
+        list(translator.translate_text_stream("hi", base_url=dead, timeout=2))
+
+
+def test_stream_http_error_does_not_fallback(stub_server):
+    # 服务可达但 HTTP 500 不属于「不可达」：不切换备选链路
+    base, received = stub_server
+    with pytest.raises(translator.TranslationError, match="HTTP 500"):
+        list(
+            translator.translate_text_stream(
+                ERROR_TEXT, base_url=base, timeout=5, base_url_stanby=base
+            )
+        )
+    assert len(received) == 1  # 仅主链路一次请求

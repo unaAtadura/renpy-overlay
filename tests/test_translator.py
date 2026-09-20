@@ -193,3 +193,103 @@ def test_unreachable_service_raises():
     probe.close()  # 关闭后该端口大概率无人监听
     with pytest.raises(translator.TranslationError, match="无法连接"):
         translator.translate_text("hi", base_url=f"http://127.0.0.1:{port}", timeout=2)
+
+
+# ---- 备选 API 链路：主链路不可达时自动降级 -------------------------------------
+
+
+def _closed_port() -> int:
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # 关闭后该端口大概率无人监听
+    return port
+
+
+def test_endpoint_unavailable_is_translation_error_subclass():
+    # 仅「不可达」类错误触发备选链路降级；它仍是 TranslationError 的子类
+    assert issubclass(translator.EndpointUnavailable, translator.TranslationError)
+
+
+def test_api_url_appends_v1_once():
+    # 基址不含 /v1：照常追加；基址已含 /v1（如阿里云 compatible-mode）：
+    # 不重复追加，否则拼出 /v1/v1/... 被网关以空体 404 拒绝（实测）
+    assert translator._api_url("http://h:1234", "/chat/completions") == (
+        "http://h:1234/v1/chat/completions"
+    )
+    assert translator._api_url("http://h:1234/", "/chat/completions") == (
+        "http://h:1234/v1/chat/completions"
+    )
+    assert translator._api_url("https://x/compatible-mode/v1", "/chat/completions") == (
+        "https://x/compatible-mode/v1/chat/completions"
+    )
+    assert translator._api_url("https://x/compatible-mode/v1", "/models") == (
+        "https://x/compatible-mode/v1/models"
+    )
+
+
+def test_translate_text_with_v1_suffixed_base(stub_server):
+    # 基址自带 /v1：请求路径不重复追加，往返正常
+    base, received = stub_server
+    result = translator.translate_text(
+        "hi", base_url=f"{base}/v1", timeout=5, model="m"
+    )
+    assert result == "你好，世界"
+    assert received[0]["path"] == "/v1/chat/completions"
+
+
+def test_translate_text_falls_back_to_standby(stub_server):
+    base, received = stub_server
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    result = translator.translate_text(
+        "hi",
+        base_url=dead,
+        timeout=5,
+        base_url_stanby=base,
+        model_stanby="stanby-model",
+    )
+    assert result == "你好，世界"  # 备选链路完成翻译
+    assert len(received) == 1  # model_stanby 显式：跳过备选端点的模型发现
+    assert received[0]["body"]["model"] == "stanby-model"
+
+
+def test_translate_text_standby_auto_model_and_key(stub_server):
+    base, received = stub_server
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    result = translator.translate_text(
+        "hi", base_url=dead, timeout=5, base_url_stanby=base, api_key_stanby="sk-stanby"
+    )
+    assert result == "你好，世界"
+    # model_stanby 留空：备选端点同样自动发现模型；鉴权用 api_key_stanby
+    assert received[0]["body"]["model"] == "stub-model"
+    assert received[0]["authorization"] == "Bearer sk-stanby"
+
+
+def test_translate_text_without_standby_raises():
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
+        translator.translate_text("hi", base_url=dead, timeout=2)  # 未启用备选链路
+
+
+def test_translate_text_http_error_does_not_fallback(stub_server):
+    # 服务可达但 HTTP 错误（404）不属于「不可达」：不切换备选链路
+    base, received = stub_server
+    with pytest.raises(translator.TranslationError, match="HTTP 404"):
+        translator.translate_text(
+            "hi",
+            base_url=f"{base}/wrong-prefix",
+            timeout=5,
+            model="m",  # 跳过模型发现，直接命中 404
+            base_url_stanby=base,
+        )
+    # 仅主链路被访问一次（wrong-prefix 路径 404），备选链路未被访问
+    assert len(received) == 1
+    assert received[0]["path"] == "/wrong-prefix/v1/chat/completions"
+
+
+def test_translate_text_standby_also_unreachable_raises_last():
+    dead = f"http://127.0.0.1:{_closed_port()}"
+    with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
+        translator.translate_text(
+            "hi", base_url=dead, timeout=2, base_url_stanby=dead
+        )
