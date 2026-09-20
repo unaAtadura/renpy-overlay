@@ -43,6 +43,7 @@ class QuickMenu:
         on_open_chat=None,
         on_open_chat_history=None,
         on_open_translation_history=None,
+        on_quit=None,
         frame_overlay_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
@@ -52,6 +53,7 @@ class QuickMenu:
         self._on_open_chat = on_open_chat
         self._on_open_chat_history = on_open_chat_history
         self._on_open_translation_history = on_open_translation_history
+        self._on_quit = on_quit
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
@@ -63,6 +65,9 @@ class QuickMenu:
 
     def show_context_menu(self, global_pos: QPoint) -> None:
         """构建并弹出右键菜单（标题窗 / 正文窗文字处右键触发）。
+
+        菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt）：
+        创建/销毁/快捷键模式 → 听歌识曲 → 对话 → 查看历史（二级菜单）→ 退出。
 
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
         保证菜单始终完整可见（配合宿主在菜单打开期间暂停周期性置顶重申，
@@ -81,15 +86,18 @@ class QuickMenu:
                 HOTKEY_MODE_ON_TEXT if self._hotkey_mode.enabled else HOTKEY_MODE_OFF_TEXT
             )
         menu.addSeparator()
-        history_action = menu.addAction("查看截图历史")
-        # 查看历史二级菜单：同类历史阅读入口的分组（对话历史 / 翻译历史）
-        view_history_menu = menu.addMenu("查看历史")
-        chat_history_action = view_history_menu.addAction("对话历史")
-        translation_history_action = view_history_menu.addAction("翻译历史")
+        song_action = menu.addAction("听歌识曲")
+        menu.addSeparator()
         chat_action = menu.addAction("对话")
         menu.addSeparator()
-        song_action = menu.addAction("听歌识曲")
-        song_history_action = menu.addAction("查看识曲历史")
+        # 查看历史二级菜单（需求给定顺序）：翻译历史 / 截图历史 / 识曲历史 / 对话历史
+        view_history_menu = menu.addMenu("查看历史")
+        translation_history_action = view_history_menu.addAction("翻译历史")
+        screenshot_history_action = view_history_menu.addAction("截图历史")
+        song_history_action = view_history_menu.addAction("识曲历史")
+        chat_history_action = view_history_menu.addAction("对话历史")
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
         chosen = menu.exec(global_pos)
         if chosen is create_action:
             self.create_window()
@@ -97,20 +105,22 @@ class QuickMenu:
             self.destroy_latest()
         elif hotkey_mode_action is not None and chosen is hotkey_mode_action:
             self._hotkey_mode.toggle()
-        elif chosen is history_action and callable(self._on_open_history):
-            self._on_open_history()
-        elif chosen is chat_history_action and callable(self._on_open_chat_history):
-            self._on_open_chat_history()
+        elif chosen is song_action and callable(self._on_recognize_song):
+            self._on_recognize_song()
+        elif chosen is chat_action and callable(self._on_open_chat):
+            self._on_open_chat()
         elif chosen is translation_history_action and callable(
             self._on_open_translation_history
         ):
             self._on_open_translation_history()
-        elif chosen is chat_action and callable(self._on_open_chat):
-            self._on_open_chat()
-        elif chosen is song_action and callable(self._on_recognize_song):
-            self._on_recognize_song()
+        elif chosen is screenshot_history_action and callable(self._on_open_history):
+            self._on_open_history()
         elif chosen is song_history_action and callable(self._on_open_song_history):
             self._on_open_song_history()
+        elif chosen is chat_history_action and callable(self._on_open_chat_history):
+            self._on_open_chat_history()
+        elif chosen is quit_action and callable(self._on_quit):
+            self._on_quit()
 
     # ---- 截图窗口池 ---------------------------------------------------------
 

@@ -741,6 +741,7 @@ class StreamOverlayWindow:
             on_open_chat=self._open_chat,
             on_open_chat_history=self._open_chat_history,
             on_open_translation_history=self._open_translation_history,
+            on_quit=self.request_close,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
         # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
