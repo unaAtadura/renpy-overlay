@@ -35,6 +35,8 @@ def test_missing_file_creates_defaults(tmp_path):
         "stream_window_line_spacing": 1.45,
         "stream_window_title_font_size": 8,
         "stream_window_title_gap": 4,
+        "chat_window_width": 1760,
+        "chat_window_height": 200,
         "screenshot_compress_percent": 10,
         "screenshot_model": "",
         "recording_duration": 8,
@@ -456,6 +458,55 @@ def test_stream_window_size_loaded_and_fallback(tmp_path):
     assert config.load_config(target).stream_window_height == 200  # 低于下限 80
     target.write_text(json.dumps({"stream_window_width": 100}), encoding="utf-8")
     assert config.load_config(target).stream_window_width == 1760  # 低于下限 240
+
+
+# ---------------------------------------------------------------- AI 对话窗口
+
+
+def test_chat_window_size_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"chat_window_width": 900, "chat_window_height": 360}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.chat_window_width == 900
+    assert loaded.chat_window_height == 360
+
+
+def test_chat_window_size_missing_falls_back_to_stream_values(tmp_path):
+    """对话窗尺寸缺省时使用流式正文窗的（配置后）值，而非硬编码默认（需求）。"""
+    target = tmp_path / "config.json"
+    target.write_text("{}", encoding="utf-8")
+    loaded = config.load_config(target)
+    assert loaded.chat_window_width == loaded.stream_window_width
+    assert loaded.chat_window_height == loaded.stream_window_height
+    # 用户自定义了流式正文窗尺寸：缺省的对话窗跟随该值
+    target.write_text(
+        json.dumps({"stream_window_width": 1200, "stream_window_height": 260}),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.chat_window_width == 1200
+    assert loaded.chat_window_height == 260
+
+
+def test_chat_window_size_invalid_falls_back_to_stream_values(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "stream_window_width": 1000,
+                "stream_window_height": 300,
+                "chat_window_width": "wide",  # 类型不符
+                "chat_window_height": 40,  # 低于下限 80
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.chat_window_width == 1000  # 回退流式正文窗配置值
+    assert loaded.chat_window_height == 300
 
 
 def test_invalid_json_falls_back_without_crash(tmp_path):

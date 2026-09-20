@@ -24,6 +24,8 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "stream_window_line_spacing": 1.45, # 流式正文行距倍数
       "stream_window_title_font_size": 8, # 流式标题窗字号（像素）
       "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
+      "chat_window_width": 1760,          # AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
+      "chat_window_height": 200,          # AI 对话窗高度（像素；缺省回退流式正文窗高度）
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
       "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
       "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
@@ -77,6 +79,9 @@ DEFAULT_STREAM_WINDOW_FONT_SIZE = 14  # 正文窗字号（像素）
 DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.45  # 正文行距倍数（参考项目验证值）
 DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 8  # 标题窗字号（像素）
 DEFAULT_STREAM_WINDOW_TITLE_GAP = 4  # 标题窗与正文窗间距（像素）
+#: AI 对话窗尺寸：缺省时使用流式正文窗的（配置后）值，默认常量同源
+DEFAULT_CHAT_WINDOW_WIDTH = DEFAULT_STREAM_WINDOW_WIDTH
+DEFAULT_CHAT_WINDOW_HEIGHT = DEFAULT_STREAM_WINDOW_HEIGHT
 #: 截图翻译：发送 API 前副本等比压缩到的像素面积百分比（默认 10%）
 DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
 #: 截图识别翻译的模型代号；空 = 回退 model（识图需 vision 多模态模型）
@@ -133,6 +138,9 @@ class AppConfig:
     stream_window_line_spacing: float = DEFAULT_STREAM_WINDOW_LINE_SPACING
     stream_window_title_font_size: int = DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE
     stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
+    # AI 对话（尺寸缺省时回退流式正文窗的配置值）
+    chat_window_width: int = DEFAULT_CHAT_WINDOW_WIDTH
+    chat_window_height: int = DEFAULT_CHAT_WINDOW_HEIGHT
     # 截图翻译
     screenshot_compress_percent: int = DEFAULT_SCREENSHOT_COMPRESS_PERCENT
     screenshot_model: str = DEFAULT_SCREENSHOT_MODEL
@@ -184,6 +192,8 @@ def _write_defaults(target: Path) -> None:
         "stream_window_line_spacing": DEFAULT_STREAM_WINDOW_LINE_SPACING,
         "stream_window_title_font_size": DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
+        "chat_window_width": DEFAULT_CHAT_WINDOW_WIDTH,
+        "chat_window_height": DEFAULT_CHAT_WINDOW_HEIGHT,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
         "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "recording_duration": DEFAULT_RECORDING_DURATION,
@@ -361,6 +371,13 @@ def load_config(path: Path | None = None) -> AppConfig:
         logger.warning("配置文件顶层不是对象（%s），回退默认值", target)
         return AppConfig()
 
+    stream_width = _read_positive_int(
+        raw, "stream_window_width", DEFAULT_STREAM_WINDOW_WIDTH, MIN_STREAM_WINDOW_WIDTH
+    )
+    stream_height = _read_positive_int(
+        raw, "stream_window_height", DEFAULT_STREAM_WINDOW_HEIGHT, MIN_STREAM_WINDOW_HEIGHT
+    )
+
     app_config = AppConfig(
         auto_translate=_read_bool(raw, "auto_translate", DEFAULT_AUTO_TRANSLATE),
         auto_translate_interval=_read_interval(raw),
@@ -373,12 +390,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         api_key=_read_str(raw, "api_key", DEFAULT_API_KEY),
         enable_thinking=_read_bool(raw, "enable_thinking", DEFAULT_ENABLE_THINKING),
         reasoning_effort=_read_str(raw, "reasoning_effort", DEFAULT_REASONING_EFFORT),
-        stream_window_width=_read_positive_int(
-            raw, "stream_window_width", DEFAULT_STREAM_WINDOW_WIDTH, MIN_STREAM_WINDOW_WIDTH
-        ),
-        stream_window_height=_read_positive_int(
-            raw, "stream_window_height", DEFAULT_STREAM_WINDOW_HEIGHT, MIN_STREAM_WINDOW_HEIGHT
-        ),
+        stream_window_width=stream_width,
+        stream_window_height=stream_height,
         stream_window_font_size=_read_positive_int(
             raw, "stream_window_font_size", DEFAULT_STREAM_WINDOW_FONT_SIZE, MIN_STREAM_FONT_SIZE
         ),
@@ -396,6 +409,13 @@ def load_config(path: Path | None = None) -> AppConfig:
         ),
         stream_window_title_gap=_read_non_negative_int(
             raw, "stream_window_title_gap", DEFAULT_STREAM_WINDOW_TITLE_GAP
+        ),
+        # 对话窗尺寸缺省（键不存在或类型非法）时回退流式正文窗的配置值（需求）
+        chat_window_width=_read_positive_int(
+            raw, "chat_window_width", stream_width, MIN_STREAM_WINDOW_WIDTH
+        ),
+        chat_window_height=_read_positive_int(
+            raw, "chat_window_height", stream_height, MIN_STREAM_WINDOW_HEIGHT
         ),
         screenshot_compress_percent=_read_percent(
             raw, "screenshot_compress_percent", DEFAULT_SCREENSHOT_COMPRESS_PERCENT
@@ -420,6 +440,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
+        "chat_window（size=%dx%d），"
         "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r），"
         "stanby（base_url=%s，model=%r，api_key=%s，screenshot_model=%r）",
@@ -440,6 +461,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.stream_window_line_spacing,
         app_config.stream_window_title_font_size,
         app_config.stream_window_title_gap,
+        app_config.chat_window_width,
+        app_config.chat_window_height,
         app_config.screenshot_compress_percent,
         app_config.screenshot_model or "<回退 model>",
         app_config.recording_duration,
