@@ -1487,6 +1487,7 @@ class StreamOverlayWindow:
                 api_acquire=self._acquire_chat_slot,
                 api_release=self._release_chat_slot,
                 capture_locked=self._capture_locked_region,
+                game_rect_provider=self._game_window_rect,
             )
         self._chat_window.refresh()
         self._chat_window.show()
@@ -1504,6 +1505,22 @@ class StreamOverlayWindow:
 
     def _release_chat_slot(self) -> None:
         self._chat_busy = False
+
+    def _game_window_rect(self) -> tuple[int, int, int, int] | None:
+        """游戏窗口物理像素 rect（ltrb；未定位到游戏窗口时返回 None）。
+
+        供对话窗口按流式窗同一钳制规则计算尺寸（chat_physical_size）。
+        """
+        try:
+            hwnd = self._resolve_target()
+        except Exception:  # pragma: no cover - 窗口枚举异常
+            return None
+        if not hwnd:
+            return None
+        try:
+            return win32api.window_rect(hwnd)
+        except Exception:  # pragma: no cover - 窗口销毁竞态
+            return None
 
     def _display_chat_reply(self, text: str) -> None:
         """AI 回复上屏：整段替换正文窗内容（打字机呈现，与识曲结果同路径）。"""

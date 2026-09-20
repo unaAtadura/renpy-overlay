@@ -17,11 +17,16 @@
   成功后把用户消息与回复成对写入 chat.db；不保存上下文，每次只发本次消息；
 - 标题提示（经宿主写入流式窗标题窗）：对话发送中... / 发送失败 / 发送成功 /
   OCR中，速度会稍慢... / OCR成功 / OCR失败；
+- 窗口尺寸：config 值与流式正文窗同语义（物理像素）；对话窗按流式窗同一
+  规则被游戏窗口钳制（:func:`chat_physical_size`），再按 devicePixelRatio
+  反算成常规窗口的逻辑尺寸（:func:`logical_size_for_dpr`），每次打开时重算
+  （与复选框重置同属 refresh 的默认状态恢复）；
 - 线程模型与流式悬浮窗一致：Qt 只在主线程操作，OCR / 发送在守护线程执行，
   结果经内部队列由 QTimer（80ms）统一消费。
 
 依赖全部经构造回调注入（store / 控制模块 / 宿主互斥与显示回调），本窗口
-不依赖宿主类型；窗口关闭 = 隐藏（Qt 默认），单例复用，宿主退出时统一销毁。
+不依赖宿主类型；关闭 = 隐藏（closeEvent 拦截，与截图/识曲历史窗口同一
+约定），单例复用，宿主退出时统一销毁。
 """
 
 from __future__ import annotations
@@ -70,6 +75,8 @@ logger = logging.getLogger("renpy_overlay.screenshot.chat_window")
 DRAIN_INTERVAL_MS = 80
 #: 下拉列表色块尺寸（像素）
 SWATCH_SIZE = 14
+#: 钳制尺寸时的屏幕边距（与流式窗跟随定位的 stream_window.MARGIN 一致）
+GAME_MARGIN = 12
 
 # ---- 标题提示文案（需求给定，经宿主写入流式窗标题窗） ------------------------
 TITLE_SENDING = "对话发送中..."
@@ -113,6 +120,41 @@ def color_swatch_pixmap(color: QColor, size: int = SWATCH_SIZE) -> QPixmap:
     return pixmap
 
 
+def logical_size_for_dpr(width: int, height: int, dpr: float) -> tuple[int, int]:
+    """物理像素尺寸 → 常规窗口的 Qt 逻辑尺寸（纯函数，便于离线单测）。
+
+    config 与流式窗同语义（物理像素），而常规窗口 ``resize`` 以逻辑像素为
+    准：高 DPI 缩放（dpr > 1）下直接 resize 配置值会再放大 dpr 倍，需按
+    dpr 反算。dpr 非法（≤0）时钳为 1.0，结果至少 1 像素。
+    """
+    ratio = max(1.0, dpr)
+    return (max(1, round(width / ratio)), max(1, round(height / ratio)))
+
+
+def chat_physical_size(
+    config_size: tuple[int, int],
+    game_rect: tuple[int, int, int, int] | None,
+    margin: int = GAME_MARGIN,
+) -> tuple[int, int]:
+    """按流式正文窗同一钳制规则计算对话窗物理尺寸（纯函数，便于离线单测）。
+
+    流式窗跟随定位时宽高被游戏窗口钳制（与 stream_window.compute_geometry
+    同规则：宽 ≤ 游戏宽 - 2*margin 且下限 240，高 ≤ 游戏高一半且下限 80），
+    对话窗要获得与流式窗基本一致的外观必须同样钳制——DPR = 1 的机器上
+    这是对话窗外观偏大的主因（游戏窗口小于配置宽度时流式窗实际更窄）。
+    拿不到游戏窗口（``game_rect`` 为 None）时按配置原值。结果仍是物理
+    像素，调用方再经 :func:`logical_size_for_dpr` 反算逻辑尺寸。
+    """
+    width, height = config_size
+    if game_rect is None:
+        return (max(1, width), max(1, height))
+    left, top, right, bottom = game_rect
+    game_w, game_h = max(1, right - left), max(1, bottom - top)
+    width = max(240, min(width, game_w - 2 * margin))
+    height = max(80, min(height, game_h // 2))
+    return (width, height)
+
+
 class AIChatWindow(QWidget):
     """AI 对话窗口（单例复用：宿主持有，打开时 refresh 重置交互状态）。"""
 
@@ -128,6 +170,7 @@ class AIChatWindow(QWidget):
         api_acquire,
         api_release,
         capture_locked,
+        game_rect_provider=None,
     ) -> None:
         super().__init__()
         self._store = store
@@ -139,13 +182,12 @@ class AIChatWindow(QWidget):
         self._api_acquire = api_acquire  # 宿主互斥：占用（占用后方可在后台调 API）
         self._api_release = api_release  # 宿主互斥：释放
         self._capture_locked = capture_locked  # 宿主抓屏：隐藏窗口取锁定窗口干净画面
+        # 游戏窗口 rect 提供者（物理像素 ltrb；None/不可用时尺寸不钳制）
+        self._game_rect_provider = game_rect_provider
         self._seq = 0  # 请求世代号：过期结果不入界面（互斥下理论不重叠，兜底）
 
         self.setWindowTitle("AI 对话")
-        self.resize(
-            max(1, self._config.chat_window_width),
-            max(1, self._config.chat_window_height),
-        )
+        self._apply_size()
 
         # ---- 上部：标签 + 复选框 + 下拉列表 + OCR + 发送 --------------------
         self._keep_label = QLabel("保留发送消息")
@@ -195,6 +237,17 @@ class AIChatWindow(QWidget):
         """每次打开窗口时由宿主调用：复选框恢复默认勾选，重建锁定窗口下拉列表。"""
         self._keep_checkbox.setChecked(True)
         self._rebuild_combo()
+        self._apply_size()  # 按当前游戏窗口重算钳制尺寸（恢复默认大小）
+
+    def _apply_size(self) -> None:
+        """按配置值 → 游戏窗口钳制 → DPR 反算的顺序确定窗口逻辑尺寸。"""
+        provider = self._game_rect_provider
+        game_rect = provider() if callable(provider) else None
+        physical = chat_physical_size(
+            (self._config.chat_window_width, self._config.chat_window_height),
+            game_rect,
+        )
+        self.resize(*logical_size_for_dpr(*physical, self.devicePixelRatioF()))
 
     # ---- 下拉列表 ------------------------------------------------------------
 
@@ -263,6 +316,10 @@ class AIChatWindow(QWidget):
         cursor = self._input.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self._input.setTextCursor(cursor)
+        # 识别期间用户可能已切走焦点：把窗口带回前台并聚焦输入框，可直接接着输入
+        self.raise_()
+        self.activateWindow()
+        self._input.setFocus()
         logger.info("OCR 成功（seq=%s，原文 %d 字），已填充到输入框", payload.get("seq"), len(text))
 
     def _handle_ocr_fail(self, payload: dict) -> None:
@@ -355,6 +412,21 @@ class AIChatWindow(QWidget):
             pass
         except Exception:  # pragma: no cover - UI 异常不应终止循环
             logger.exception("处理对话窗口消息时出错")
+
+    # ---- 生命周期 ---------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """关闭 = 隐藏（单例复用，与截图/识曲历史窗口同一约定）。
+
+        本窗口是进程内唯一的常规 Qt::Window（流式双窗、截图窗均为 Tool 型，
+        Qt 对 Tool 窗口自动清除 WA_QuitOnClose），直接 close 会命中
+        QApplication 默认的 quitOnLastWindowClosed——最后一个可阻止退出的
+        主窗口关闭即退出事件循环，导致整个 renpy-overlay 进程连带退出
+        （实测关闭对话窗后立即出现「流式悬浮窗已销毁」与全套卸载清理）。
+        拦截 close 只隐藏，宿主退出时统一销毁。
+        """
+        event.ignore()
+        self.hide()
 
     # ---- API 请求参数 -----------------------------------------------------------
 
