@@ -653,9 +653,13 @@ class StreamOverlayWindow:
         height: int = config.DEFAULT_STREAM_WINDOW_HEIGHT,
         app_config: config.AppConfig | None = None,
         game_dir: str = "",
+        skip_injection: bool = False,
         on_quit=None,
     ):
         self.target_pid = target_pid
+        # 跳过注入模式（需求 future_跳过注入.txt）：无游戏进程可定位/无文本捕获，
+        # 以主屏为虚拟游戏窗口置顶摆放；单击/自动翻译不可用（入口禁用）
+        self.skip_injection = bool(skip_injection)
         self.dock = dock if dock in DOCK_CHOICES else "top-center"
         self.width = width
         self.height = height
@@ -1109,6 +1113,9 @@ class StreamOverlayWindow:
             # 右键菜单打开期间（无论锁定/解锁）：解锁态的周期定位也带
             # move_window(HWND_TOPMOST)，会把流式窗重新提到菜单之上遮住菜单
             return
+        if self.skip_injection:
+            self._follow_once_skip_injection()
+            return
         hwnd = self._resolve_target()
         if not hwnd:
             self._update_title(f"等待 pid={self.target_pid} 的游戏窗口…")
@@ -1143,6 +1150,46 @@ class StreamOverlayWindow:
     def _hide_if_visible(self) -> None:
         if self._visible:
             self._set_visible(False)
+
+    def _follow_once_skip_injection(self) -> None:
+        """跳过注入模式的跟随：无游戏窗口可定位，以主屏为虚拟游戏窗口摆放。
+
+        需求（future_跳过注入.txt）：保持置顶，用户手动以窗口化运行游戏。
+        以主屏可用区域为虚拟游戏窗口走 compute_geometry 同款停靠/钳制与
+        pair_layout 拆窗，首次定位后显示（无窗口时不像常规模式那样隐藏）。
+        锁定/拖动时不移动（与常规模式一致）；置顶由每次定位的
+        ``move_window(topmost=True)`` 建立，锁定态的周期重申沿用常规路径。
+        """
+        if self._locked or self._dragging:
+            if self._locked and not self._dragging:
+                self._reassert_topmost()
+            return
+        rect = self._virtual_screen_rect()
+        total = compute_geometry(
+            rect,
+            (self.width, self.height + self._title_h + self._title_gap),
+            self.dock,
+            self._user_offset,
+        )
+        title_rect, body_rect = pair_layout(total, self._title_h, self._title_gap)
+        if not self._visible:
+            self._set_visible(True)
+        win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
+        win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
+
+    def _virtual_screen_rect(self) -> tuple[int, int, int, int]:
+        """主屏可用区域（避开任务栏）的物理像素 rect（跳过注入的虚拟游戏窗口）。"""
+        dpr = max(1.0, self._body_window.dpr())
+        screen = QApplication.primaryScreen()
+        if screen is None:  # pragma: no cover - 无显示环境兜底
+            return (0, 0, 1920, 1080)
+        geo = screen.availableGeometry()  # Qt 逻辑像素，进程 DPI Aware 与物理一致比例换算
+        return (
+            round(geo.x() * dpr),
+            round(geo.y() * dpr),
+            round((geo.x() + geo.width()) * dpr),
+            round((geo.y() + geo.height()) * dpr),
+        )
 
     def _reassert_topmost(self) -> None:
         """把两窗重新压回最顶层（不改位置/尺寸/焦点）；日志节流避免刷屏。"""
@@ -1326,6 +1373,10 @@ class StreamOverlayWindow:
         self._click_timer.stop()
 
     def _on_delayed_click(self) -> None:
+        if self.skip_injection:
+            # 跳过注入模式：无游戏文本捕获（需求：单击翻译不可用）
+            logger.info("跳过注入模式：单击翻译不可用（需注入捕获游戏文本）")
+            return
         if not self._locked:
             logger.debug("未锁定状态，单击不触发翻译")
             return
@@ -1337,6 +1388,10 @@ class StreamOverlayWindow:
     def _start_translation(self, origin: str = "manual") -> None:
         """发起流式翻译请求（仅主线程调用）。同一时刻只允许一条在途请求。"""
         label = "自动触发" if origin == "auto" else "单击触发"
+        if self.skip_injection:
+            # 跳过注入模式：无游戏文本捕获（需求：单击/自动翻译不可用）
+            logger.info("跳过注入模式：%s翻译不可用（需注入捕获游戏文本）", label)
+            return
         if self._translating or self._recognizing or self._chat_busy:
             logger.info("已有请求在途（翻译/识曲/对话），忽略本次%s翻译", label)
             return
@@ -1762,7 +1817,12 @@ class StreamOverlayWindow:
             self._queue.put(("screenshot_fail", {"seq": seq, "error": str(exc)}))
 
     def _handle_screenshot_done(self, item: dict) -> None:
-        """主线程：校验世代号 → 正文显示译文 → 原图/缩略图落库（不写两级缓存）。"""
+        """主线程：校验世代号 → 正文显示译文 → 原图/缩略图落库（不写两级缓存）。
+
+        截图翻译成功/失败与单击/自动翻译共用同一组标题文案（「翻译完成」/
+        「翻译失败」）；跳过注入模式下文本翻译入口已禁用，该组文案仅由截图
+        翻译触发（需求：共用提示需处理——入口禁用后不产生歧义）。
+        """
         seq = item.get("seq")
         if seq != self._translation_seq:
             logger.info("截图翻译结果已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
@@ -1941,6 +2001,10 @@ class StreamOverlayWindow:
 
     def _start_auto_translate(self) -> None:
         """启动自动翻译轮询（仅在配置开启时）。"""
+        if self.skip_injection:
+            # 跳过注入模式：无游戏文本捕获（需求：自动翻译不可用）
+            logger.info("跳过注入模式：自动翻译不可用（需注入捕获游戏文本）")
+            return
         if not self._config.auto_translate:
             logger.info("自动翻译未启用（config.json: auto_translate=false）")
             return

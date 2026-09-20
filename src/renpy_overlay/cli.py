@@ -19,6 +19,7 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 import psutil
 
@@ -120,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_target(args: argparse.Namespace) -> Candidate | None:
+def _select_target(args: argparse.Namespace) -> Candidate | picker.SkipSelection | None:
     log = get_logger("cli")
 
     if args.pid:
@@ -142,6 +143,9 @@ def _select_target(args: argparse.Namespace) -> Candidate | None:
         refresh=lambda: discovery.enumerate_candidates(include_all=args.all),
         use_gui=not args.no_gui,
     )
+    if isinstance(chosen, picker.SkipSelection):
+        log.info("跳过注入：已选择数据目录 %s", chosen.path)
+        return chosen
     if chosen is None:
         log.info("已取消选择。")
         return None
@@ -474,6 +478,71 @@ class Session:
         )
 
 
+def _run_skip_injection_mode(args: argparse.Namespace, selected_dir: str) -> int:
+    """跳过注入模式（需求 .raw_plans/future_跳过注入.txt）：不注入，直接以手动
+    选择的数据目录运行悬浮窗，向非 Ren'Py 游戏提供部分功能。
+
+    - 数据目录经 :func:`picker.resolve_cache_dir` 三规则解析，解析结果的父目录
+      作为 game_dir 交既有存储管线（截图翻译/听歌识曲/AI 对话/翻译缓存四库，
+      已存在的数据库不会被覆盖，缺失则新建）；
+    - 单击翻译/自动翻译依赖注入捕获游戏文本，本模式不可用（入口已禁用）；
+    - 无游戏进程可监控：不启动 IPC 接收端与进程监控线程，悬浮窗关闭即退出；
+    - 提示用户以窗口化运行游戏，悬浮窗保持置顶（右键菜单全部功能可用）。
+    """
+    log = get_logger("cli")
+    cache_dir = picker.resolve_cache_dir(Path(selected_dir))
+    game_dir = str(cache_dir.parent)
+    log.info("跳过注入模式：数据目录 %s（game_dir=%s）", cache_dir, game_dir)
+
+    app_config = config.load_config()  # 本地 config.json（窗口尺寸 / API / 截图等）
+    stop = threading.Event()
+    holder: dict[str, StreamOverlayWindow | None] = {"overlay": None}
+
+    def request_stop() -> None:
+        first = not stop.is_set()
+        stop.set()
+        if first and holder["overlay"] is not None:
+            holder["overlay"].request_close()
+
+    overlay = StreamOverlayWindow(
+        target_pid=0,
+        dock=args.dock,
+        width=app_config.stream_window_width,
+        height=app_config.stream_window_height,
+        app_config=app_config,
+        game_dir=game_dir,
+        skip_injection=True,
+        on_quit=request_stop,
+    )
+    holder["overlay"] = overlay
+    overlay.set_status("跳过注入模式 · 置顶显示")
+    overlay.hint(
+        "跳过注入模式：请以窗口化运行游戏并保持其在悬浮窗下方。"
+        "右键菜单全部功能可用（截图翻译/听歌识曲/AI 对话/历史）；"
+        "单击与自动翻译需注入捕获游戏文本，本模式不可用。"
+    )
+
+    def handler(_signum, _frame) -> None:
+        log.info("收到 Ctrl+C，正在退出。")
+        request_stop()
+
+    try:
+        signal.signal(signal.SIGINT, handler)
+    except (ValueError, OSError):  # pragma: no cover - 非主线程
+        pass
+    atexit.register(overlay.close)  # 兜底：异常退出路径也关闭界面
+
+    try:
+        overlay.run()
+    finally:
+        stop.set()
+        try:
+            overlay.close()
+        except Exception:  # pragma: no cover
+            log.debug("关闭悬浮窗时出现异常", exc_info=True)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     logs.force_utf8_stdio()  # 先于参数解析：保证 --help 里的中文在 GBK 控制台也能正常输出
     args = build_parser().parse_args(argv)
@@ -500,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     target = _select_target(args)
     if target is None:
         return EXIT_OK
+    if isinstance(target, picker.SkipSelection):
+        return _run_skip_injection_mode(args, target.path)
 
     session = Session(args, target)
     atexit.register(session._cleanup, False)  # 兜底：异常退出路径也不留下句柄与远程内存

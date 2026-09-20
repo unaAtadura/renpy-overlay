@@ -155,6 +155,13 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   不同原文的记录逐行展开）；查找/复制/选中交互与对话历史一致，删除仅移除
   选中的一组 (哈希, 原文) 记录——同桶其它原文的记录保留，桶空则整个条目
   随之消失；
+- **跳过注入（非 Ren'Py 游戏）**：选择进程窗口新增「跳过注入」按钮 —— 经系统
+  文件夹选择对话框（IFileOpenDialog）选定数据目录（选择期间选择窗保持打开，
+  取消则退回选择窗），随后关闭选择窗并打开悬浮窗：目录名即为
+  `renpy_overlay_cache` 则直接使用，其下已包含则使用该子目录，否则自动创建；
+  已存在的数据库不会被覆盖。悬浮窗保持置顶（请以窗口化运行游戏配合），
+  右键菜单全部功能可用（截图翻译/听歌识曲/AI 对话/各历史窗口，数据库落至
+  所选目录）；单击翻译与自动翻译依赖注入，本模式不可用；
 - **正文窗尺寸与字号**：`stream_window_width`（默认 1760）/ `stream_window_height`
   （默认 200）控制正文窗大小，字号 / 行距 / 标题字号 / 标题间距可经 `config.json`
   调整（见下方配置示例）；宽度超出游戏窗口时仍按既有规则被钳制；
@@ -422,7 +429,8 @@ renpygameread/
 │  ├─ pe.py                    # 远程 PE 导出表解析（RVA 语义 reader）
 │  ├─ shellcode.py             # x86 / x64 引导桩机器码生成
 │  ├─ discovery.py             # 进程与窗口枚举、Ren'Py 打分识别
-│  ├─ picker.py                # Tkinter 选择窗（失败回退命令行菜单）
+│  ├─ picker.py                # Tkinter 选择窗（失败回退命令行菜单；含跳过注入入口）
+│  ├─ folder_dialog.py         # IFileOpenDialog 文件夹选择对话框（COM/ctypes，跳过注入用）
 │  ├─ injector.py              # 注入 / 卸载 / 状态查询编排
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
 │  ├─ stream_window.py         # 悬浮窗（PyQt6 全透明双窗口：标题+正文、打字机、拖动/锁定/翻译）
@@ -467,6 +475,7 @@ renpygameread/
    ├─ test_chat_window.py
    ├─ test_chat_history.py
    ├─ test_translation_history.py
+   ├─ test_skip_injection.py
    ├─ test_song_recognition.py
    ├─ test_song_recognition_store.py
    ├─ test_song_recognition_history.py
