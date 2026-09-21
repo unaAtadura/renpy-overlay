@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 
 from .translation_cache import HashFunc, hash_original
@@ -27,6 +28,12 @@ logger = logging.getLogger("renpy_overlay.translation_store")
 
 CACHE_DIR_NAME = "renpy_overlay_cache"
 DB_FILENAME = "translations.db"
+
+#: 进程级写锁：同一库存在两条写链路 —— 前台翻译落库（Qt 主线程）与离线
+#: 预构建落库（后台线程，独立连接）；put/delete 持锁串行化，粒度为单条
+#: 记录，对既有主线程调用方无竞争（恒立即获得）。读不加锁（读写在
+#: busy_timeout 兜底下并发安全）。
+_WRITE_LOCK = threading.Lock()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS translations (
@@ -104,12 +111,13 @@ class TranslationStore:
             return False
         key = self._hash_func(original)
         try:
-            self._conn.execute(
-                "INSERT INTO translations (hash, original, translated) VALUES (?, ?, ?) "
-                "ON CONFLICT(hash, original) DO UPDATE SET translated = excluded.translated",
-                (key, original, translated),
-            )
-            self._conn.commit()
+            with _WRITE_LOCK:
+                self._conn.execute(
+                    "INSERT INTO translations (hash, original, translated) VALUES (?, ?, ?) "
+                    "ON CONFLICT(hash, original) DO UPDATE SET translated = excluded.translated",
+                    (key, original, translated),
+                )
+                self._conn.commit()
         except sqlite3.Error as exc:
             self._degrade("写入", exc)
             return False
@@ -155,11 +163,12 @@ class TranslationStore:
             return False
         key = self._hash_func(original)
         try:
-            cursor = self._conn.execute(
-                "DELETE FROM translations WHERE hash = ? AND original = ?",
-                (key, original),
-            )
-            self._conn.commit()
+            with _WRITE_LOCK:
+                cursor = self._conn.execute(
+                    "DELETE FROM translations WHERE hash = ? AND original = ?",
+                    (key, original),
+                )
+                self._conn.commit()
         except sqlite3.Error as exc:
             self._degrade("删除", exc)
             return False
@@ -198,7 +207,12 @@ def open_store(game_dir, hash_func: HashFunc = hash_original) -> TranslationStor
     db_path = cache_dir / DB_FILENAME
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(db_path)
+        # check_same_thread=False：预构建连接在主线程创建、后台线程使用，
+        # 跨线程访问由进程级写锁串行化（sqlite3 文档认可的模式）
+        connection = sqlite3.connect(db_path, check_same_thread=False)
+        # 后台预构建与前台翻译双连接并发访问同一库：写锁在进程内串行化，
+        # busy_timeout 兜底跨进程场景（写占用时等待而非立即抛 locked）
+        connection.execute("PRAGMA busy_timeout = 5000")
         _ensure_schema(connection, db_path)
         connection.commit()
     except (OSError, sqlite3.Error) as exc:
