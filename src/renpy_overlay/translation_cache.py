@@ -39,6 +39,18 @@ def hash_original(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
+def choice_translation_text(items: list[str]) -> str:
+    """分支选项的翻译输入：编号逐行拼接（与正文里的编号选项列表一致）。
+
+    以它为翻译键 / 缓存键：同一菜单的选项组合稳定，回退重放与存档载入可
+    命中两级缓存；保留序号让模型输出的译文与选项一一对应。空列表返回空串。
+
+    原居 ``stream_window``，为离线预构建（``pretranslate`` 包）可无第三方
+    依赖地复用同一口径而迁入本模块；``stream_window`` 保留 re-export。
+    """
+    return "\n".join(f"{number}. {item}" for number, item in enumerate(items, 1))
+
+
 class TranslationCache:
     """分桶存储的 FIFO 翻译缓存。
 

@@ -53,6 +53,11 @@ a = Analysis(  # noqa: F821 - PyInstaller 注入
             os.path.join(SRC, "renpy_overlay", "payload", "agent.py"),
             os.path.join("renpy_overlay", "payload"),
         ),
+        # 绑定窗口入口图标（SVG）：QIcon 按相对包路径加载
+        (
+            os.path.join(SRC, "renpy_overlay", "assets"),
+            os.path.join("renpy_overlay", "assets"),
+        ),
     ],
     hiddenimports=[
         "renpy_overlay.payload",

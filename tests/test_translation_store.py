@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from renpy_overlay.translation_cache import hash_original
+from renpy_overlay.translation_cache import choice_translation_text, hash_original
 from renpy_overlay.translation_store import CACHE_DIR_NAME, DB_FILENAME, open_store
 
 
@@ -156,3 +156,56 @@ def test_delete_last_record_empties_the_bucket(tmp_path):
         assert store.count() == 0
     finally:
         store.close()
+
+
+# ---- 预构建并发扩展：进程级写锁与连接参数 ------------------------------------
+
+
+def test_write_lock_serializes_concurrent_puts(tmp_path):
+    """双线程双连接并发写：写锁保证串行落库，无交叉异常、行数正确。"""
+    import threading
+
+    store_a = open_store(tmp_path)
+    store_b = open_store(tmp_path)
+    try:
+        errors: list[Exception] = []
+
+        def worker(store, prefix: str) -> None:
+            try:
+                for i in range(50):
+                    assert store.put(f"{prefix}{i}", "译") is True
+            except Exception as exc:  # pragma: no cover - 失败时收集诊断
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(store_a, "a")),
+            threading.Thread(target=worker, args=(store_b, "b")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert store_a.count() == 100, "两连接各写 50 条应全部落库"
+        assert store_a.get("a0") == "译" and store_b.get("b49") == "译"
+    finally:
+        store_a.close()
+        store_b.close()
+
+
+def test_open_store_sets_busy_timeout(tmp_path):
+    """预构建与前台双连接并发：连接应带 busy_timeout 兜底。"""
+    store = open_store(tmp_path)
+    try:
+        timeout = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == 5000
+    finally:
+        store.close()
+
+
+def test_choice_translation_text_reexport_equivalent():
+    """选项拼接函数迁入 translation_cache 后与 stream_window 再导出同源。"""
+    from renpy_overlay.stream_window import choice_translation_text as via_window
+
+    items = ["A", "B"]
+    assert via_window(items) == choice_translation_text(items) == "1. A\n2. B"

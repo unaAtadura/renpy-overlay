@@ -1,7 +1,9 @@
-"""cli.Session 的 say 暂存补推离线验证（不构造 Qt、不建网、不注入）。
+"""cli.Session 的 say 暂存补推与 hooks 注入确认竞态的离线验证。
 
-覆盖「悬浮窗就绪前到达的 say 被静默丢弃」缺陷的修复：就绪前只暂存最新一条、
-就绪后由 _flush_pending_say 补推（保留原 ts），就绪后的消息直接推送不入暂存。
+不构造 Qt、不建网、不注入。覆盖两类「悬浮窗就绪前到达的信号被静默丢弃」
+缺陷的修复：say 只暂存最新一条、就绪后由 _flush_pending_say 补推；hooks
+确认置 _hooks_confirmed、就绪后由 _flush_injected 补发 mark_injected
+（绑定窗口显示）；就绪后的消息直接推送不入暂存。
 """
 
 from __future__ import annotations
@@ -20,9 +22,21 @@ def _make_session() -> Session:
 class _FakeOverlay:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str, str, object]] = []
+        self.statuses: list[str] = []
+        self.hints: list[str] = []
+        self.injected_calls = 0
 
     def push_say(self, who, what, source="", ts=None) -> None:
         self.pushed.append((who, what, source, ts))
+
+    def set_status(self, text: str) -> None:
+        self.statuses.append(text)
+
+    def hint(self, text: str) -> None:
+        self.hints.append(text)
+
+    def mark_injected(self) -> None:
+        self.injected_calls += 1
 
 
 def _say(what: str, ts: float = 100.0) -> dict:
@@ -59,3 +73,47 @@ def test_say_after_overlay_ready_pushes_directly():
     # 就绪后的消息直接推送（时间戳由 push_say 内部取当前时刻，无需透传 ts）
     assert overlay.pushed == [("Charles", "Live.", "poll", None)]
     assert session._pending_say is None  # 就绪后不进入暂存
+
+
+# ---- hooks 注入确认竞态（绑定窗口显示前提） ---------------------------------
+
+
+def _hooks(layers=None) -> dict:
+    return {"t": "hooks", "layers": layers or ["all_character_callbacks", "exports_menu"]}
+
+
+def test_hooks_before_overlay_records_confirmation_only():
+    """hooks 早于悬浮窗（实测日志 18.920 vs 19.448）：只记录确认，不崩溃。"""
+    session = _make_session()
+    assert session._hooks_confirmed is False
+    session._on_message(_hooks(), None)  # overlay=None：旧行为是整块静默丢弃
+    assert session._hooks_confirmed is True
+
+
+def test_flush_injected_replays_after_overlay_ready():
+    """就绪后补发 mark_injected：绑定窗口得以显示（本次缺陷的修复点）。"""
+    session = _make_session()
+    session._on_message(_hooks(), None)  # 窗口未就绪：确认被暂存
+    overlay = _FakeOverlay()
+    session.overlay = overlay
+    session._flush_injected()
+    assert overlay.injected_calls == 1
+    session._flush_injected()  # 幂等：重复补发无额外副作用
+    assert overlay.injected_calls == 1
+
+
+def test_hooks_after_overlay_direct_and_unconfirmed_no_replay():
+    """消息晚到场景（重连）直接分发；未确认时不补发（跳过注入等价安全）。"""
+    session = _make_session()
+    overlay = _FakeOverlay()
+    session.overlay = overlay
+    session._on_message(_hooks(), None)  # 就绪后到达：直接分发
+    assert session._hooks_confirmed is True
+    assert overlay.injected_calls == 1
+    assert overlay.statuses and "Hook 2 层" in overlay.statuses[-1]
+
+    session2 = _make_session()
+    overlay2 = _FakeOverlay()
+    session2.overlay = overlay2
+    session2._flush_injected()  # 从未确认：不得补发（跳过注入模式同口径）
+    assert overlay2.injected_calls == 0

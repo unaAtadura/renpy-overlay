@@ -293,3 +293,31 @@ def test_drag_scroll_rate_fast_zone():
     )
     assert body_drag_scroll_rate(-dy, LINE_H) == fast
     assert body_drag_scroll_rate(dy, LINE_H) == -fast
+
+
+# ---- 拖动参照系（绑定入口内嵌标题窗后仍为双窗口径） --------------------------
+
+
+def test_drag_offset_unchanged_with_inline_entries():
+    """拖动参照系保持双窗：user_offset 换算不含内嵌入口条，落点精确。"""
+    game = (100, 200, 1300, 900)
+    body = (724, 300)
+    offset = pair_offset_from_body(body, (game[0], game[1]), 26, 4)
+    total = compute_geometry(game, (880, 230), "top-center", offset)
+    title_rect, body_rect = pair_layout(total, 26, 4)
+    assert body_rect[:2] == body  # 正文窗精确停在松手位置
+    assert offset == (624, 70)
+
+
+def test_skip_injection_drag_offset_roundtrip():
+    """跳过注入拖动参照系：以虚拟屏幕（主屏可用区）为参照，落点往返精确。
+
+    回归实测缺陷：_finish_drag 因无法定位游戏窗提前返回，_user_offset
+    恒 None，follow 每 tick 按默认停靠把窗口弹回屏幕顶部。
+    """
+    virtual = (0, 0, 1920, 1032)  # 主屏可用区域（_virtual_screen_rect 同构）
+    drop_xy = (680, 400)
+    offset = pair_offset_from_body(drop_xy, (virtual[0], virtual[1]), 26, 4)
+    total = compute_geometry(virtual, (880, 230), "top-center", offset)
+    _, body_rect = pair_layout(total, 26, 4)
+    assert body_rect[:2] == drop_xy  # 松手后不再跳回屏幕顶部

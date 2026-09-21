@@ -37,11 +37,14 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import config, translation_store, translator, win32api
+from .bound_window import BOUND_GAP, BoundAction, TitleEntryStrip, dispatch_action
+from .pretranslate import PrebuildTask, scan_rpy_files
+from .pretranslate_dialog import PretranslateDialog
 from .quick_menu import QuickMenu
 from .screenshot import (
     AIChatWindow,
@@ -69,10 +72,15 @@ from .song_recognition import (
     record_system_audio,
 )
 from .song_recognition.store import open_store as open_song_store
-from .translation_cache import TranslationCache
+from .translation_cache import TranslationCache, choice_translation_text  # noqa: F401 (re-export)
 from .translation_history_window import TranslationHistoryWindow
 
 logger = logging.getLogger("renpy_overlay.stream_window")
+
+#: 绑定窗口入口图标（淡蓝色书本，与标题/正文文字同一视觉语言）
+BOUND_PREBUILD_ICON = str(
+    Path(__file__).parent / "assets" / "icons" / "书籍1_book-one.svg"
+)
 
 DRAIN_INTERVAL_MS = 80
 FOLLOW_INTERVAL_MS = 200
@@ -198,6 +206,8 @@ def pair_offset_from_body(
     把正文窗放在 ``y + title_h + gap``；若拖动结束时以正文窗为参照记偏移，
     松手后首次重定位会整体下移「标题高 + 间距」（表现为一次向下跳变）。
     抽成纯函数便于离线验证两套逻辑参照系一致（见 ``tests/test_stream_window.py``）。
+    绑定入口横向追加在标题窗右侧且由标题内容宽驱动让位（同一渲染帧内绘制），
+    不参与本换算，故双窗参照系对标题/正文窗始终成立。
     """
     return (body_xy[0] - game_xy[0], body_xy[1] - title_h - gap - game_xy[1])
 
@@ -286,15 +296,6 @@ def body_drag_scroll_rate(dy: float, line_h: float) -> float:
     return -math.copysign(notches_per_sec * WHEEL_LINES_PER_NOTCH * line_h, dy)
 
 
-def choice_translation_text(items: list[str]) -> str:
-    """分支选项的翻译输入：编号逐行拼接（与正文里的编号选项列表一致）。
-
-    以它为翻译键 / 缓存键：同一菜单的选项组合稳定，回退重放与存档载入可
-    命中两级缓存；保留序号让模型输出的译文与选项一一对应。空列表返回空串。
-    """
-    return "\n".join(f"{number}. {item}" for number, item in enumerate(items, 1))
-
-
 class _StreamWindowBase(QWidget):
     """标题窗与正文窗的公共底座：全透明无边框置顶 + 鼠标事件转发给宿主。"""
 
@@ -351,19 +352,82 @@ class _StreamWindowBase(QWidget):
 
 
 class TitleWindow(_StreamWindowBase):
-    """标题窗：一次性整显完整标题（随交互状态动态更新，但无打字机动画）。"""
+    """标题窗：一次性整显完整标题（随交互状态动态更新，但无打字机动画）。
+
+    注入确认后，标题文本右侧内嵌图标入口条（TitleEntryStrip）：与文本同一
+    渲染帧实时跟随文本长度，点击图标分发入口回调，不参与窗口拖动/单击翻译。
+    """
 
     def __init__(self, font_px: int, host) -> None:
         font = _stream_font(font_px)
         super().__init__("renpy-overlay · stream title", font, host)
         self._layout: list[tuple[str, float]] = []  # (字符, x 起点)，单行排版
+        self._entry_strip = TitleEntryStrip()
+        self._entry_rect: QRect | None = None  # 入口条热区（本地坐标，命中测试用）
+        self._entry_press: object | None = None  # 图标按下的本地坐标（点击判定）
+
+    def set_title_entries(self, actions: list) -> None:
+        """注入确认时注入入口条并重排当前标题（可用宽扣除图标区）。"""
+        self._entry_strip.set_actions(actions)
+        self.set_text(self._host._title_text if getattr(self._host, "_title_text", "") else "")
+
+    def _entry_hit(self, pos) -> bool:
+        return self._entry_rect is not None and self._entry_rect.contains(pos)
+
+    # ---- 入口条命中拦截：图标点击不参与拖动/单击翻译 -----------------------
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._entry_hit(
+            event.position().toPoint()
+        ):
+            self._entry_press = event.position().toPoint()
+            event.accept()
+            return
+        self._entry_press = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._host.on_window_press(self, event)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._entry_press is not None:
+            event.accept()  # 图标按住期间不触发窗口拖动
+            return
+        self._host.on_window_motion(self, event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        press = self._entry_press
+        self._entry_press = None
+        if press is not None and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            if (pos - press).manhattanLength() <= 12:  # 未拖动：单击图标分发入口
+                local_x = pos.x() - (self._entry_rect.x() if self._entry_rect else 0)
+                dispatch_action(self._entry_strip.action_at(local_x))
+            event.accept()
+            return
+        self._host.on_window_release(self, event)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self._entry_hit(event.position().toPoint()):
+            event.accept()  # 图标上的双击不触发锁定/解锁
+            return
+        self._host.on_window_double_click(self, event)
+        event.accept()
 
     def set_text(self, text: str) -> None:
-        """整显一条标题（单行）：超宽或换行后的内容直接截断。"""
+        """整显一条标题（单行）：超宽或换行后的内容直接截断。
+
+        入口条非空时为其预留宽度：文本可用宽 = 窗宽 - 2×边距 - (条宽 + 列距)，
+        文本与图标同一渲染帧排版，图标实时跟随文本长度。
+        """
         self._layout.clear()
         fm = self.fm
         x = TITLE_MARGIN_X
-        max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X)
+        reserve = 0
+        if not self._entry_strip.is_empty():
+            reserve = self._entry_strip.width() + BOUND_GAP
+        max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X - reserve)
         for ch in text:
             if ch == "\n":
                 break
@@ -373,6 +437,17 @@ class TitleWindow(_StreamWindowBase):
             self._layout.append((ch, x))
             x += advance
         self.update()
+
+    def content_width(self) -> int:
+        """当前标题内容的排版宽度（逻辑像素；空标题为 0）。
+
+        取最后一字符的右缘 + 右侧对称留白 —— 绑定窗口用它作为横向让位
+        的驱动量（长内容右推、短内容左拉），正文窗不参与该联动。
+        """
+        if not self._layout:
+            return 0
+        last_ch, last_x = self._layout[-1]
+        return int(last_x + self.fm.horizontalAdvance(last_ch)) + TITLE_MARGIN_X
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._layout:
@@ -403,6 +478,14 @@ class TitleWindow(_StreamWindowBase):
         painter.setPen(QColor(BODY_FILL_COLOR))
         for ch, x in self._layout:
             painter.drawText(QPointF(x, baseline_y), ch)
+        # 入口条：紧跟标题文本右侧（同一渲染帧，实时随文本长度移动）
+        if not self._entry_strip.is_empty():
+            text_right = last_x + fm.horizontalAdvance(last_ch)
+            hot = self._entry_strip.hotzone()
+            entry_x = int(text_right + BOUND_GAP)
+            entry_y = int(center_y - hot / 2.0)
+            self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
+            self._entry_strip.paint(painter, entry_x, entry_y)
 
 
 class _Glyph:
@@ -692,6 +775,13 @@ class StreamOverlayWindow:
 
         self._body_hwnd = self._body_window.hwnd
         self._title_hwnd = self._title_window.hwnd
+        # 注入相关入口（预构建翻译缓存）内嵌在标题窗文本右侧，注入确认后经
+        # _handle_injected 注入；豁免前台 API 互斥，写库共用进程级写锁
+        self._game_dir = game_dir or ""
+        self._injected = False
+        self._prebuild_dialog: PretranslateDialog | None = None
+        self._prebuild_seq = 0
+        self._prebuild_stop: threading.Event | None = None
         logger.debug(
             "流式悬浮窗 HWND：正文=0x%X 标题=0x%X（标题高=%dpx 间距=%dpx）",
             self._body_hwnd,
@@ -849,6 +939,7 @@ class StreamOverlayWindow:
         if self._translating:
             self._abort_translation("窗口关闭")
         self._abort_song_recognition("窗口关闭")
+        self._abort_prebuild("窗口关闭")
         self._cancel_pending_click()
         for timer in (
             self._drain_timer,
@@ -905,6 +996,12 @@ class StreamOverlayWindow:
             except Exception:  # pragma: no cover
                 pass
             self._chat_window = None
+        if self._prebuild_dialog is not None:
+            try:
+                self._prebuild_dialog.deleteLater()
+            except Exception:  # pragma: no cover
+                pass
+            self._prebuild_dialog = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -950,6 +1047,14 @@ class StreamOverlayWindow:
                     self._handle_song_fail(payload)
                 elif kind == "cmd":
                     self._handle_command(payload)
+                elif kind == "injected":
+                    self._handle_injected()
+                elif kind == "prebuild_phase":
+                    self._handle_prebuild_phase(payload)
+                elif kind == "prebuild_progress":
+                    self._handle_prebuild_progress(payload)
+                elif kind == "prebuild_finished":
+                    self._handle_prebuild_finished(payload)
         except queue.Empty:
             pass
         except Exception:  # pragma: no cover - UI 异常不应终止循环
@@ -1331,12 +1436,22 @@ class StreamOverlayWindow:
             logger.debug("拖动结束：位置未变化，保持原有跟随方式")
             return
         hwnd = self._resolve_target()
-        if not hwnd:
+        if hwnd:
+            game = list(win32api.window_rect(hwnd))
+        elif self.skip_injection:
+            # 跳过注入模式：无游戏窗口可定位，改以主屏可用区域（虚拟游戏
+            # 窗口）左上为参照 —— 与 _follow_once_skip_injection 同一参照系。
+            # 否则 _user_offset 永远写不进去，follow 每 tick 按默认停靠把
+            # 窗口弹回屏幕顶部（实测缺陷：拖动结果不被保持）
+            game = list(self._virtual_screen_rect())
+            logger.debug("拖动结束：以虚拟屏幕为参照记录偏移（跳过注入模式）")
+        else:
             logger.warning("拖动结束：未能定位游戏窗口，本次位置不参与跟随")
             return
-        game = win32api.window_rect(hwnd)
         # user_offset 必须与跟随循环的整体几何顶点（标题窗左上角）同参照系，
-        # 否则松手后首次重定位会整体下移「标题高 + 间距」（见 pair_offset_from_body）
+        # 否则松手后首次重定位会整体下移「标题高 + 间距」（见 pair_offset_from_body）。
+        # 绑定入口横向追加在标题窗右侧且由标题内容宽驱动让位（同一渲染帧内绘制），
+        # 不参与本换算
         offset = pair_offset_from_body(
             (rect[0], rect[1]),
             (game[0], game[1]),
@@ -1397,6 +1512,157 @@ class StreamOverlayWindow:
             return
         logger.debug("锁定状态下的单击：请求翻译当前对话原文")
         self._start_translation()
+
+    # ------------------------------------------------------------ 预构建翻译缓存
+
+    def mark_injected(self) -> None:
+        """注入成功（Hook 层确认）：显示绑定窗口（跨线程安全，经队列）。"""
+        self._queue.put(("injected", None))
+
+    def _handle_injected(self) -> None:
+        """主线程：注入确认后把入口条并入标题窗（跳过注入模式不注入）。"""
+        if self._closed or self.skip_injection or self._injected:
+            return
+        self._injected = True
+        self._title_window.set_title_entries(
+            [
+                BoundAction(
+                    id="prebuild",
+                    label="预构建翻译缓存",
+                    on_click=self.request_prebuild,
+                    icon=BOUND_PREBUILD_ICON,
+                )
+            ]
+        )
+        logger.info("注入成功：预构建入口已并入标题窗（图标跟随标题文本长度）")
+
+    def request_prebuild(self) -> None:
+        """绑定窗口入口回调：任务在途则唤回弹窗，否则重新进入扫描流程。"""
+        if self._closed or self.skip_injection:
+            return
+        if self._prebuild_dialog is not None:
+            if self._prebuild_running:
+                # 隐藏到后台后的唤回：显示当前进度，不重启任务
+                self._prebuild_dialog.show()
+                self._prebuild_dialog.raise_()
+                return
+            # 上一轮已终态未关闭：按需求重新进入扫描流程（非断点续跑 UI）
+            self._prebuild_dialog.deleteLater()
+            self._prebuild_dialog = None
+        try:
+            files = scan_rpy_files(Path(self._game_dir)) if self._game_dir else []
+        except Exception as exc:  # pragma: no cover - 目录不可读等
+            logger.warning("预构建扫描失败：%s", exc)
+            files = []
+        if not files:
+            self._update_title("预构建：未发现可解析的 .rpy 文件")
+            logger.warning("预构建扫描未发现 .rpy 文件（game_dir=%s）", self._game_dir)
+            return
+        self._prebuild_dialog = PretranslateDialog(
+            files,
+            on_parse=self._start_prebuild,
+            on_cancel=self._cancel_prebuild,
+            on_hide=self._hide_prebuild_dialog,
+        )
+        self._prebuild_dialog.show()
+        logger.info("预构建扫描完成：%d 个候选脚本文件，等待勾选", len(files))
+
+    def _start_prebuild(self, files: list[str]) -> None:
+        """解析回调：启动后台任务（独立连接 + 世代号；豁免前台 API 互斥）。"""
+        if self._closed:
+            return
+        self._prebuild_seq += 1
+        seq = self._prebuild_seq
+        stop = threading.Event()
+        self._prebuild_stop = stop
+        store = translation_store.open_store(self._game_dir or None)
+        if store is None:
+            if self._prebuild_dialog is not None:
+                self._prebuild_dialog.set_finished("error")
+            self._update_title("预构建：翻译数据库不可用")
+            logger.error("预构建启动失败：翻译数据库不可用（game_dir=%s）", self._game_dir)
+            return
+        task = PrebuildTask(
+            files,
+            Path(self._game_dir),
+            self._config,
+            store,
+            stop,
+            on_phase=lambda phase, info, _seq=seq: self._queue.put(
+                ("prebuild_phase", {"seq": _seq, "phase": phase, "info": info})
+            ),
+            on_progress=lambda done, failed, skipped, _seq=seq: self._queue.put(
+                (
+                    "prebuild_progress",
+                    {"seq": _seq, "done": done, "failed": failed, "skipped": skipped},
+                )
+            ),
+            on_finished=lambda status, _seq=seq: self._queue.put(
+                ("prebuild_finished", {"seq": _seq, "status": status})
+            ),
+        )
+        threading.Thread(target=task.run, name=f"prebuild-{seq}", daemon=True).start()
+        self._update_title("预构建：后台翻译进行中")
+        logger.info(
+            "预构建任务启动（seq=%d，%d 个文件；不受前台 API 互斥约束，写库经进程级写锁）",
+            seq,
+            len(files),
+        )
+
+    @property
+    def _prebuild_running(self) -> bool:
+        """本轮预构建任务在途（未取消未收束）。"""
+        return self._prebuild_stop is not None and not self._prebuild_stop.is_set()
+
+    def _cancel_prebuild(self) -> None:
+        """弹窗取消：中止本轮任务并销毁弹窗（下次入口重新扫描）。"""
+        dialog = self._prebuild_dialog
+        self._abort_prebuild("取消")
+        if dialog is not None:
+            dialog.deleteLater()
+        self._prebuild_dialog = None
+
+    def _hide_prebuild_dialog(self) -> None:
+        """隐藏到后台：只藏窗口，任务继续（再次点击入口按钮唤回）。"""
+        if self._prebuild_dialog is not None:
+            self._prebuild_dialog.hide()
+            logger.info("预构建弹窗已隐藏到后台（任务继续；点击入口按钮可唤回）")
+
+    def _abort_prebuild(self, reason: str) -> None:
+        """中止本轮预构建（窗口关闭/游戏退出/取消共用）：在途结果作废不落库。"""
+        if self._prebuild_stop is not None and not self._prebuild_stop.is_set():
+            self._prebuild_stop.set()
+            self._prebuild_seq += 1  # 在途进度/结束消息作废
+            logger.info("预构建任务已中止：%s（已入库条目保留，可重新发起补译）", reason)
+        self._prebuild_stop = None
+
+    def _handle_prebuild_phase(self, payload: dict) -> None:
+        if payload.get("seq") != self._prebuild_seq or self._prebuild_dialog is None:
+            return  # 过期任务（已取消/已重开）或弹窗已销毁：丢弃
+        phase = str(payload.get("phase") or "")
+        info = payload.get("info") or {}
+        if phase == "counting":
+            self._prebuild_dialog.set_counting(int(info.get("discovered") or 0))
+        elif phase == "ready":
+            self._prebuild_dialog.set_ready(int(info.get("total") or 0))
+
+    def _handle_prebuild_progress(self, payload: dict) -> None:
+        if payload.get("seq") != self._prebuild_seq or self._prebuild_dialog is None:
+            return
+        self._prebuild_dialog.set_progress(
+            int(payload.get("done") or 0),
+            int(payload.get("failed") or 0),
+            int(payload.get("skipped") or 0),
+        )
+
+    def _handle_prebuild_finished(self, payload: dict) -> None:
+        status = str(payload.get("status") or "error")
+        if payload.get("seq") == self._prebuild_seq:
+            if self._prebuild_dialog is not None:
+                self._prebuild_dialog.set_finished(status)
+            self._prebuild_stop = None  # 任务已收束（线程随后自行退出）
+            self._update_title(f"预构建结束（{status}）")
+        logger.info("预构建任务收束（seq=%s，status=%s）", payload.get("seq"), status)
 
     # ------------------------------------------------------------ 翻译（流式）
 
