@@ -6,9 +6,10 @@
    ``.rpa`` 归档内条目，形如 ``game/x.rpa!script/a.rpy``），排序稳定保证
    弹窗顺序一致；只列文件不读内容（毫秒级，供选择弹窗同步展示）；
 2. :func:`extract_blocks` / :func:`extract_from_rpy` —— 轻量行解析：
-   say 三形态（角色前缀 / 旁白 / with 修饰）、menu 选项组、translate 块的
-   显示文本（``strings`` 块取 ``new``，label 块内未注释的 say 行即 new）；
-   跳过注释、python 块与 screen language 语句；
+   say 三形态（角色前缀 / 旁白 / with 修饰）、menu 选项组与选项体内嵌的
+   say（分支被选中后触发的差分对白）、translate 块的显示文本（``strings``
+   块取 ``new``，label 块内未注释的 say 行即 new）；跳过注释、python 块
+   与 screen language 语句；
 3. :func:`collect_texts` —— 加载（直接读文件或解包 rpa 条目）→ 解析 →
    清洗（``cleaning`` 口径）→ 去重，产出缓存键原文条目。
 
@@ -147,7 +148,8 @@ def _menu_caption(line: str) -> str | None:
 def extract_blocks(text: str) -> list[tuple[str, list[str]]]:
     """解析脚本文本为 ``(kind, payload)`` 块序列（清洗前原文）。
 
-    - ``("say", [文本])``：对白；
+    - ``("say", [文本])``：对白（含 menu 选项体内嵌的 say——分支差分
+      对白，非 caption 的 say 形态行均按此收集）；
     - ``("menu", [caption, ...])``：同一 menu 语句的选项组（按出现顺序）；
     - ``("tl_str", [文本])``：translate strings 块的 ``new`` 文本。
     translate label 块内未注释的 say 行按普通 say 收集（即 new 文本）。
@@ -163,6 +165,20 @@ def extract_blocks(text: str) -> list[tuple[str, list[str]]]:
         stripped = raw.strip()
         if not stripped:
             continue
+        if not stripped.startswith("#") and multiline is not None:
+            # 跨行三引号 say：持续吸收直到字面量可闭合解析。字符串内容
+            # 行不参与下方缩进收缩（续行缩进回落不误触块退出与 menu 落组）
+            multiline.append(stripped)
+            joined = "\n".join(multiline)
+            start = _say_string_start(joined)
+            parsed = _string_at(joined, start) if start is not None else None
+            if parsed is not None:
+                blocks.append(("say", [parsed[0]]))
+                multiline = None
+            elif len(multiline) > _MAX_MULTILINE_LINES:  # 防御：未闭合放弃
+                logger.warning("三引号 say 未闭合，放弃解析：%s…", joined[:40])
+                multiline = None
+            continue
         indent = len(raw) - len(raw.lstrip(" \t"))
         # 先按本行缩进收缩已退出的块（保证块内/块外判定正确）
         while menu_stack and indent <= menu_stack[-1]:
@@ -176,19 +192,6 @@ def extract_blocks(text: str) -> list[tuple[str, list[str]]]:
             menu_items = None
         if not stripped.startswith("#"):
             if python_stack:
-                continue
-            if multiline is not None:
-                # 跨行三引号 say：持续吸收直到字面量可闭合解析
-                multiline.append(stripped)
-                joined = "\n".join(multiline)
-                start = _say_string_start(joined)
-                parsed = _string_at(joined, start) if start is not None else None
-                if parsed is not None:
-                    blocks.append(("say", [parsed[0]]))
-                    multiline = None
-                elif len(multiline) > _MAX_MULTILINE_LINES:  # 防御：未闭合放弃
-                    logger.warning("三引号 say 未闭合，放弃解析：%s…", joined[:40])
-                    multiline = None
                 continue
             if strings_indent is None and _TRANSLATE_STRINGS_RE.match(stripped):
                 strings_indent = indent
@@ -216,7 +219,10 @@ def extract_blocks(text: str) -> list[tuple[str, list[str]]]:
                     if menu_items is None:  # pragma: no cover - menu 行已建组
                         menu_items = []
                     menu_items.append(caption)
-                continue
+                    continue
+                # 选项体内非 caption 行 fall through 到下方 say 判定：分支
+                # 差分对白由此收集；jump / $ / pass / if 等流程行被
+                # _say_string_start 拒绝后跳过
             start = _say_string_start(stripped)
             if start is not None:
                 parsed = _string_at(stripped, start)

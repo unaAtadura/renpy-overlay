@@ -84,6 +84,83 @@ def test_menu_set_and_caption_lines_do_not_break_group():
     assert extract_from_rpy(script) == ["A", "B"]
 
 
+def test_menu_inner_say_lines_collected():
+    """选项体内嵌对白（分支差分文本）按 say 收集，caption 不受影响。
+
+    同时钉住判定顺序：caption（含行尾冒号）优先于 say，否则选项文本
+    会被误收为 say 造成双重条目。
+    """
+    script = (
+        "menu:\n"
+        '    "I\'m alright.":\n'
+        '        e "... I\'m alright, Eliza."\n'
+        '        "*blushes*"\n'
+        "        jump after\n"
+        '    "Your face...":\n'
+        '        mc "Y-your face is... really close." with dissolve\n'
+        '    "colon:" if flag:\n'
+        "        pass\n"
+        'e "after menu"\n'
+    )
+    assert extract_blocks(script) == [
+        ("say", ["... I'm alright, Eliza."]),
+        ("say", ["*blushes*"]),
+        ("say", ["Y-your face is... really close."]),
+        ("menu", ["I'm alright.", "Your face...", "colon:"]),
+        ("say", ["after menu"]),
+    ]
+
+
+def test_menu_inner_flow_lines_not_collected():
+    """选项体内的流程 / 数据行（jump / $ / if / set）不误收为 say。"""
+    script = (
+        "menu:\n"
+        '    "A":\n'
+        "        $ flag = 1\n"
+        "        if points:\n"
+        '            e "conditional inside"\n'
+        "        set chosen\n"
+        "        return\n"
+    )
+    assert extract_blocks(script) == [
+        ("say", ["conditional inside"]),
+        ("menu", ["A"]),
+    ]
+
+
+def test_menu_inner_multiline_say_collected():
+    """选项体内的三引号跨行 say 经缓冲吸收后正常落块。"""
+    script = (
+        "menu:\n"
+        '    "A":\n'
+        '        e """first\n'
+        'second"""\n'
+        '    "B":\n'
+        "        pass\n"
+    )
+    assert extract_blocks(script) == [
+        ("say", ["first\nsecond"]),
+        ("menu", ["A", "B"]),
+    ]
+
+
+def test_collect_texts_menu_inner_say_and_dedupe(tmp_path):
+    """menu 内 say 经清洗入列，与块外重复原文全局去重只留首个。"""
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "a.rpy").write_text(
+        "menu:\n"
+        '    " A ":\n'
+        '        e " {w}Inner  "\n'
+        "        jump next\n"
+        'e "Inner"\n',
+        encoding="utf-8",
+    )
+    texts = collect_texts(["game/a.rpy"], tmp_path)
+    by_text = {item.text: item.kind for item in texts}
+    assert by_text == {"Inner": "say", "1. A": "menu"}
+
+
 def test_translate_strings_block_collects_new_only():
     script = (
         "translate english strings:\n"
