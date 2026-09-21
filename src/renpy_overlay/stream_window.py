@@ -72,7 +72,11 @@ from .song_recognition import (
     record_system_audio,
 )
 from .song_recognition.store import open_store as open_song_store
-from .translation_cache import TranslationCache, choice_translation_text  # noqa: F401 (re-export)
+from .translation_cache import (  # noqa: F401 (choice_translation_text re-export)
+    TranslationCache,
+    choice_translation_text,
+    hash_original,
+)
 from .translation_history_window import TranslationHistoryWindow
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -80,6 +84,10 @@ logger = logging.getLogger("renpy_overlay.stream_window")
 #: 绑定窗口入口图标（淡蓝色书本，与标题/正文文字同一视觉语言）
 BOUND_PREBUILD_ICON = str(
     Path(__file__).parent / "assets" / "icons" / "书籍1_book-one.svg"
+)
+#: 「定位翻译位置」入口图标（淡蓝色文档搜索，与既有入口同一视觉语言）
+BOUND_LOCATE_ICON = str(
+    Path(__file__).parent / "assets" / "icons" / "文档搜索_doc-search-two.svg"
 )
 
 DRAIN_INTERVAL_MS = 80
@@ -859,6 +867,7 @@ class StreamOverlayWindow:
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
         self._context_menu_open = False  # 右键菜单打开期间暂停周期性置顶重申
         self._last_translation_input: str | None = None
+        self._last_cache_hit_original: str | None = None  # 最近缓存命中原文（定位入口用）
         self._lock_started_at = 0.0
         self._auto_skip_reason: str | None = None
 
@@ -1536,10 +1545,16 @@ class StreamOverlayWindow:
                     label="预构建翻译缓存",
                     on_click=self.request_prebuild,
                     icon=BOUND_PREBUILD_ICON,
-                )
+                ),
+                BoundAction(
+                    id="locate-translation",
+                    label="定位翻译位置",
+                    on_click=self._locate_last_translation,
+                    icon=BOUND_LOCATE_ICON,
+                ),
             ]
         )
-        logger.info("注入成功：预构建入口已并入标题窗（图标跟随标题文本长度）")
+        logger.info("注入成功：预构建/定位翻译入口已并入标题窗（图标跟随标题文本长度）")
 
     def request_prebuild(self) -> None:
         """绑定窗口入口回调：任务在途则唤回弹窗，否则重新进入扫描流程。"""
@@ -1845,8 +1860,12 @@ class StreamOverlayWindow:
         self._chat_history_window.activateWindow()
         logger.info("已打开对话历史窗口")
 
-    def _open_translation_history(self) -> None:
-        """打开翻译历史窗口（单例复用，每次刷新数据）。"""
+    def _open_translation_history(
+        self,
+        locate_original: str | None = None,
+        locate_hash: str | None = None,
+    ) -> None:
+        """打开翻译历史窗口（单例复用，每次刷新数据；可携带定位入参）。"""
         if self._translation_store is None:
             self.hint("翻译历史不可用：未定位到游戏目录或数据库初始化失败。")
             return
@@ -1854,11 +1873,37 @@ class StreamOverlayWindow:
             self._translation_history_window = TranslationHistoryWindow(
                 self._translation_store
             )
-        self._translation_history_window.refresh()
+        self._translation_history_window.refresh(
+            locate_original=locate_original, locate_hash=locate_hash
+        )
         self._translation_history_window.show()
         self._translation_history_window.raise_()
         self._translation_history_window.activateWindow()
         logger.info("已打开翻译历史窗口")
+
+    def _locate_last_translation(self) -> None:
+        """「定位翻译位置」入口：先定位最近缓存命中条目，再清空内存缓存。
+
+        顺序（需求给定）：先在翻译历史窗口定位「刚刚缓存命中的那条翻译记录」
+        （哈希 + 原文作定位入参，直接滚动选中；无命中记录则不定位），随后
+        清空内存缓存 —— 人工在历史窗口改译后，下一次自动翻译命中即回源
+        数据库取到最新译文，无需重启工具。
+        """
+        what = self._last_cache_hit_original
+        if not what:
+            logger.info("定位翻译位置：尚无缓存命中记录，仅打开翻译历史窗口（不定位）")
+        self._open_translation_history(
+            locate_original=what,
+            locate_hash=hash_original(what) if what else None,
+        )
+        released = self._translation_cache.size()
+        entries = self._translation_cache.count()
+        self._translation_cache.clear()
+        logger.info(
+            "已清空内存翻译缓存（释放 %d 字节 / %d 条），下一次命中将回源数据库",
+            released,
+            entries,
+        )
 
     # -- AI 对话（右键菜单打开窗口；OCR/发送与翻译/识曲共用同一互斥原则）
 
@@ -2370,6 +2415,8 @@ class StreamOverlayWindow:
         """自动翻译缓存命中（内存或数据库）：直接上屏，不发起网络请求。"""
         self._auto_skip_reason = None
         self._last_translation_input = what
+        # 记录最近命中记录（原文）：供「定位翻译位置」入口生成定位入参
+        self._last_cache_hit_original = what
         if self._translating:
             # 在途请求针对的是旧原文：作废它，避免其结果稍后覆盖本次命中内容
             self._abort_translation(f"自动翻译{source}命中")

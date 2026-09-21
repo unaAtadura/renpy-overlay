@@ -118,3 +118,28 @@ def test_prebuild_icon_asset_exists_and_tinted():
     content = svg.read_text(encoding="utf-8")
     assert "#ADD8E6" in content
     assert "#333" not in content
+
+
+def test_locate_icon_asset_exists_and_tinted():
+    """「定位翻译位置」入口图标资产存在，描边同为淡蓝 #ADD8E6（无残留黑色）。"""
+    import renpy_overlay
+
+    svg = (
+        Path(renpy_overlay.__file__).parent
+        / "assets"
+        / "icons"
+        / "文档搜索_doc-search-two.svg"
+    )
+    assert svg.is_file(), f"图标资产缺失：{svg}"
+    content = svg.read_text(encoding="utf-8")
+    assert "#ADD8E6" in content
+    assert "#333" not in content
+
+
+def test_locate_entry_wiring_declares_icon_and_id():
+    """宿主接线层声明「定位翻译位置」入口：图标常量指向既有资产文件。"""
+    from renpy_overlay import stream_window
+
+    icon = Path(stream_window.BOUND_LOCATE_ICON)
+    assert icon.name == "文档搜索_doc-search-two.svg"
+    assert icon.is_file(), f"图标资产缺失：{icon}"
