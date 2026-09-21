@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -122,6 +123,19 @@ class PretranslateDialog(QDialog):
         layout.addLayout(buttons)
         self._apply_state()
 
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        """右上角关闭（X）与「取消」按钮完全等价：走同一 on_cancel 回调。
+
+        接管默认关闭流程（ignore 后由宿主 deleteLater 负责销毁）：
+        - 选择态：退出解析流程并销毁弹窗；
+        - 运行态：中止本轮后台任务（已入库条目保留）并销毁弹窗；
+        - 终态：仅销毁弹窗。
+        两种入口均不得触发程序退出（无父 QDialog 是唯一计入
+        lastWindowClosed 的常规窗口，默认关闭流程曾连带退出整个工具）。
+        """
+        event.ignore()  # 销毁交由宿主 _cancel_prebuild 的 deleteLater
+        self._emit_cancel()
+
     # ---- 状态 ------------------------------------------------------------
 
     @property
@@ -175,9 +189,7 @@ class PretranslateDialog(QDialog):
         self._on_parse(files)
 
     def _emit_cancel(self) -> None:
-        if self._state == STATE_DONE:
-            self._on_cancel()  # 终态下取消按钮即关闭（宿主只销毁弹窗）
-            return
+        """取消/关闭统一出口：选择态退出解析流程，运行态中止任务（宿主销毁弹窗）。"""
         self._on_cancel()
 
     def _emit_hide(self) -> None:

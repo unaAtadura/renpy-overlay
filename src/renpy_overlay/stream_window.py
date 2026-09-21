@@ -752,6 +752,11 @@ class StreamOverlayWindow:
 
         # QApplication 必须先于任何 QWidget；进程此前可能已创建（复用之）
         self._app = QApplication.instance() or QApplication([])
+        # 程序退出只由宿主 on_quit（快捷菜单/控制台 q/游戏退出）驱动：悬浮窗
+        # 各窗均为 Tool（不计入 lastWindowClosed），而历史/弹窗等常规窗口是
+        # 最后一个可见窗口时，默认 quitOnLastWindowClosed 会连带退出整个工具
+        # （实测：预构建弹窗点 X 后程序整体退出）
+        self._app.setQuitOnLastWindowClosed(False)
         self._body_window = BodyWindow(
             self._config.stream_window_font_size,
             self._config.stream_window_line_spacing,
