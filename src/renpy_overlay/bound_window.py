@@ -28,9 +28,10 @@ logger = logging.getLogger("renpy_overlay.bound_window")
 BOUND_GAP = 8
 #: 图标之间的间隔 = 入口热区之间的留白（逻辑像素）
 ENTRY_GAP = 8
-#: 图标入口的显示边长与热区留白（逻辑像素）：图标按当前取值的 0.5 倍等比
-#: 显示（24 → 12）；SVG 矢量渲染无缩放失真
-ICON_DISPLAY_SIZE = 12
+#: 图标入口的显示边长与热区留白（逻辑像素）：视觉 24 与标题窗高度余量匹配
+#: （title_h ≈ 72px，热区 44 垂直居中后上下各余约 14，无溢出裁剪）；
+#: SVG 矢量渲染无缩放失真
+ICON_DISPLAY_SIZE = 24
 ICON_BUTTON_PAD = 10
 #: 图标热区边长（逻辑像素）：不小于原文字按钮高度（20），点击手感稳定
 ENTRY_HOTZONE = ICON_DISPLAY_SIZE + 2 * ICON_BUTTON_PAD

@@ -86,9 +86,10 @@ def test_icon_button_hotzone_matches_title_strip():
         ICON_DISPLAY_SIZE,
     )
 
-    assert ICON_DISPLAY_SIZE == 12  # 需求：图标显示尺寸为原取值 24 的 0.5 倍
+    assert ICON_DISPLAY_SIZE == 24  # 视觉翻倍：与标题窗高度余量匹配（title_h ≈ 72）
     assert icon_button_size() == (ICON_DISPLAY_SIZE + 2 * ICON_BUTTON_PAD,) * 2
     assert icon_button_size()[0] >= 20  # 热区不小于原文字按钮高度
+    assert icon_button_size()[0] <= 72  # 热区不得超过标题窗高度（图标溢出即被裁剪）
 
 
 def test_prebuild_icon_asset_exists_and_tinted():
