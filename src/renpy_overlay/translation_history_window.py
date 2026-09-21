@@ -21,7 +21,12 @@ QTableView + QAbstractTableModel 的两列表格（原文/译文），按写入�
 - 选中：鼠标左键点击行即选中并高亮（整行选择模式）；
 - 删除：删除当前选中行对应的一组翻译记录并同步数据库，随后重建表格并
   原位回选；
-- 本窗口只读浏览已入库记录，不触发翻译；窗口关闭 = 隐藏（单例复用，
+- 编辑：译文列双击（或选中后 F2）进入行内编辑，回车提交并写入数据库
+  （需求：人工修正翻译）；空译文不写库并恢复显示原有译文（需求：空值
+  保护）；写库后不同步正文窗上屏（需求：写库后不上屏）；
+- 定位：打开/刷新可携带 ``(哈希, 原文)`` 定位入参（宿主传入最近缓存命中
+  的翻译记录），重建后直接选中并滚动至可视区中央；
+- 本窗口仅浏览与编辑已入库记录，不触发翻译；窗口关闭 = 隐藏（单例复用，
   由宿主持有）。
 
 与识曲历史窗口（song_recognition/history_window.py）为相近功能的独立
@@ -53,6 +58,9 @@ logger = logging.getLogger("renpy_overlay.translation_history_window")
 
 #: 两列表头（需求：第一列原文，第二列译文）
 HEADERS = ("原文", "译文")
+#: 列索引：原文列只读，译文列可编辑（人工修正翻译后回车写库）
+COL_ORIGINAL = 0
+COL_TRANSLATED = 1
 #: 匹配行高亮色（色彩方案参照识曲历史窗口：深底浅字 + 蓝色强调）
 MATCH_COLOR = QColor(45, 70, 110)
 #: 模型接口的空父索引默认值（invalid QModelIndex 无状态，可共享；规避 B008）
@@ -84,6 +92,23 @@ def next_match(
         index = (base + (offset if forward else -offset)) % count
         if any(needle in normalize(cell) for cell in row_texts[index]):
             return index
+    return -1
+
+
+def locate_row(
+    records: list[tuple[str, str, str]], original: str, hash_value: str | None = None
+) -> int:
+    """定位 ``(哈希, 原文)`` 对应的行索引（纯函数，便于离线单测）。
+
+    精确匹配：原文须完全相等，提供 ``hash_value`` 时哈希也须一致（与存储
+    复合主键 ``(hash, original)`` 同口径）；未命中返回 -1。
+    """
+    for index, record in enumerate(records):
+        if str(record[1] or "") != original:
+            continue
+        if hash_value is not None and str(record[0] or "") != hash_value:
+            continue
+        return index
     return -1
 
 
@@ -145,8 +170,37 @@ class _TranslationTableModel(QAbstractTableModel):
         cell = self._rows[index.row()][index.column() + 1]
         return str(cell or "")
 
+    def setData(  # noqa: N802
+        self, index: QModelIndex, value, role: int = Qt.ItemDataRole.EditRole
+    ) -> bool:
+        """提交译文编辑（行内编辑器回车触发）。
+
+        空值保护：译文为空不写库并返回 False（视图随之恢复显示原有译文）；
+        非空则 UPSERT 到数据库并更新行缓存（需求：写库后不上屏，仅改表格）。
+        """
+        if role != Qt.ItemDataRole.EditRole or not index.isValid():
+            return False
+        row = index.row()
+        if index.column() != COL_TRANSLATED or not 0 <= row < len(self._rows):
+            return False
+        new_text = str(value or "").strip()
+        if not new_text:
+            logger.info("译文编辑为空，不写入数据库（恢复显示原有译文）")
+            return False
+        record_hash, original, _old = self._rows[row]
+        if self._store is None or not self._store.put(original, new_text):
+            logger.warning("译文写入数据库失败（原文 %d 字），维持原译文", len(original))
+            return False
+        self._rows[row] = (record_hash, original, new_text)
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole])
+        logger.info("已修改译文并写入数据库（原文 %d 字）", len(original))
+        return True
+
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:  # noqa: N802
-        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+        if index.column() == COL_TRANSLATED:  # 仅译文列可编辑（原文列保持只读）
+            flags |= Qt.ItemFlag.ItemIsEditable
+        return flags
 
     # ---- 数据供给与查找辅助 -------------------------------------------------
 
@@ -176,6 +230,10 @@ class _TranslationTableModel(QAbstractTableModel):
         if 0 <= row < len(self._rows):
             return self._rows[row][1]
         return None
+
+    def records(self) -> list[tuple[str, str, str]]:
+        """当前行缓存副本（定位纯函数 :func:`locate_row` 消费）。"""
+        return list(self._rows)
 
 
 class _CopyTableView(QTableView):
@@ -259,8 +317,15 @@ class TranslationHistoryWindow(QWidget):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.verticalHeader().setVisible(False)
+        # 译文编辑入口：双击或选中后 F2 进入行内编辑（回车提交 → 模型写库）
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         # 左键点击行 → 选中高亮之外，同步删除按钮的可用状态
         self._table.selectionModel().selectionChanged.connect(self._sync_delete_button)
+        # 定位条目在首次 show 前已选中：布局就绪后（showEvent）再补一次居中滚动
+        self._pending_center_row = -1
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_row)
@@ -268,11 +333,17 @@ class TranslationHistoryWindow(QWidget):
 
     # ---- 对外接口 -----------------------------------------------------------
 
-    def refresh(self) -> None:
+    def refresh(
+        self,
+        locate_original: str | None = None,
+        locate_hash: str | None = None,
+    ) -> bool:
         """从数据库重建表格内容（每次打开/删除后调用）。
 
         空库只记日志不做界面提示（需求：无需提示）；重建后保留当前查找词的
-        高亮效果（窗口隐藏期间数据库可能已被新翻译更新）。
+        高亮效果（窗口隐藏期间数据库可能已被新翻译更新）。携带定位入参
+        （最近缓存命中记录的哈希与原文，宿主「定位翻译位置」入口传入）时，
+        重建后直接定位并选中该条目；返回是否命中（未携带定位入参为 False）。
         """
         records = self._store.entries() if self._store is not None else []
         self._model.set_records(records)
@@ -283,6 +354,26 @@ class TranslationHistoryWindow(QWidget):
                 "翻译历史为空（数据库 %s）",
                 self._store.path if self._store is not None else "<无>",
             )
+        if locate_original is None:
+            return False
+        return self._locate_entry(locate_original, locate_hash)
+
+    # ---- 定位 ---------------------------------------------------------------
+
+    def _locate_entry(self, original: str, hash_value: str | None) -> bool:
+        """按 (哈希, 原文) 定位并选中条目；命中滚动至可视区中央，未命中返回 False。"""
+        row = locate_row(self._model.records(), original, hash_value)
+        if row < 0:
+            logger.info(
+                "翻译历史定位未命中（哈希 %s，原文 %d 字），停留在默认位置",
+                hash_value or "<无>",
+                len(original),
+            )
+            return False
+        self._select_row(row)
+        self._pending_center_row = row  # show 前布局未就绪，showEvent 再补居中
+        logger.info("翻译历史已定位条目（行 %d，原文 %d 字）", row, len(original))
+        return True
 
     # ---- 查找 ---------------------------------------------------------------
 
@@ -336,6 +427,17 @@ class TranslationHistoryWindow(QWidget):
             self._select_row(new_index)
 
     # ---- 生命周期 -----------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._pending_center_row >= 0:
+            row = self._pending_center_row
+            self._pending_center_row = -1
+            # refresh 发生在 show 之前（首次打开）：布局就绪后重新居中一次
+            self._table.scrollTo(
+                self._model.index(row, 0),
+                QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
 
     def closeEvent(self, event) -> None:  # noqa: N802
         event.ignore()
