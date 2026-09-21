@@ -516,3 +516,8 @@ renpygameread/
 - 不引入 C 编译器后端（如后续需要可另加引导 DLL 模式）。
 - 对把 CPython 静态链接进主程序（进程模块里没有 `python*.dll` / `libpython*.dll`）
   的自定义构建无法注入；工具会把完整模块清单写入日志便于确认。
+
+## 许可证
+
+本项目以 [MIT License](LICENSE) 发布（与 `pyproject.toml` 中 `license` 声明一致）；
+注入仅限自有环境与授权用途，具体见上文「合规与安全」。
