@@ -1,121 +1,107 @@
-"""预构建弹窗与绑定窗口的纯逻辑离线验证（遵循 GUI 离线测试约定）。
+"""注入相关入口（标题内嵌入口条）的纯逻辑离线验证。
 
-不构造 QWidget / QDialog：只验证模块级纯函数（勾选收集、进度文案、终态
-文案）与 BoundAction / 渲染规格（鸭子层，无需 QApplication）。
+不构造 QWidget：覆盖 TitleEntryStrip 的宽度/命中/去重、入口分发
+（dispatch_action 的可用性与忽略路径）、图标热区纯函数与图标资产检查。
 """
 
 from __future__ import annotations
 
-from renpy_overlay.bound_window import BoundAction, button_specs
-from renpy_overlay.pretranslate_dialog import (
-    collect_checked,
-    finished_text,
-    format_counting,
-    format_progress,
+from pathlib import Path
+
+from renpy_overlay.bound_window import (
+    BoundAction,
+    TitleEntryStrip,
+    dispatch_action,
+    icon_button_size,
 )
 
-# ---- 弹窗纯函数 ------------------------------------------------------------
+
+def _action(aid: str, label: str = "预构建翻译缓存", enabled=None) -> BoundAction:
+    return BoundAction(id=aid, label=label, on_click=lambda: None, enabled=enabled)
 
 
-def test_collect_checked_keeps_display_order():
-    items = [("b.rpy", False), ("a.rpy", True), ("c.rpy", True), ("d.rpy", False)]
-    assert collect_checked(items) == ["a.rpy", "c.rpy"]
-    assert collect_checked([]) == []
-    assert collect_checked([("x.rpy", False)]) == []
+# ---- 入口条宽度与去重 --------------------------------------------------------
 
 
-def test_format_counting_discovered():
-    assert format_counting(0) == "统计中…已发现 0 条原文"
-    assert format_counting(12345) == "统计中…已发现 12345 条原文"
+def test_strip_width_empty_single_and_multiple():
+    strip = TitleEntryStrip()
+    assert strip.is_empty() and strip.width() == 0
+
+    strip.set_actions([_action("a")])
+    side = strip.hotzone()
+    assert strip.width() == side  # 单入口：一条热区宽
+
+    strip.set_actions([_action("b"), _action("c")])
+    assert len(strip.actions) == 3  # 去重合并：b/c 追加，a 保留
+    assert strip.width() == 3 * side + 2 * strip._gap  # n×热区 + (n-1)×间隔
 
 
-def test_format_progress_base_and_extras():
-    assert format_progress(0, 10000, 0, 0) == "0/10000"
-    assert format_progress(12, 340, 0, 0) == "12/340"
-    assert format_progress(12, 340, 3, 0) == "12/340（失败 3）"
-    assert format_progress(12, 340, 3, 2) == "12/340（失败 3，跳过 2）"
-    assert format_progress(340, 340, 0, 5) == "340/340（跳过 5）"
+def test_strip_set_actions_dedupes_same_id():
+    strip = TitleEntryStrip()
+    strip.set_actions([_action("prebuild", "旧文案")])
+    strip.set_actions([_action("prebuild", "新文案")])
+    assert len(strip.actions) == 1
+    assert strip.actions[0].label == "新文案"  # 同 id 覆盖
 
 
-def test_finished_text_known_and_unknown():
-    assert finished_text("completed") == "本轮预构建完成。"
-    assert finished_text("cancelled") == "已取消（已入库条目保留，可重新进入继续）。"
-    assert "熔断" in finished_text("circuit_break")
-    assert finished_text("error") == "预构建异常终止，详见日志。"
-    assert finished_text("mystery") == finished_text("error")  # 未知状态回退
+# ---- 命中测试 -----------------------------------------------------------------
 
 
-# ---- 绑定窗口入口抽象 -------------------------------------------------------
+def test_action_at_hits_hotzone_and_skips_gap():
+    strip = TitleEntryStrip()
+    a, b = _action("a"), _action("b")
+    strip.set_actions([a, b])
+    side = strip.hotzone()
+    slot = side + strip._gap
+
+    assert strip.action_at(0) is a  # 第一个热区左缘
+    assert strip.action_at(side - 1) is a  # 第一个热区右缘内
+    assert strip.action_at(side) is None  # 入口之间的间隔：不命中
+    assert strip.action_at(slot) is b  # 第二个热区
+    assert strip.action_at(2 * slot) is None  # 越界
+    assert strip.action_at(-1) is None  # 负坐标
 
 
-def test_bound_action_enabled_default_and_predicates():
-    calls = []
-    action = BoundAction("a", "入口", on_click=lambda: calls.append(1))
-    assert action.is_enabled() is True  # 默认恒可用
-
-    gated = BoundAction("b", "入口", on_click=lambda: None, enabled=lambda: False)
-    assert gated.is_enabled() is False
-
-    def boom():
-        raise RuntimeError("谓词异常")
-
-    broken = BoundAction("c", "入口", on_click=lambda: None, enabled=boom)
-    assert broken.is_enabled() is False  # 谓词异常按不可用处理
+def test_dispatch_action_none_and_disabled():
+    disabled = _action("x", enabled=lambda: False)
+    assert dispatch_action(None) is False
+    assert dispatch_action(disabled) is False
 
 
-def test_button_specs_view():
-    actions = [
-        BoundAction("a", "预构建翻译缓存", on_click=lambda: None),
-        BoundAction("b", "禁用项", on_click=lambda: None, enabled=lambda: False),
-    ]
-    assert button_specs(actions) == [("预构建翻译缓存", True), ("禁用项", False)]
-    assert button_specs([]) == []
+def test_dispatch_action_enabled_invokes_callback():
+    calls: list[str] = []
+    action = _action("ok", enabled=lambda: True)
+    action.on_click = lambda: calls.append("ok")
+    assert dispatch_action(action) is True
+    assert calls == ["ok"]
 
 
-def test_bound_action_click_dispatch_via_renderer_helper():
-    """TextButtonRenderer._dispatch 的可用性与分发逻辑（不建真实按钮）。"""
-    from renpy_overlay.bound_window import TextButtonRenderer
-
-    clicks: list[str] = []
-    enabled = BoundAction("a", "A", on_click=lambda: clicks.append("a"))
-    disabled = BoundAction("b", "B", on_click=lambda: clicks.append("b"), enabled=lambda: False)
-    runner = TextButtonRenderer._dispatch(enabled)
-    runner()
-    assert clicks == ["a"]
-    TextButtonRenderer._dispatch(disabled)()  # 不可用：不分发
-    assert clicks == ["a"]
+# ---- 图标热区与资产 -----------------------------------------------------------
 
 
-def test_bound_window_declares_own_painting():
-    """绑定窗口必须自带渲染（paintEvent/showEvent）。
+def test_icon_button_hotzone_matches_title_strip():
+    """热区纯函数与入口条常量一致：图标等比边长 + 四周留白。"""
+    from renpy_overlay.bound_window import (
+        ICON_BUTTON_PAD,
+        ICON_DISPLAY_SIZE,
+    )
 
-    全透明外壳若不进入 Qt 渲染管线，真实合成器下可能永远不可见 ——
-    实测缺陷（日志已 show 但屏幕无窗）：以方法覆写存在性钉住，防回退。
-    """
-
-    from renpy_overlay.bound_window import BoundWindow
-
-    assert "paintEvent" in BoundWindow.__dict__, "缺少自绘底板的 paintEvent"
-    assert "showEvent" in BoundWindow.__dict__, "缺少显示即重绘的 showEvent"
-
-
-# ---- 尺寸换算与按钮宽度（振荡与截断缺陷的回归） ------------------------------
+    assert ICON_DISPLAY_SIZE == 12  # 需求：图标显示尺寸为原取值 24 的 0.5 倍
+    assert icon_button_size() == (ICON_DISPLAY_SIZE + 2 * ICON_BUTTON_PAD,) * 2
+    assert icon_button_size()[0] >= 20  # 热区不小于原文字按钮高度
 
 
-def test_logical_to_physical_scales_and_clamps():
-    """逻辑→物理换算：缩放屏按 dpr 放大，dpr<1 钳为 1（不再衰减振荡）。"""
-    from renpy_overlay.bound_window import logical_to_physical
+def test_prebuild_icon_asset_exists_and_tinted():
+    """入口图标资产存在且描边已改为淡蓝 #ADD8E6（无残留黑色 #333）。"""
+    import renpy_overlay
 
-    assert logical_to_physical(112, 100, 1.0) == (112, 100)
-    assert logical_to_physical(112, 100, 1.25) == (140, 125)
-    assert logical_to_physical(112, 100, 1.5) == (168, 150)
-    assert logical_to_physical(112, 100, 0.8) == (112, 100)  # 钳制下限
-
-
-def test_text_button_width_fits_long_labels():
-    """按钮最小宽 = 文字宽 + 左右留白 + 余量，长文案不再被截断。"""
-    from renpy_overlay.bound_window import BUTTON_WIDTH_SLACK, MARGIN, text_button_width
-
-    assert text_button_width(0) == 2 * MARGIN + BUTTON_WIDTH_SLACK
-    # 「预构建翻译缓存」7 字 × 16px ≈ 112 → 最小宽应明显大于文字宽
-    assert text_button_width(112) == 112 + 2 * MARGIN + BUTTON_WIDTH_SLACK
+    svg = (
+        Path(renpy_overlay.__file__).parent
+        / "assets"
+        / "icons"
+        / "书籍1_book-one.svg"
+    )
+    assert svg.is_file(), f"图标资产缺失：{svg}"
+    content = svg.read_text(encoding="utf-8")
+    assert "#ADD8E6" in content
+    assert "#333" not in content

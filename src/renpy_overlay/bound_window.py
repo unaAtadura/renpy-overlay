@@ -1,24 +1,16 @@
-"""流式悬浮窗左侧的「绑定窗口」：注入强相关功能的入口容器。
+"""标题窗内嵌的「注入相关入口条」：渲染、宽度与命中测试。
 
-与右键快捷菜单的分工（设计文档第二节/第六节）：快捷菜单承载可脱离注入
-运行的入口（截图翻译 / 识曲 / 历史窗口等），本窗口只承载**强依赖注入**的
-功能 —— 仅注入成功后显示，跳过注入模式不创建。当前注册一个入口
-「预构建翻译缓存」。
-
-可扩展结构：
+设计（替代独立的 BoundWindow 顶层窗口）：入口图标直接绘制在标题窗自绘
+内容中、紧跟标题文本右侧 —— 同一窗口同一渲染帧，标题文本长度变化时图标
+实时跟随，锁定/拖动/自动跟随各状态行为一致，不再存在跨窗口定位同步。
 
 - **入口抽象层**：:class:`BoundAction` 描述一个入口（id / 文案 / 可用谓词 /
-  回调），新增注入相关功能 = 宿主向 :class:`BoundWindow` 注册一个 action，
-  渲染与接线零改动（与 ``QuickMenu`` "宿主能力经构造回调注入"同构）；
-- **渲染可替换**：渲染层实现 :class:`BoundEntryRenderer` 协议 —— 当前为
-  :class:`TextButtonRenderer`（竖排文字按钮）；未来可换图标渲染
-  （QIcon / QPainter 自绘）或单按钮弹菜单形态（承载扩展功能快捷菜单），
-  切换不改 action 定义。
-
-窗口本体：全透明、无边框、置顶、Tool、不抢焦点，鼠标事件按
-``_StreamWindowBase`` 同一协议转发宿主（拖动与标题/正文窗整体联动）。
-为避免与 ``stream_window`` 循环导入，标志设置在此复刻而非继承 ——
-``_apply_overlay_flags`` 与 ``_StreamWindowBase.__init__`` 同步维护。
+  回调 / 可选图标路径），新增注入相关功能 = 宿主调用 :meth:`TitleEntryStrip.set_actions`
+  注册，绘制与命中零改动；图标路径由宿主接线层传入，不写死；
+- **命中与分发**：:meth:`TitleEntryStrip.action_at` 按局部 x 坐标做区间命中，
+  命中后经 :func:`dispatch_action` 分发（可用性判定与文字/图标形态一致）；
+- 本模块为纯逻辑（仅 paint 需要调用方传入 QPainter），不建 QWidget，
+  可离线单测宽度与命中路径。
 """
 
 from __future__ import annotations
@@ -27,57 +19,40 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QPainter
-from PyQt6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtCore import QRect
+from PyQt6.QtGui import QIcon, QPainter
 
 logger = logging.getLogger("renpy_overlay.bound_window")
 
 #: 绑定窗口与标题/正文窗整体的间距（物理像素，与 _title_gap 同量级）
 BOUND_GAP = 8
-#: 按钮间与窗口边缘的留白（逻辑像素）
-MARGIN = 6
-#: 底板颜色与透明度（与标题/正文窗文字蒙版同一视觉语言：半透明黑色圆角板）
-PANEL_COLOR = (0, 0, 0, 140)
-PANEL_RADIUS = 10.0
-#: 按钮最小宽度的额外余量（逻辑像素）：度量误差 + 边框/焦点线
-BUTTON_WIDTH_SLACK = 12
+#: 图标之间的间隔 = 入口热区之间的留白（逻辑像素）
+ENTRY_GAP = 8
+#: 图标入口的显示边长与热区留白（逻辑像素）：图标按当前取值的 0.5 倍等比
+#: 显示（24 → 12）；SVG 矢量渲染无缩放失真
+ICON_DISPLAY_SIZE = 12
+ICON_BUTTON_PAD = 10
+#: 图标热区边长（逻辑像素）：不小于原文字按钮高度（20），点击手感稳定
+ENTRY_HOTZONE = ICON_DISPLAY_SIZE + 2 * ICON_BUTTON_PAD
 
 
-def text_button_width(text_advance: int) -> int:
-    """按钮保证文字完整显示的最小宽度（纯函数，离线测试用）。
-
-    ``text_advance`` 为 QFontMetrics.horizontalAdvance(文字)；左右各留
-    MARGIN，再加度量误差余量 —— 默认 sizeHint 在部分字体下偏小，会把
-    「预构建翻译缓存」这类长文案截断（实测缺陷）。
-    """
-    return text_advance + 2 * MARGIN + BUTTON_WIDTH_SLACK
-
-
-def logical_to_physical(
-    width: int, height: int, dpr: float
+def icon_button_size(
+    icon_size: int = ICON_DISPLAY_SIZE, pad: int = ICON_BUTTON_PAD
 ) -> tuple[int, int]:
-    """Qt 逻辑像素 → win32 物理像素（纯函数，离线测试用）。
-
-    绑定窗口定位必须用物理尺寸缓存：若把逻辑值当物理值喂给 SetWindowPos
-    再从 Qt 读回，缩放屏（dpr > 1）下会逐帧衰减并弹回，形成周期性振荡
-    （实测缺陷）。
-    """
-    scale = max(1.0, float(dpr))
-    return round(width * scale), round(height * scale)
-
-
-# ------------------------------------------------------------------ 入口抽象层
+    """图标入口的热区尺寸（纯函数，离线测试用）：图标等比边长 + 四周留白。"""
+    side = icon_size + 2 * pad
+    return side, side
 
 
 @dataclass
 class BoundAction:
     """一个注入相关功能入口（渲染层无关的功能描述）。"""
 
-    id: str  # 稳定标识（日志与未来菜单化定位用）
-    label: str  # 文字渲染形态的按钮文案
+    id: str  # 稳定标识（日志定位用）
+    label: str  # 文案（图标形态下兼作悬浮/无障碍描述）
     on_click: Callable[[], None]
     enabled: Callable[[], bool] | None = None  # None = 恒可用
+    icon: str | None = None  # 图标资源路径（SVG/图片）
 
     def is_enabled(self) -> bool:
         if self.enabled is None:
@@ -88,150 +63,80 @@ class BoundAction:
             return False
 
 
-def button_specs(actions: list[BoundAction]) -> list[tuple[str, bool]]:
-    """渲染前的纯规格视图：``[(文案, 是否可用), ...]``（离线测试用）。"""
-    return [(action.label, action.is_enabled()) for action in actions]
+def dispatch_action(action: BoundAction | None) -> bool:
+    """统一分发：未命中/不可用时忽略并返回 False，命中分发返回 True。"""
+    if action is None:
+        return False
+    if not action.is_enabled():
+        logger.debug("绑定窗口入口不可用，忽略点击：%s", action.id)
+        return False
+    logger.info("绑定窗口入口点击：%s", action.id)
+    action.on_click()
+    return True
 
 
-class BoundEntryRenderer:
-    """入口渲染协议：把 action 列表填充到一个容器布局上。
+class TitleEntryStrip:
+    """标题文本右侧的图标入口条：宽度、绘制与命中测试（非 QWidget）。"""
 
-    协议只约定 :meth:`populate`；未来图标形态（QIcon / QPainter 自绘）或
-    单按钮弹菜单形态实现同一协议即可替换，action 定义与宿主接线不变。
-    """
-
-    def populate(self, container: QWidget, actions: list[BoundAction]) -> None:
-        raise NotImplementedError
-
-
-class TextButtonRenderer(BoundEntryRenderer):
-    """当前形态：QVBoxLayout 竖排文字按钮（点击即分发 action 回调）。"""
-
-    def populate(self, container: QWidget, actions: list[BoundAction]) -> None:
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(MARGIN, MARGIN, MARGIN, MARGIN)
-        layout.setSpacing(MARGIN)
-        for action in actions:
-            button = QPushButton(action.label, container)
-            # 按字体度量锁最小宽：防止默认 sizeHint 偏小截断长文案（实测缺陷）
-            button.setMinimumWidth(text_button_width(button.fontMetrics().horizontalAdvance(action.label)))
-            button.clicked.connect(self._dispatch(action))
-            layout.addWidget(button)
-        layout.addStretch(1)
-
-    @staticmethod
-    def _dispatch(action: BoundAction) -> Callable[[], None]:
-        def _run() -> None:
-            if not action.is_enabled():
-                logger.debug("绑定窗口入口不可用，忽略点击：%s", action.id)
-                return
-            logger.info("绑定窗口入口点击：%s", action.id)
-            action.on_click()
-
-        return _run
-
-
-# ------------------------------------------------------------------ 窗口本体
-
-
-def _apply_overlay_flags(widget: QWidget) -> None:
-    """与 ``_StreamWindowBase.__init__`` 相同的悬浮窗标志（同步维护）。"""
-    widget.setWindowFlags(
-        Qt.WindowType.FramelessWindowHint
-        | Qt.WindowType.WindowStaysOnTopHint
-        | Qt.WindowType.Tool
-    )
-    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-    widget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-
-
-class BoundWindow(QWidget):
-    """绑定窗口：窄条竖排入口按钮，鼠标事件按宿主协议转发（拖动整体联动）。"""
-
-    def __init__(
-        self,
-        host,
-        actions: list[BoundAction] | None = None,
-        renderer: BoundEntryRenderer | None = None,
-    ) -> None:
-        super().__init__()
-        _apply_overlay_flags(self)
-        self.setWindowTitle("renpy-overlay · bound")
-        self._host = host  # StreamOverlayWindow：拖动/置顶等事件的唯一处理者
+    def __init__(self, gap: int = ENTRY_GAP) -> None:
+        self._gap = gap
         self._actions: list[BoundAction] = []
-        # 渲染层可替换（工厂注入便于离线测试）；默认竖排文字按钮
-        self._renderer = renderer or TextButtonRenderer()
-        self._layout_host = QWidget(self)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._layout_host)
-        self.set_actions(actions or [])
-
-    # ---- 渲染 ---------------------------------------------------------------
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        """绘制半透明圆角底板。
-
-        全透明外壳若从不产生任何渲染帧，真实 Windows 合成器下可能永远
-        不被合成（实测教训：透明窗口必须进入 Qt 渲染管线才在屏幕上存在，
-        与标题/正文窗的 paintEvent + 定时 update 同理）。底板同时让入口
-        按钮条在游戏画面上有可见背景，不再依赖按钮默认样式的偶然对比度。
-        """
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        r, g, b, a = PANEL_COLOR
-        panel = QColor(r, g, b, a)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(panel)
-        painter.drawRoundedRect(QRectF(self.rect()), PANEL_RADIUS, PANEL_RADIUS)
-
-    def showEvent(self, event) -> None:  # noqa: N802
-        """显示即主动请求一帧渲染（不依赖合成器对空内容窗口的 expose 处理）。"""
-        super().showEvent(event)
-        self.update()
 
     # ---- 入口管理 -----------------------------------------------------------
 
     def set_actions(self, actions: list[BoundAction]) -> None:
-        """整体重建入口（渲染层重新填充；重复注册同 id 的 action 覆盖）。"""
+        """整体重建入口（重复 id 覆盖；空列表即清空 —— 跳过注入模式不注入）。"""
         unique: dict[str, BoundAction] = {item.id: item for item in self._actions}
         for action in actions:
             unique[action.id] = action
         self._actions = list(unique.values())
-        self._renderer.populate(self._layout_host, self._actions)
-        self.adjustSize()
 
     @property
     def actions(self) -> list[BoundAction]:
         return list(self._actions)
 
-    # ---- 宿主协议（与 _StreamWindowBase 一致：窗口不含业务逻辑） ------------
+    def is_empty(self) -> bool:
+        return not self._actions
 
-    @property
-    def hwnd(self) -> int:
-        return int(self.winId())
+    # ---- 布局与命中 ---------------------------------------------------------
 
-    def dpr(self) -> float:
-        return max(1.0, self.devicePixelRatioF())
+    def hotzone(self) -> int:
+        """单个入口热区边长（逻辑像素）。"""
+        return ENTRY_HOTZONE
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._host.on_window_press(self, event)
-        event.accept()
+    def width(self) -> int:
+        """入口条总宽（逻辑像素）：n×热区 + (n-1)×间隔；空条为 0。"""
+        n = len(self._actions)
+        if n == 0:
+            return 0
+        return n * ENTRY_HOTZONE + (n - 1) * self._gap
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        self._host.on_window_motion(self, event)
-        event.accept()
+    def action_at(self, local_x: int) -> BoundAction | None:
+        """按条内局部 x 做区间命中：落在某入口热区返回该 action，否则 None。"""
+        if local_x < 0:
+            return None
+        slot = ENTRY_HOTZONE + self._gap
+        index, offset = divmod(local_x, slot)
+        if index >= len(self._actions) or offset >= ENTRY_HOTZONE:
+            return None  # 落在入口之间的间隔上：不命中
+        return self._actions[index]
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._host.on_window_release(self, event)
-        event.accept()
+    # ---- 绘制 ---------------------------------------------------------------
 
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
-        self._host.on_window_double_click(self, event)
-        event.accept()
-
-    def contextMenuEvent(self, event) -> None:  # noqa: N802
-        self._host.on_window_context_menu(self, event)
-        event.accept()
+    def paint(self, painter: QPainter, x: int, y: int) -> None:
+        """在标题窗画布上绘制全部入口图标（调用方保证在 paintEvent 内）。"""
+        for index, action in enumerate(self._actions):
+            if not action.icon:  # pragma: no cover - 现有入口均带图标
+                continue
+            icon = QIcon(action.icon)
+            left = x + index * (ENTRY_HOTZONE + self._gap)
+            top = y
+            icon.paint(
+                painter,
+                QRect(
+                    left + ICON_BUTTON_PAD,
+                    top + ICON_BUTTON_PAD,
+                    ICON_DISPLAY_SIZE,
+                    ICON_DISPLAY_SIZE,
+                ),
+            )

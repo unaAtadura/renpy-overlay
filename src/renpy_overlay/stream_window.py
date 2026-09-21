@@ -37,12 +37,12 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from . import config, translation_store, translator, win32api
-from .bound_window import BOUND_GAP, BoundAction, BoundWindow, logical_to_physical
+from .bound_window import BOUND_GAP, BoundAction, TitleEntryStrip, dispatch_action
 from .pretranslate import PrebuildTask, scan_rpy_files
 from .pretranslate_dialog import PretranslateDialog
 from .quick_menu import QuickMenu
@@ -76,6 +76,11 @@ from .translation_cache import TranslationCache, choice_translation_text  # noqa
 from .translation_history_window import TranslationHistoryWindow
 
 logger = logging.getLogger("renpy_overlay.stream_window")
+
+#: 绑定窗口入口图标（淡蓝色书本，与标题/正文文字同一视觉语言）
+BOUND_PREBUILD_ICON = str(
+    Path(__file__).parent / "assets" / "icons" / "书籍1_book-one.svg"
+)
 
 DRAIN_INTERVAL_MS = 80
 FOLLOW_INTERVAL_MS = 200
@@ -201,38 +206,10 @@ def pair_offset_from_body(
     把正文窗放在 ``y + title_h + gap``；若拖动结束时以正文窗为参照记偏移，
     松手后首次重定位会整体下移「标题高 + 间距」（表现为一次向下跳变）。
     抽成纯函数便于离线验证两套逻辑参照系一致（见 ``tests/test_stream_window.py``）。
-    三窗时代（含绑定窗口）请改用 :func:`triple_offset_from_body`。
+    绑定入口横向追加在标题窗右侧且由标题内容宽驱动让位（同一渲染帧内绘制），
+    不参与本换算，故双窗参照系对标题/正文窗始终成立。
     """
     return (body_xy[0] - game_xy[0], body_xy[1] - title_h - gap - game_xy[1])
-
-
-def triple_offset_from_body(
-    body_xy: tuple[int, int],
-    game_xy: tuple[int, int],
-    title_h: int,
-    v_gap: int,
-    bound_w: int,
-    h_gap: int,
-) -> tuple[int, int]:
-    """三窗时代的 ``user_offset`` 换算（参照整体几何顶点 = 绑定窗左上角）。
-
-    绑定窗口占据整体几何左侧一列（:func:`bound_column_rect`），标题/正文窗
-    被推到 ``x + bound_w + h_gap``；若拖动结束仍按双窗参照（顶点 = 标题左上）
-    记偏移，松手后首次重定位会把标题/正文窗整体右移「绑定列宽 + 列间距」
-    （实测缺陷：额外向右平移，是早期「向下跳变」的横向变体 —— 同为参照系
-    与布局顶点不一致，方向不同）。
-
-    间距必须同源：``v_gap`` = 标题/正文行距（title_gap），``h_gap`` = 绑定列
-    与标题列的列距（BOUND_GAP，与 bound_column_rect 及拖动联动同一常量）——
-    二者混用会留下数像素的残余横向偏移（实测）。``bound_w=0`` 时与
-    :func:`pair_offset_from_body` 完全等价（无绑定列时不引入列距）。
-    抽成纯函数便于离线验证拖动落点往返一致（见测试）。
-    """
-    shift = bound_w + h_gap if bound_w > 0 else 0
-    return (
-        body_xy[0] - shift - game_xy[0],
-        body_xy[1] - title_h - v_gap - game_xy[1],
-    )
 
 
 def body_mask_bands(
@@ -319,30 +296,6 @@ def body_drag_scroll_rate(dy: float, line_h: float) -> float:
     return -math.copysign(notches_per_sec * WHEEL_LINES_PER_NOTCH * line_h, dy)
 
 
-def bound_column_rect(
-    total: tuple[int, int, int, int],
-    bound_w: int,
-    gap: int,
-) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
-    """从整体几何左侧切出绑定窗口列：返回 ``(绑定窗几何, 其余几何)``。
-
-    ``bound_w`` 为 0（未注入/未显示）时其余几何等于整体 —— 布局与既有
-    双窗完全一致；注入后绑定窗占据左侧一列，标题/正文窗整体右移。抽成
-    纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
-    """
-    x, y, width, height = total
-    bound_w = max(0, int(bound_w))
-    if bound_w <= 0:
-        return (x, y, 0, height), total
-    rest_x = x + bound_w + gap
-    return (x, y, bound_w, height), (
-        rest_x,
-        y,
-        max(1, width - bound_w - gap),
-        height,
-    )
-
-
 class _StreamWindowBase(QWidget):
     """标题窗与正文窗的公共底座：全透明无边框置顶 + 鼠标事件转发给宿主。"""
 
@@ -399,19 +352,82 @@ class _StreamWindowBase(QWidget):
 
 
 class TitleWindow(_StreamWindowBase):
-    """标题窗：一次性整显完整标题（随交互状态动态更新，但无打字机动画）。"""
+    """标题窗：一次性整显完整标题（随交互状态动态更新，但无打字机动画）。
+
+    注入确认后，标题文本右侧内嵌图标入口条（TitleEntryStrip）：与文本同一
+    渲染帧实时跟随文本长度，点击图标分发入口回调，不参与窗口拖动/单击翻译。
+    """
 
     def __init__(self, font_px: int, host) -> None:
         font = _stream_font(font_px)
         super().__init__("renpy-overlay · stream title", font, host)
         self._layout: list[tuple[str, float]] = []  # (字符, x 起点)，单行排版
+        self._entry_strip = TitleEntryStrip()
+        self._entry_rect: QRect | None = None  # 入口条热区（本地坐标，命中测试用）
+        self._entry_press: object | None = None  # 图标按下的本地坐标（点击判定）
+
+    def set_title_entries(self, actions: list) -> None:
+        """注入确认时注入入口条并重排当前标题（可用宽扣除图标区）。"""
+        self._entry_strip.set_actions(actions)
+        self.set_text(self._host._title_text if getattr(self._host, "_title_text", "") else "")
+
+    def _entry_hit(self, pos) -> bool:
+        return self._entry_rect is not None and self._entry_rect.contains(pos)
+
+    # ---- 入口条命中拦截：图标点击不参与拖动/单击翻译 -----------------------
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._entry_hit(
+            event.position().toPoint()
+        ):
+            self._entry_press = event.position().toPoint()
+            event.accept()
+            return
+        self._entry_press = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._host.on_window_press(self, event)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._entry_press is not None:
+            event.accept()  # 图标按住期间不触发窗口拖动
+            return
+        self._host.on_window_motion(self, event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        press = self._entry_press
+        self._entry_press = None
+        if press is not None and event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            if (pos - press).manhattanLength() <= 12:  # 未拖动：单击图标分发入口
+                local_x = pos.x() - (self._entry_rect.x() if self._entry_rect else 0)
+                dispatch_action(self._entry_strip.action_at(local_x))
+            event.accept()
+            return
+        self._host.on_window_release(self, event)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if self._entry_hit(event.position().toPoint()):
+            event.accept()  # 图标上的双击不触发锁定/解锁
+            return
+        self._host.on_window_double_click(self, event)
+        event.accept()
 
     def set_text(self, text: str) -> None:
-        """整显一条标题（单行）：超宽或换行后的内容直接截断。"""
+        """整显一条标题（单行）：超宽或换行后的内容直接截断。
+
+        入口条非空时为其预留宽度：文本可用宽 = 窗宽 - 2×边距 - (条宽 + 列距)，
+        文本与图标同一渲染帧排版，图标实时跟随文本长度。
+        """
         self._layout.clear()
         fm = self.fm
         x = TITLE_MARGIN_X
-        max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X)
+        reserve = 0
+        if not self._entry_strip.is_empty():
+            reserve = self._entry_strip.width() + BOUND_GAP
+        max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X - reserve)
         for ch in text:
             if ch == "\n":
                 break
@@ -421,6 +437,17 @@ class TitleWindow(_StreamWindowBase):
             self._layout.append((ch, x))
             x += advance
         self.update()
+
+    def content_width(self) -> int:
+        """当前标题内容的排版宽度（逻辑像素；空标题为 0）。
+
+        取最后一字符的右缘 + 右侧对称留白 —— 绑定窗口用它作为横向让位
+        的驱动量（长内容右推、短内容左拉），正文窗不参与该联动。
+        """
+        if not self._layout:
+            return 0
+        last_ch, last_x = self._layout[-1]
+        return int(last_x + self.fm.horizontalAdvance(last_ch)) + TITLE_MARGIN_X
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._layout:
@@ -451,6 +478,14 @@ class TitleWindow(_StreamWindowBase):
         painter.setPen(QColor(BODY_FILL_COLOR))
         for ch, x in self._layout:
             painter.drawText(QPointF(x, baseline_y), ch)
+        # 入口条：紧跟标题文本右侧（同一渲染帧，实时随文本长度移动）
+        if not self._entry_strip.is_empty():
+            text_right = last_x + fm.horizontalAdvance(last_ch)
+            hot = self._entry_strip.hotzone()
+            entry_x = int(text_right + BOUND_GAP)
+            entry_y = int(center_y - hot / 2.0)
+            self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
+            self._entry_strip.paint(painter, entry_x, entry_y)
 
 
 class _Glyph:
@@ -740,31 +775,13 @@ class StreamOverlayWindow:
 
         self._body_hwnd = self._body_window.hwnd
         self._title_hwnd = self._title_window.hwnd
-        # 绑定窗口（仅注入模式创建，注入成功后显示；跳过注入模式整个缺席）。
-        # 预构建不受「同时仅一个 API 请求」互斥约束，但写库与前台共用
-        # translation_store 的进程级写锁（见 translation_store._WRITE_LOCK）
+        # 注入相关入口（预构建翻译缓存）内嵌在标题窗文本右侧，注入确认后经
+        # _handle_injected 注入；豁免前台 API 互斥，写库共用进程级写锁
         self._game_dir = game_dir or ""
-        self._bound_window: BoundWindow | None = None
         self._injected = False
-        self._bound_position_logged = False  # 首次成功定位的日志只记一次
-        # 绑定窗口的物理像素尺寸（注入确认时按 DPR 换算后缓存）：定位一律用
-        # 缓存值，不再从 Qt 读回 —— 逻辑/物理两套单位混用会形成衰减-弹回
-        # 正反馈（窗口逐帧缩小至 adjustSize 弹回，即实测的周期性振荡）
-        self._bound_size_phys: tuple[int, int] | None = None
         self._prebuild_dialog: PretranslateDialog | None = None
         self._prebuild_seq = 0
         self._prebuild_stop: threading.Event | None = None
-        if not self.skip_injection:
-            self._bound_window = BoundWindow(
-                host=self,
-                actions=[
-                    BoundAction(
-                        id="prebuild",
-                        label="预构建翻译缓存",
-                        on_click=self.request_prebuild,
-                    )
-                ],
-            )
         logger.debug(
             "流式悬浮窗 HWND：正文=0x%X 标题=0x%X（标题高=%dpx 间距=%dpx）",
             self._body_hwnd,
@@ -985,12 +1002,6 @@ class StreamOverlayWindow:
             except Exception:  # pragma: no cover
                 pass
             self._prebuild_dialog = None
-        if self._bound_window is not None:
-            try:
-                self._bound_window.close()
-            except Exception:  # pragma: no cover
-                pass
-            self._bound_window = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -1188,13 +1199,9 @@ class StreamOverlayWindow:
             if visible:
                 self._title_window.show()
                 self._body_window.show()
-                if self._bound_window is not None and self._injected:
-                    self._bound_window.show()
             else:
                 self._title_window.hide()
                 self._body_window.hide()
-                if self._bound_window is not None and self._injected:
-                    self._bound_window.hide()
         except Exception:  # pragma: no cover
             return
         self._visible = visible
@@ -1245,15 +1252,13 @@ class StreamOverlayWindow:
             return
 
         rect = win32api.window_rect(hwnd)
-        bound_w = self._bound_column_width()
         total = compute_geometry(
             rect,
-            (self.width + bound_w, self.height + self._title_h + self._title_gap),
+            (self.width, self.height + self._title_h + self._title_gap),
             self.dock,
             self._user_offset,
         )
-        bound_rect, rest_total = bound_column_rect(total, bound_w, BOUND_GAP)
-        title_rect, body_rect = pair_layout(rest_total, self._title_h, self._title_gap)
+        title_rect, body_rect = pair_layout(total, self._title_h, self._title_gap)
         if not self._visible:
             # 显示必须走 Qt show()：win32 的 SWP_SHOWWINDOW 只能在 OS 层面把原生
             # 窗口标记为可见，绕过 Qt 的 show 流程后 Qt 不会启动渲染管线，
@@ -1261,7 +1266,6 @@ class StreamOverlayWindow:
             self._set_visible(True)
         win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
         win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
-        self._move_bound_window(bound_rect)
 
     def _hide_if_visible(self) -> None:
         if self._visible:
@@ -1281,20 +1285,17 @@ class StreamOverlayWindow:
                 self._reassert_topmost()
             return
         rect = self._virtual_screen_rect()
-        bound_w = self._bound_column_width()
         total = compute_geometry(
             rect,
-            (self.width + bound_w, self.height + self._title_h + self._title_gap),
+            (self.width, self.height + self._title_h + self._title_gap),
             self.dock,
             self._user_offset,
         )
-        bound_rect, rest_total = bound_column_rect(total, bound_w, BOUND_GAP)
-        title_rect, body_rect = pair_layout(rest_total, self._title_h, self._title_gap)
+        title_rect, body_rect = pair_layout(total, self._title_h, self._title_gap)
         if not self._visible:
             self._set_visible(True)
         win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
         win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
-        self._move_bound_window(bound_rect)
 
     def _virtual_screen_rect(self) -> tuple[int, int, int, int]:
         """主屏可用区域（避开任务栏）的物理像素 rect（跳过注入的虚拟游戏窗口）。"""
@@ -1317,8 +1318,6 @@ class StreamOverlayWindow:
         try:
             win32api.set_topmost(self._body_hwnd)
             win32api.set_topmost(self._title_hwnd)
-            if self._bound_window is not None and self._injected and self._bound_window.isVisible():
-                win32api.set_topmost(self._bound_window.hwnd)
             self._quick_menu.reassert_topmost()  # 截图窗锁定态同样对抗独占全屏覆盖
         except Exception:  # pragma: no cover - pywin32 缺失等
             return
@@ -1403,19 +1402,6 @@ class StreamOverlayWindow:
                 topmost=True,
                 resize=False,
             )
-            bound_w = self._bound_column_width()
-            if bound_w and self._bound_window is not None and self._bound_size_phys is not None:
-                # 绑定窗与标题窗同顶、在整体几何左侧（与跟随定位同一参照系）
-                phys_w, phys_h = self._bound_size_phys
-                win32api.move_window(
-                    self._bound_window.hwnd,
-                    body_x - bound_w,
-                    body_y - self._title_h - self._title_gap,
-                    phys_w,
-                    phys_h,
-                    topmost=True,
-                    resize=False,
-                )
         except Exception:  # pragma: no cover - 窗口在拖动中销毁
             self._dragging = False
 
@@ -1429,8 +1415,6 @@ class StreamOverlayWindow:
         self._press_pos = None
         if press_pos is None:
             return
-        if window is self._bound_window:
-            return  # 绑定窗按压仅用于拖动（按钮自含点击），单击不触发翻译
         pos = self._physical_mouse(window, event)
         if (
             abs(pos[0] - press_pos[0]) > CLICK_MOVE_TOLERANCE
@@ -1452,30 +1436,33 @@ class StreamOverlayWindow:
             logger.debug("拖动结束：位置未变化，保持原有跟随方式")
             return
         hwnd = self._resolve_target()
-        if not hwnd:
+        if hwnd:
+            game = list(win32api.window_rect(hwnd))
+        elif self.skip_injection:
+            # 跳过注入模式：无游戏窗口可定位，改以主屏可用区域（虚拟游戏
+            # 窗口）左上为参照 —— 与 _follow_once_skip_injection 同一参照系。
+            # 否则 _user_offset 永远写不进去，follow 每 tick 按默认停靠把
+            # 窗口弹回屏幕顶部（实测缺陷：拖动结果不被保持）
+            game = list(self._virtual_screen_rect())
+            logger.debug("拖动结束：以虚拟屏幕为参照记录偏移（跳过注入模式）")
+        else:
             logger.warning("拖动结束：未能定位游戏窗口，本次位置不参与跟随")
             return
-        game = win32api.window_rect(hwnd)
-        # user_offset 必须与跟随循环的整体几何顶点（绑定窗左上角）同参照系：
-        # 三窗布局把标题/正文窗推到顶点 + 绑定列宽 + 间距，若仍按双窗参照
-        # （顶点 = 标题左上）记偏移，松手后首次重定位会整体右移一段（横向变体
-        # 的「向下跳变」）。bound_w 为 0（未注入）时与双窗换算完全等价
-        bound_w = self._bound_column_width()
-        offset = triple_offset_from_body(
+        # user_offset 必须与跟随循环的整体几何顶点（标题窗左上角）同参照系，
+        # 否则松手后首次重定位会整体下移「标题高 + 间距」（见 pair_offset_from_body）。
+        # 绑定入口横向追加在标题窗右侧且由标题内容宽驱动让位（同一渲染帧内绘制），
+        # 不参与本换算
+        offset = pair_offset_from_body(
             (rect[0], rect[1]),
             (game[0], game[1]),
             self._title_h,
             self._title_gap,
-            bound_w,
-            BOUND_GAP,
         )
         self._user_offset = offset
         logger.info(
-            "拖动结束：位置已锁定为相对游戏窗口的偏移 (%+d, %+d)（含绑定列宽 %d；"
-            "控制台输入 d 可恢复自动停靠）",
+            "拖动结束：位置已锁定为相对游戏窗口的偏移 (%+d, %+d)（控制台输入 d 可恢复自动停靠）",
             offset[0],
             offset[1],
-            bound_w,
         )
 
     # ------------------------------------------------------------ 双击锁定与单击翻译
@@ -1533,71 +1520,21 @@ class StreamOverlayWindow:
         self._queue.put(("injected", None))
 
     def _handle_injected(self) -> None:
-        """主线程：注入确认后显示绑定窗口（跳过注入模式无此窗口）。"""
-        if self._closed or self._bound_window is None or self._injected:
+        """主线程：注入确认后把入口条并入标题窗（跳过注入模式不注入）。"""
+        if self._closed or self.skip_injection or self._injected:
             return
         self._injected = True
-        try:
-            self._bound_window.show()
-            self._bound_window.adjustSize()
-            # 逻辑 → 物理一次性换算并缓存（title/body 同为物理像素口径）
-            self._bound_size_phys = logical_to_physical(
-                self._bound_window.width(),
-                self._bound_window.height(),
-                self._bound_window.dpr(),
-            )
-        except Exception:  # pragma: no cover - 窗口销毁竞态
-            logger.warning("绑定窗口显示失败", exc_info=True)
-            return
-        phys_w, phys_h = self._bound_size_phys
-        logger.info(
-            "注入成功：绑定窗口已显示（入口：预构建翻译缓存；逻辑=%dx%d 物理=%dx%d "
-            "位置=%d,%d 可见=%s）",
-            self._bound_window.width(),
-            self._bound_window.height(),
-            phys_w,
-            phys_h,
-            self._bound_window.x(),
-            self._bound_window.y(),
-            self._bound_window.isVisible(),
+        self._title_window.set_title_entries(
+            [
+                BoundAction(
+                    id="prebuild",
+                    label="预构建翻译缓存",
+                    on_click=self.request_prebuild,
+                    icon=BOUND_PREBUILD_ICON,
+                )
+            ]
         )
-
-    def _bound_column_width(self) -> int:
-        """绑定窗口占用的整体几何宽度（物理像素；未注入/未就绪时为 0）。
-
-        必须用缓存物理尺寸而非 Qt width()：后者会被 win32 定位写回污染，
-        参与标题/正文窗的停靠计算会把振荡传导给两窗（实测左右往复）。
-        """
-        if self._bound_window is None or not self._injected or self._bound_size_phys is None:
-            return 0
-        return self._bound_size_phys[0] + BOUND_GAP
-
-    def _move_bound_window(self, bound_rect: tuple[int, int, int, int]) -> None:
-        """按列几何放置绑定窗口（缓存物理尺寸，顶部与标题窗对齐）。"""
-        if self._bound_window is None or not self._injected or self._bound_size_phys is None:
-            return
-        phys_w, phys_h = self._bound_size_phys
-        try:
-            win32api.move_window(
-                self._bound_window.hwnd,
-                bound_rect[0],
-                bound_rect[1],
-                phys_w,
-                phys_h,
-                topmost=True,
-            )
-        except Exception:
-            logger.warning("绑定窗口定位失败（rect=%s）", bound_rect, exc_info=True)
-            return
-        if not self._bound_position_logged:
-            self._bound_position_logged = True
-            logger.debug(
-                "绑定窗口已定位：rect=(%d, %d) 物理尺寸=%dx%d",
-                bound_rect[0],
-                bound_rect[1],
-                phys_w,
-                phys_h,
-            )
+        logger.info("注入成功：预构建入口已并入标题窗（图标跟随标题文本长度）")
 
     def request_prebuild(self) -> None:
         """绑定窗口入口回调：任务在途则唤回弹窗，否则重新进入扫描流程。"""

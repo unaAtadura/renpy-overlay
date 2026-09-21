@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-from renpy_overlay.bound_window import BOUND_GAP
 from renpy_overlay.stream_window import (
     DRAG_SCROLL_DEBOUNCE_PX,
     DRAG_SCROLL_FAST_FACTOR,
@@ -23,12 +22,10 @@ from renpy_overlay.stream_window import (
     body_mask_bands,
     body_scroll_target,
     body_wheel_target,
-    bound_column_rect,
     choice_translation_text,
     compute_geometry,
     pair_layout,
     pair_offset_from_body,
-    triple_offset_from_body,
 )
 
 GAME = (100, 200, 1300, 900)  # 1200 x 700
@@ -298,76 +295,29 @@ def test_drag_scroll_rate_fast_zone():
     assert body_drag_scroll_rate(dy, LINE_H) == -fast
 
 
-# ---- 绑定窗口列布局（预构建功能新增的三窗几何） ------------------------------
+# ---- 拖动参照系（绑定入口内嵌标题窗后仍为双窗口径） --------------------------
 
 
-def test_bound_column_rect_zero_keeps_dual_window_layout():
-    """未注入/未显示（宽 0）时其余几何等于整体 —— 与既有双窗布局完全一致。"""
-    total = (100, 200, 880, 300)
-    bound, rest = bound_column_rect(total, 0, 8)
-    assert bound == (100, 200, 0, 300)
-    assert rest == total
+def test_drag_offset_unchanged_with_inline_entries():
+    """拖动参照系保持双窗：user_offset 换算不含内嵌入口条，落点精确。"""
+    game = (100, 200, 1300, 900)
+    body = (724, 300)
+    offset = pair_offset_from_body(body, (game[0], game[1]), 26, 4)
+    total = compute_geometry(game, (880, 230), "top-center", offset)
+    title_rect, body_rect = pair_layout(total, 26, 4)
+    assert body_rect[:2] == body  # 正文窗精确停在松手位置
+    assert offset == (624, 70)
 
 
-def test_bound_column_rect_cuts_left_column_with_gap():
-    total = (100, 200, 880, 300)
-    bound, rest = bound_column_rect(total, 120, 8)
-    assert bound == (100, 200, 120, 300)
-    assert rest == (228, 200, 752, 300)  # 标题/正文窗整体右移一列 + 间距
+def test_skip_injection_drag_offset_roundtrip():
+    """跳过注入拖动参照系：以虚拟屏幕（主屏可用区）为参照，落点往返精确。
 
-
-def test_bound_column_rect_negative_clamped():
-    bound, rest = bound_column_rect((0, 0, 100, 100), -5, 8)
-    assert bound == (0, 0, 0, 100)
-    assert rest == (0, 0, 100, 100)
-
-
-# ---- 三窗拖动参照系（松手后额外右移缺陷的回归） ------------------------------
-
-
-def test_triple_offset_matches_pair_when_no_bound_column():
-    """未注入（bound_w=0）时与双窗换算完全等价：旧会话行为不变。"""
-    body, game, title_h, gap = (724, 300), (100, 200), 26, 4
-    assert triple_offset_from_body(body, game, title_h, gap, 0, 8) == pair_offset_from_body(
-        body, game, title_h, gap
-    )
-
-
-def test_triple_offset_roundtrip_keeps_body_at_drop_point():
-    """拖动落点往返恒等：落点 → offset → follow 布局 → 正文窗回到落点。
-
-    复现缺陷的用例：双窗参照换算会让正文窗右移「绑定列宽 + 列距」；
-    三窗参照（顶点 = 绑定窗左上）必须让正文窗精确停在松手位置。
+    回归实测缺陷：_finish_drag 因无法定位游戏窗提前返回，_user_offset
+    恒 None，follow 每 tick 按默认停靠把窗口弹回屏幕顶部。
     """
-    game = (100, 200, 1300, 900)
-    drop_xy = (724, 300)  # 松手时正文窗左上（物理像素）
-    title_h, v_gap, bound_w = 26, 4, 120
-
-    offset = triple_offset_from_body(
-        drop_xy, (game[0], game[1]), title_h, v_gap, bound_w, BOUND_GAP
-    )
-    total = compute_geometry(
-        game,
-        (880 + bound_w, 200 + title_h + v_gap),
-        "top-center",
-        offset,
-    )
-    bound_rect, rest_total = bound_column_rect(total, bound_w, BOUND_GAP)
-    title_rect, body_rect = pair_layout(rest_total, title_h, v_gap)
-    assert body_rect[:2] == drop_xy, "正文窗必须精确停在松手位置（无额外横向平移）"
-    # 绑定窗在标题窗左侧、同顶，列距与拖动联动一致
-    assert bound_rect[0] + bound_rect[2] + BOUND_GAP == title_rect[0]
-    assert bound_rect[1] == title_rect[1]
-    assert bound_rect[0] == drop_xy[0] - bound_w - BOUND_GAP  # 与拖动联动同位
-
-
-def test_triple_offset_roundtrip_dual_window_unchanged():
-    """bound_w=0 的往返：跳过注入/未注入会话的拖动行为与既有完全一致。"""
-    game = (100, 200, 1300, 900)
-    drop_xy = (724, 300)
-    title_h, gap = 26, 4
-
-    offset = triple_offset_from_body(drop_xy, (game[0], game[1]), title_h, gap, 0, BOUND_GAP)
-    total = compute_geometry(game, (880, 200 + title_h + gap), "top-center", offset)
-    title_rect, body_rect = pair_layout(total, title_h, gap)
-    assert body_rect[:2] == drop_xy
+    virtual = (0, 0, 1920, 1032)  # 主屏可用区域（_virtual_screen_rect 同构）
+    drop_xy = (680, 400)
+    offset = pair_offset_from_body(drop_xy, (virtual[0], virtual[1]), 26, 4)
+    total = compute_geometry(virtual, (880, 230), "top-center", offset)
+    _, body_rect = pair_layout(total, 26, 4)
+    assert body_rect[:2] == drop_xy  # 松手后不再跳回屏幕顶部
