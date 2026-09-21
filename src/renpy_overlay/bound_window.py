@@ -19,8 +19,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QRect
-from PyQt6.QtGui import QIcon, QPainter
+from PyQt6.QtCore import QRect, QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter
 
 logger = logging.getLogger("renpy_overlay.bound_window")
 
@@ -35,6 +35,12 @@ ICON_DISPLAY_SIZE = 24
 ICON_BUTTON_PAD = 10
 #: 图标热区边长（逻辑像素）：不小于原文字按钮高度（20），点击手感稳定
 ENTRY_HOTZONE = ICON_DISPLAY_SIZE + 2 * ICON_BUTTON_PAD
+#: 入口条底板（半透明黑，与标题文字蒙版同一视觉语言）：Windows 分层窗口
+#: 按像素 alpha 做命中测试，alpha=0 的透明区会穿透到下层窗口（实测：只有
+#: 描边可点）；底板存在 alpha>0 实心像素才能保证整个热区可点击。矩形须与
+#: 命中矩形完全一致（TitleWindow 的 _entry_rect 用同一热区尺寸）
+ENTRY_BACKDROP_COLOR = (0, 0, 0, 110)
+ENTRY_BACKDROP_RADIUS = 6.0
 
 
 def icon_button_size(
@@ -125,7 +131,23 @@ class TitleEntryStrip:
     # ---- 绘制 ---------------------------------------------------------------
 
     def paint(self, painter: QPainter, x: int, y: int) -> None:
-        """在标题窗画布上绘制全部入口图标（调用方保证在 paintEvent 内）。"""
+        """在标题窗画布上绘制全部入口（底板 + 图标；调用方保证在 paintEvent 内）。
+
+        底板矩形与命中热区完全一致（:meth:`width` × :meth:`hotzone`）：分层
+        窗口按像素 alpha 命中，无底板的透明区会穿透导致「只有描边可点」。
+        """
+        if self.is_empty():
+            return
+        r, g, b, a = ENTRY_BACKDROP_COLOR
+        backdrop = QColor(r, g, b, a)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(backdrop)
+        painter.drawRoundedRect(
+            QRectF(x, y, self.width(), self.hotzone()),
+            ENTRY_BACKDROP_RADIUS,
+            ENTRY_BACKDROP_RADIUS,
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         for index, action in enumerate(self._actions):
             if not action.icon:  # pragma: no cover - 现有入口均带图标
                 continue

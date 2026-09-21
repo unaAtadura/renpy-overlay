@@ -92,6 +92,18 @@ def test_icon_button_hotzone_matches_title_strip():
     assert icon_button_size()[0] <= 72  # 热区不得超过标题窗高度（图标溢出即被裁剪）
 
 
+def test_entry_backdrop_is_hittable_and_alpha_positive():
+    """入口条底板必须存在且 alpha>0。
+
+    回归实测缺陷（只有描边可点）：Windows 分层窗口按像素 alpha 命中，
+    alpha=0 的透明区会穿透到下层窗口，仅图标描边（alpha=255）能命中；
+    底板提供 alpha>0 实心像素，保证整个热区矩形可点击。
+    """
+    from renpy_overlay.bound_window import ENTRY_BACKDROP_COLOR
+
+    assert ENTRY_BACKDROP_COLOR[3] > 0
+
+
 def test_prebuild_icon_asset_exists_and_tinted():
     """入口图标资产存在且描边已改为淡蓝 #ADD8E6（无残留黑色 #333）。"""
     import renpy_overlay
