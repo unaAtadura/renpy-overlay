@@ -80,11 +80,13 @@ EPILOG = """\
               艺术家/游戏场景/备注），支持查找（精确匹配、不区分大小写、高亮
               匹配行）、Ctrl+C 复制、删除选中行；游戏场景与备注可编辑，回车
               写入数据库
-  绑定窗口    仅注入成功后显示在悬浮窗左侧，承载注入强相关功能入口（跳过注入
-              模式不出现）。当前入口「预构建翻译缓存」：扫描游戏目录 .rpy
-              （含 .rpa 归档内）弹窗勾选后，后台逐条翻译缺失原文写入
-              translations.db，不受前台 API 互斥约束、可隐藏唤回/取消；
-              运行时自动翻译直接命中预填条目
+  标题入口    仅注入成功后内嵌于标题窗标题文本右侧（跳过注入模式不注入）。
+              「预构建翻译缓存」：扫描游戏目录 .rpy（含 .rpa 归档内）弹窗
+              勾选后，后台逐条翻译缺失原文写入 translations.db，不受前台
+              API 互斥约束、可隐藏唤回/取消；运行时自动翻译直接命中预填
+              条目。「定位翻译位置」：打开翻译历史窗口并定位最近一次缓存
+              命中的记录，随后清空内存缓存——历史窗口内改译后下一次命中
+              即时生效（译文可双击编辑，回车写库）
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
 
@@ -339,7 +341,7 @@ class Session:
             if self.overlay is not None:
                 self.overlay.set_status(self._status_text(f"Hook {len(layers)} 层"))
                 self.overlay.hint("Hook 就绪：" + ("、".join(str(item) for item in layers) or "无"))
-                # 注入成功确认：显示绑定窗口（注入强相关功能入口，如预构建翻译缓存）
+                # 注入成功确认：入口条并入标题窗（注入强相关功能入口，如预构建翻译缓存）
                 self.overlay.mark_injected()
         elif kind == "bye":
             stats = message.get("stats") or {}
@@ -363,7 +365,7 @@ class Session:
 
         与 :meth:`_flush_pending_say` 同构的竞态处理 —— 游戏端 connect 后
         立即上报 hooks，而悬浮窗在 config 加载后才创建；未确认时不发，
-        已确认则幂等补发（绑定窗口显示，预构建入口可用）。
+        已确认则幂等补发（入口条并入标题窗，预构建入口可用）。
         """
         if self._hooks_confirmed and self.overlay is not None:
             self._hooks_confirmed = False  # 补发即消费（幂等：重复调用无副作用）
