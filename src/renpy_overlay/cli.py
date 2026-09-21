@@ -80,6 +80,11 @@ EPILOG = """\
               艺术家/游戏场景/备注），支持查找（精确匹配、不区分大小写、高亮
               匹配行）、Ctrl+C 复制、删除选中行；游戏场景与备注可编辑，回车
               写入数据库
+  绑定窗口    仅注入成功后显示在悬浮窗左侧，承载注入强相关功能入口（跳过注入
+              模式不出现）。当前入口「预构建翻译缓存」：扫描游戏目录 .rpy
+              （含 .rpa 归档内）弹窗勾选后，后台逐条翻译缺失原文写入
+              translations.db，不受前台 API 互斥约束、可隐藏唤回/取消；
+              运行时自动翻译直接命中预填条目
   恢复停靠    控制台输入 d；隐藏/显示输入 h；退出输入 q
 """
 
@@ -165,6 +170,9 @@ class Session:
         self.args = args
         self.target = target
         self.log = get_logger("session")
+        # 游戏端 connect 后立即上报 hooks，早于悬浮窗创建（同 say 竞态）：
+        # 先记录确认状态，overlay 就绪后补发 mark_injected（绑定窗口显示）
+        self._hooks_confirmed = False
         self.injector = Injector(target.pid, timeout=args.timeout)
         self.link = DialogueLink(
             token=secrets.token_hex(16),
@@ -254,6 +262,7 @@ class Session:
             on_quit=self._request_stop,
         )
         self._flush_pending_say()  # 补推就绪前捕获的台词（此窗口内丢失的根治）
+        self._flush_injected()  # 补发注入确认：显示绑定窗口（hooks 早到竞态的根治）
         self.overlay.set_status(self._status_text("等待游戏端上报…"))
         self.overlay.hint(
             f"已注入 pid={self.target.pid}（{self.target.name}）。"
@@ -326,9 +335,12 @@ class Session:
             self.log.info(
                 "游戏端确认 Hook 层：%s", ", ".join(str(item) for item in layers) or "<空>"
             )
+            self._hooks_confirmed = True
             if self.overlay is not None:
                 self.overlay.set_status(self._status_text(f"Hook {len(layers)} 层"))
                 self.overlay.hint("Hook 就绪：" + ("、".join(str(item) for item in layers) or "无"))
+                # 注入成功确认：显示绑定窗口（注入强相关功能入口，如预构建翻译缓存）
+                self.overlay.mark_injected()
         elif kind == "bye":
             stats = message.get("stats") or {}
             self.log.info("游戏端代理已卸载：%s", stats)
@@ -345,6 +357,17 @@ class Session:
             self.overlay.set_status(self._status_text("连接断开"))
         if not self._stop.is_set():
             self.log.warning("与游戏端的连接断开，代理可能已被卸载或游戏正在退出。")
+
+    def _flush_injected(self) -> None:
+        """注入确认补发：hooks 早于悬浮窗就绪时，就绪后补调 mark_injected。
+
+        与 :meth:`_flush_pending_say` 同构的竞态处理 —— 游戏端 connect 后
+        立即上报 hooks，而悬浮窗在 config 加载后才创建；未确认时不发，
+        已确认则幂等补发（绑定窗口显示，预构建入口可用）。
+        """
+        if self._hooks_confirmed and self.overlay is not None:
+            self._hooks_confirmed = False  # 补发即消费（幂等：重复调用无副作用）
+            self.overlay.mark_injected()
 
     def _status_text(self, extra: str) -> str:
         return (
