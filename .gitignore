@@ -19,6 +19,9 @@ config.json
 # IDE 工作目录
 .qoder/
 
+# zread 文档生成目录
+.zread/
+
 # 样例代码
 .reference_projects
 
