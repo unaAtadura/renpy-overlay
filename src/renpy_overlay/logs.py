@@ -10,6 +10,9 @@
   sys.unraisablehook，如 ctypes 回调异常的 "Exception ignored"）与
   Python warnings（captureWarnings），全部转为标准 DEBUG 级日志，
   受 ``--log-level`` 与文件全量日志统一管理。
+- 单行保证：消息内嵌的换行转义为字面 ``\\n``，一条记录严格占一行。
+  否则续行没有日志头，在文件中看似绕过统一日志系统直接写入（实测
+  来源：Qt 的两行 DPI 警告，第二行裸奔在 2026-09-22 的运行日志里）。
 """
 
 from __future__ import annotations
@@ -34,6 +37,23 @@ _LEVEL_BY_NAME = {
     "error": logging.ERROR,
     "critical": logging.CRITICAL,
 }
+
+
+class _SingleLineFormatter(logging.Formatter):
+    """续行转义：一条日志记录严格占一行。
+
+    logging.Formatter 只在记录首行添加时间戳/级别/来源前缀，消息内嵌的
+    换行符会把余下内容变成无日志头的"裸行"，在文件里看似绕过统一日志
+    系统直接写入（实测：Qt 的 DPI 警告本身就带两行文本，第二行裸奔）。
+    转义后任何来源（Qt 消息 / warnings / unraisable 堆栈 / 业务多行文本）
+    的记录都单行落盘，日志文件可被逐行解析；内容不丢，仅排版变化。
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        # 先处理 \r\n 再单独处理 \r、\n，避免重复转义
+        return text.replace("\r\n", "\\n").replace("\r", "\\r").replace("\n", "\\n")
+
 
 _configured = False
 _log_file: Path | None = None
@@ -72,7 +92,7 @@ def setup_logging(
     if console:
         stream_handler = logging.StreamHandler(stream=sys.stdout)
         stream_handler.setLevel(_LEVEL_BY_NAME.get(str(level).lower(), logging.INFO))
-        stream_handler.setFormatter(logging.Formatter(_CONSOLE_FORMAT, _CONSOLE_DATEFMT))
+        stream_handler.setFormatter(_SingleLineFormatter(_CONSOLE_FORMAT, _CONSOLE_DATEFMT))
         root.addHandler(stream_handler)
 
     target = (
@@ -84,7 +104,7 @@ def setup_logging(
         target.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(target, encoding="utf-8", delay=True)
         file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(logging.Formatter(_FILE_FORMAT, _FILE_DATEFMT))
+        file_handler.setFormatter(_SingleLineFormatter(_FILE_FORMAT, _FILE_DATEFMT))
         root.addHandler(file_handler)
         _log_file = target
     except OSError:

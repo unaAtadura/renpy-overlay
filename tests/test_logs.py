@@ -5,6 +5,11 @@
 级别为 INFO 并过滤 DEBUG，DEBUG 只出现在按设计记录全量的文件日志中。
 本文件把这一行为固化为防回归断言：默认级别控制台无 DEBUG、显式 DEBUG
 放行、文件 handler 保持 DEBUG 全量、非法级别回退 INFO、CLI 默认值。
+
+二次排查（同日）：renpy_overlay_20260922_235211.log 第 80-81 行出现
+无日志头的裸行——Qt 的 DPI 警告本身带两行文本，Formatter 只给记录
+首行加前缀，续行看似绕过统一日志系统直接写入。修复为消息内换行
+转义（_SingleLineFormatter），本文件同时固化"一条记录严格占一行"。
 """
 
 from __future__ import annotations
@@ -182,3 +187,60 @@ def test_python_warnings_captured_into_logging(fresh_logging, tmp_path):
         if r.name == "py.warnings" and "WARNINGS-ROUTE-PROBE" in r.getMessage()
     ]
     assert hits and hits[0].levelno == logging.WARNING
+
+
+# ---- 多行消息单行化：杜绝文件中的无头裸行（2026-09-22 二次排查防回归） ---------
+
+
+def test_multiline_message_writes_single_physical_line(fresh_logging, tmp_path):
+    """多行消息（Qt 两行 DPI 警告类）在文件中不得产生无日志头的裸行。
+
+    缺陷实录（renpy_overlay_20260922_235211.log 第 80-81 行）：Qt 的
+    DPI 警告消息含内嵌换行，Formatter 只给记录首行加前缀，第二行
+    裸奔落盘，看似绕过统一日志系统直接写入。
+    """
+    logs.setup_logging(level="INFO", log_dir=tmp_path)
+    logs.get_logger("qt").warning(
+        "SetProcessDpiAwarenessContext() failed: 拒绝访问。\n"
+        "Qt's default DPI awareness context is "
+        "DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2."
+    )
+    lines = logs.log_file_path().read_text(encoding="utf-8").splitlines()
+    hits = [ln for ln in lines if "SetProcessDpiAwarenessContext" in ln]
+    assert len(hits) == 1  # 续行不再裸奔
+    assert "PER_MONITOR_AWARE_V2" in hits[0]  # 续行内容并入同一物理行
+    assert "\\n" in hits[0]  # 换行以转义形式保留，信息不丢失
+
+
+def test_multiline_console_output_also_single_line(fresh_logging, capsys, tmp_path):
+    """控制台同样单行：多行消息不产生无头续行。"""
+    logs.setup_logging(level="INFO", log_dir=tmp_path)
+    logs.get_logger("probe").info("LINE-ONE\nLINE-TWO")
+    out = capsys.readouterr().out
+    assert "LINE-ONE\\nLINE-TWO" in out
+    assert out.count("\n") == 1  # 一条记录只占一行（含行终止符）
+
+
+def test_unraisable_stacktrace_stays_single_line_in_file(fresh_logging, tmp_path):
+    """带 exc_info 的记录（多行堆栈）同样单行落盘，不产生裸行。"""
+    import types
+
+    original = sys.unraisablehook
+    logs.setup_logging(level="INFO", log_dir=tmp_path)
+    try:
+        try:
+            raise ValueError("STACK-PROBE")
+        except ValueError:
+            exc = sys.exc_info()
+        sys.unraisablehook(
+            types.SimpleNamespace(
+                exc_type=exc[0], exc_value=exc[1], exc_traceback=exc[2], object=None
+            )
+        )
+    finally:
+        sys.unraisablehook = original
+    lines = logs.log_file_path().read_text(encoding="utf-8").splitlines()
+    hits = [ln for ln in lines if "STACK-PROBE" in ln]
+    assert len(hits) == 1  # 堆栈不产生裸行
+    assert "renpy_overlay.unraisable" in hits[0]
+    assert "Traceback" in hits[0]  # 堆栈内容也在同一物理行
