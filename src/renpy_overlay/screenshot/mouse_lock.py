@@ -45,7 +45,11 @@ import time
 from PyQt6.QtCore import QAbstractNativeEventFilter, QPoint, QTimer
 
 from .. import win32api
-from .hotkeys import MSG_HOTKEY_REGISTER_FAILED, parse_hotkey
+from .hotkeys import (
+    MSG_HOTKEY_REGISTER_FAILED,
+    StuckModifierReleaser,
+    parse_hotkey,
+)
 from .mouse_lock_indicator import MouseLockIndicatorWindow
 from .mouse_lock_window import MouseLockRegionWindow
 
@@ -158,6 +162,7 @@ class MouseLockController(QAbstractNativeEventFilter):
         super().__init__()
         self._notify = notify
         self._escape_hotkey = escape_hotkey
+        self._escape_modifiers = 0  # 逃脱热键修饰符掩码（注册成功后记录）
         self._region_window_factory = region_window_factory or MouseLockRegionWindow
         self._indicator_factory = indicator_factory or MouseLockIndicatorWindow
         self._clip_cursor = clip_cursor or win32api.clip_cursor
@@ -174,6 +179,7 @@ class MouseLockController(QAbstractNativeEventFilter):
         self._region_window = None
         self._indicator_window = None
         self._registered = False  # 逃脱热键是否已注册
+        self._modifier_releaser = StuckModifierReleaser()  # 吞键 key-up 补发
         self._region_rect: tuple[int, int, int, int] | None = None  # 锁定矩形快照
         self._mouse_hook: int | None = None  # WH_MOUSE_LL 钩子句柄
         self._mouse_hook_proc = None  # 回调引用防垃圾回收
@@ -439,6 +445,16 @@ class MouseLockController(QAbstractNativeEventFilter):
         modifiers, vk = parsed
         if win32api.register_hotkey(MOUSE_LOCK_HOTKEY_ID, modifiers, vk):
             self._registered = True
+            self._escape_modifiers = modifiers
+            if modifiers & win32api.MOD_CONTROL:
+                # 不进标题窗提示链（避免覆盖锁定生效时的逃脱键提示），
+                # 仅日志留档：Ren'Py 内触发后将持续快进（引擎级行为，
+                # 与注入无关），建议更换为不含 Ctrl 的组合
+                logger.warning(
+                    "逃脱快捷键 %r 含 Ctrl：Ren'Py 内触发后将持续快进"
+                    "（引擎级行为，与注入无关），建议更换为不含 Ctrl 的组合",
+                    self._escape_hotkey,
+                )
         else:
             logger.warning(
                 "全局热键注册失败（%r，热键 id=%#x），可能已被其它程序占用",
@@ -451,6 +467,7 @@ class MouseLockController(QAbstractNativeEventFilter):
         if self._registered:
             win32api.unregister_hotkey(MOUSE_LOCK_HOTKEY_ID)
             self._registered = False
+        self._escape_modifiers = 0
 
     def _install_filter(self) -> None:
         from PyQt6.QtWidgets import QApplication  # noqa: PLC0415 - 惰性导入
@@ -482,6 +499,9 @@ class MouseLockController(QAbstractNativeEventFilter):
         if not self._enabled:
             return
         if key_id == MOUSE_LOCK_HOTKEY_ID:
+            # RegisterHotKey 触发后系统吞掉组合键的 key-up，前台应用的
+            # Ctrl/Alt 会停在“按下”；分发后立即安排补发复位
+            self._modifier_releaser.release(self._escape_modifiers)
             self._escape()
 
     # ---- 内部 ---------------------------------------------------------------

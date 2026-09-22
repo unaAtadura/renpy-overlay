@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QAbstractNativeEventFilter
+from PyQt6.QtCore import QAbstractNativeEventFilter, QTimer
 
 from .. import win32api
 from .window import FRAME_COLORS
@@ -38,6 +38,12 @@ MSG_MAIN_ON = "主开关状态：开启"
 MSG_MAIN_OFF = "主开关状态：关闭"
 MSG_WINDOW_NOT_LOCKED = "请退出快捷键模式，双击锁定相应的截图窗口"
 MSG_HOTKEY_REGISTER_FAILED = "全局快捷键注册失败，请尝试更换快捷键，查阅日志获取详细信息"
+
+#: 主开关键含 Ctrl 时的提示。背景（A/B 对照实测结论）：Ren'Py 引擎对
+#: 「Ctrl 参与的组合键触发」不会因松开而停止快进（引擎输入栈行为，
+#: 与是否注入/热键拦截无关，未注入时 key-up 本就完整到达仍复现），
+#: 程序侧补发 key-up 无法治愈，只能提示用户更换快捷键规避
+MSG_CTRL_HINT = "提示：主开关键含 Ctrl，Ren'Py 内触发后将持续快进，建议更换为不含 Ctrl 的组合"
 
 # ---- 默认快捷键 ---------------------------------------------------------------
 
@@ -100,6 +106,17 @@ def parse_hotkey(text: str) -> tuple[int, int] | None:
     return modifiers, vk
 
 
+def hotkey_contains_ctrl(spec: str) -> bool:
+    """快捷键描述串是否含 Ctrl（Ren'Py 快进冲突提示的判定，纯函数）。
+
+    背景：Ren'Py 的 Ctrl 快进在「Ctrl 参与的组合键触发」后不会因松开
+    而停止（引擎输入栈行为，key-up 完整到达也不停，与注入无关），
+    主开关键避开 Ctrl 即可规避。
+    """
+    parsed = parse_hotkey(spec)
+    return parsed is not None and bool(parsed[0] & win32api.MOD_CONTROL)
+
+
 #: 窗口快捷键分发决策结果（见 :func:`hotkey_outcome`）
 OUTCOME_TRIGGER = "trigger"  # 主开关开且目标已记录：触发截图翻译
 OUTCOME_NOT_LOCKED = "not_locked"  # 主开关开但目标未创建/未双击锁定
@@ -116,6 +133,95 @@ def hotkey_outcome(main_on: bool, target_recorded: bool) -> str:
     if not main_on:
         return OUTCOME_MAIN_OFF
     return OUTCOME_TRIGGER if target_recorded else OUTCOME_NOT_LOCKED
+
+
+# ---- 修饰键 key-up 补发（RegisterHotKey 吞 key-up 的根因修复） ------------------
+
+#: 修饰符掩码 → 组合内需补发 key-up 的左右键变体 (vk, 是否扩展键)。
+#: 按变体精确补发（SendInput+扫描码）：与按下时系统投递的 VK_LCONTROL
+#: 等完全对称；通用 VK_CONTROL、扫描码 0 的合成 up 无法与之配对。
+_MODIFIER_VARIANTS_BY_MOD = {
+    win32api.MOD_CONTROL: ((win32api.VK_LCONTROL, False), (win32api.VK_RCONTROL, True)),
+    win32api.MOD_ALT: ((win32api.VK_LMENU, False), (win32api.VK_RMENU, True)),
+    win32api.MOD_SHIFT: ((win32api.VK_LSHIFT, False), (win32api.VK_RSHIFT, False)),
+    win32api.MOD_WIN: ((win32api.VK_LWIN, True), (win32api.VK_RWIN, True)),
+}
+
+#: 用户仍物理按住时的补发重试周期（毫秒）
+MODIFIER_RELEASE_RETRY_MS = 50
+
+
+def pending_stuck_modifiers(modifiers: int) -> int:
+    """按左右变体补发物理已松开修饰键的 key-up，返回仍按住需延后的掩码。
+
+    RegisterHotKey 触发 WM_HOTKEY 后系统会吞掉组合键的 key-up（此前的
+    key-down 已正常送达前台应用），前台应用的键状态从此停在“按下”——
+    表现为 Ctrl/Alt 一直按住（Ren'Py 的 Ctrl 快进不停）。对 GetAsyncKeyState
+    显示物理已松开的变体补发 scancode 形态的 key-up（见
+    :func:`renpy_overlay.win32api.send_key_up`）；任一变体仍物理按住则
+    整个修饰符延后（不打扰按住期间的热键再匹配，例如按住 Ctrl+Alt
+    连按主键反复切换），交由 :class:`StuckModifierReleaser` 周期复查。
+    """
+    pending = 0
+    for mask, variants in _MODIFIER_VARIANTS_BY_MOD.items():
+        if not modifiers & mask:
+            continue
+        held = [vk for vk, _extended in variants if win32api.get_async_key_state(vk)]
+        if held:
+            pending |= mask
+            logger.debug(
+                "修饰键掩码 %#x：变体 %s 仍被物理按住，补发延后",
+                mask,
+                ", ".join(f"{vk:#06x}" for vk in held),
+            )
+            continue
+        for vk, extended in variants:
+            win32api.send_key_up(vk, extended=extended)
+        logger.debug(
+            "修饰键掩码 %#x：物理已全部松开，已补发变体 %s",
+            mask,
+            ", ".join(f"{vk:#06x}" for vk, _extended in variants),
+        )
+    return pending
+
+
+class StuckModifierReleaser:
+    """被全局热键吞掉的修饰键 key-up 补发器（纯组合，不依赖 QObject 父子）。
+
+    宿主状态机是 QAbstractNativeEventFilter（非 QObject），无法作 parent，
+    宿主须自行保持本实例引用防垃圾回收。WM_HOTKEY 分发后调用 :meth:`release`
+    传入该热键的修饰符掩码：物理已松开的键立即补发 key-up；仍按住的经
+    QTimer（``MODIFIER_RELEASE_RETRY_MS``）周期复查 GetAsyncKeyState，待
+    物理松开再补发。只注入 key-up，对一直按住的用户无感知。
+    """
+
+    def __init__(self) -> None:
+        self._pending = 0  # 尚未补发成功的修饰符掩码
+        self._retries = 0  # 已执行的复查轮次（诊断日志用）
+        self._timer = QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(MODIFIER_RELEASE_RETRY_MS)
+        self._timer.timeout.connect(self._flush)
+
+    def release(self, modifiers: int) -> None:
+        """登记一组修饰符并立即尝试补发（多次调用按掩码合并）。"""
+        self._pending |= modifiers
+        self._flush()
+
+    def _flush(self) -> None:
+        self._pending = pending_stuck_modifiers(self._pending)
+        if self._pending:  # 用户仍按住：周期复查直至物理松开
+            self._retries += 1
+            logger.debug(
+                "修饰键补发第 %d 次复查仍有按住（掩码=%#x），%d ms 后重试",
+                self._retries,
+                self._pending,
+                MODIFIER_RELEASE_RETRY_MS,
+            )
+            self._timer.start()
+        elif self._retries:
+            logger.debug("修饰键 key-up 补发完成（经 %d 轮复查）", self._retries)
+            self._retries = 0
 
 
 # ---- 状态机：模式开关 + 全局热键分发 -------------------------------------------
@@ -156,6 +262,8 @@ class HotkeyMode(QAbstractNativeEventFilter):
         self._main_on = False  # 主开关：模式开启后才可用，默认关闭
         self._registered: list[int] = []  # 已成功注册的热键 id
         self._window_by_id: dict[int, object] = {}  # 窗口键 id → 已锁定窗口/None
+        self._modifiers_by_id: dict[int, int] = {}  # 已注册热键 id → 修饰符掩码
+        self._modifier_releaser = StuckModifierReleaser()  # 吞键 key-up 补发
 
     @property
     def enabled(self) -> bool:
@@ -183,6 +291,10 @@ class HotkeyMode(QAbstractNativeEventFilter):
             register_failed = self._register_all()
             self._install_filter()
             self._notify(MSG_MODE_ON)
+            if hotkey_contains_ctrl(self._main_hotkey):
+                # 提示放失败提示之前：覆盖式出口下注册失败提示（最重要）
+                # 最终胜出；仅主开关键检查——窗口键是纯数字无修饰符
+                self._notify(MSG_CTRL_HINT)
             if register_failed:
                 # 同一轮多个失败只提示一次（详细原因逐条在日志）；提示放在
                 # 模式开启提示之后发出，覆盖式出口最终展示的是失败提示
@@ -236,6 +348,7 @@ class HotkeyMode(QAbstractNativeEventFilter):
             modifiers, vk = parsed
             if win32api.register_hotkey(key_id, modifiers, vk):
                 self._registered.append(key_id)
+                self._modifiers_by_id[key_id] = modifiers
             else:
                 # 详细信息（哪个快捷键、id、常见原因）留给日志，标题窗只
                 # 提示一次统一文案
@@ -251,6 +364,7 @@ class HotkeyMode(QAbstractNativeEventFilter):
         for key_id in self._registered:
             win32api.unregister_hotkey(key_id)
         self._registered = []
+        self._modifiers_by_id = {}
 
     def _install_filter(self) -> None:
         from PyQt6.QtWidgets import QApplication  # noqa: PLC0415 - 惰性导入
@@ -283,6 +397,16 @@ class HotkeyMode(QAbstractNativeEventFilter):
     def _dispatch(self, key_id: int) -> None:
         if not self._enabled:
             return
+        modifiers = self._modifiers_by_id.get(key_id)
+        logger.debug(
+            "WM_HOTKEY 分发：热键 id=%#x，修饰符掩码=%#x",
+            key_id,
+            modifiers or 0,
+        )
+        if modifiers is not None:
+            # RegisterHotKey 触发后系统吞掉组合键的 key-up，前台应用的
+            # Ctrl/Alt 会停在“按下”；分发后立即安排补发复位
+            self._modifier_releaser.release(modifiers)
         if key_id == hotkey_id(0):
             self._main_on = not self._main_on
             if self._main_on:

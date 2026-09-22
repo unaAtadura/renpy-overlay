@@ -29,7 +29,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
       "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
       "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
-      "hotkey_main": "ctrl+alt+p",        # 快捷键模式主开关键（全局热键，Ctrl+Alt+P）
+      "hotkey_main": "ctrl+alt+p",        # 快捷键模式主开关键（全局热键，Ctrl+Alt+P；含 Ctrl 的组合在 Ren'Py 内触发后会持续快进，可换如 alt+f9）
       "hotkey_window_1": "1",             # 红色截图窗口的全局热键
       "hotkey_window_2": "2",             # 橙色截图窗口的全局热键
       "hotkey_window_3": "3",             # 黄色截图窗口的全局热键
@@ -38,7 +38,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "hotkey_window_6": "6",             # 蓝色截图窗口的全局热键
       "hotkey_window_7": "7",             # 紫色截图窗口的全局热键
       "hotkey_window_8": "8",             # 黑色截图窗口的全局热键
-      "hotkey_mouse_escape": "ctrl+alt+o", # 锁鼠标区域的逃脱快捷键（全局热键）
+      "hotkey_mouse_escape": "ctrl+alt+o", # 锁鼠标区域的逃脱快捷键（全局热键；含 Ctrl 在 Ren'Py 内触发后会持续快进，可换如 alt+f10）
       "api_base_url_stanby": "",          # 备选 API 链路地址；留空即不启用备选链路
       "model_stanby": "",                 # 备选链路的文本模型（留空则自动发现）
       "api_key_stanby": "",               # 备选链路的 API Key（留空则不携带鉴权头）

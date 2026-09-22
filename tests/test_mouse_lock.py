@@ -216,12 +216,14 @@ def _make_controller(
 
 @pytest.fixture()
 def registered_ids(monkeypatch):
-    """假热键注册表：记录注册 id，unregister 同步移除。"""
+    """假热键注册表：记录注册 id，unregister 同步移除；修饰键补发离线化。"""
     ids: list[int] = []
     monkeypatch.setattr(
         win32api, "register_hotkey", lambda key_id, _mod, _vk: ids.append(key_id) or True
     )
     monkeypatch.setattr(win32api, "unregister_hotkey", ids.remove)
+    monkeypatch.setattr(win32api, "get_async_key_state", lambda _vk: False)
+    monkeypatch.setattr(win32api, "send_key_up", lambda _vk, **_kw: None)
     return ids
 
 
@@ -392,6 +394,7 @@ def test_reassert_silent_when_readback_matches(registered_ids, caplog):
     controller.set_enabled(True)
     regions[0].double_click()
     clip.calls.clear()
+    caplog.clear()  # 清掉注册期“逃脱键含 Ctrl”的告警，只关注 _reassert 阶段
     with caplog.at_level("WARNING", logger="renpy_overlay.screenshot.mouse_lock"):
         controller._reassert()
     assert clip.calls == [_REGION_RECT]
@@ -411,6 +414,37 @@ def test_escape_hotkey_releases_and_restores_region(registered_ids):
     assert indicators[0].hidden_indicator == 1 and indicators[0].deleted == 1
     assert regions[0].shown == 2  # 恢复显示（enable 1 次 + 逃脱后 1 次）
     assert notices == [escape_message(DEFAULT_MOUSE_ESCAPE_HOTKEY)]  # 解锁无新提示（需求）
+
+
+def test_escape_dispatch_releases_hotkey_modifiers(registered_ids, monkeypatch):
+    """逃脱热键（ctrl+alt+o）分发后按左右变体补发 Ctrl/Alt 的 key-up。"""
+    controller, _notices, regions, _indicators, _clip = _make_controller()
+    controller.set_enabled(True)
+    regions[0].double_click()
+    released: list[int] = []
+    monkeypatch.setattr(win32api, "send_key_up", lambda vk, **_kw: released.append(vk))
+    controller._dispatch(MOUSE_LOCK_HOTKEY_ID)
+    assert released == [
+        win32api.VK_LCONTROL,
+        win32api.VK_RCONTROL,
+        win32api.VK_LMENU,
+        win32api.VK_RMENU,
+    ]
+
+
+def test_escape_unregister_resets_escape_modifiers(registered_ids, monkeypatch):
+    """逃脱热键注销后：修饰符掩码清零，重复分发不再补发。"""
+    controller, _notices, _regions, _indicators, _clip = _make_controller()
+    controller.set_enabled(True)
+    assert controller._escape_modifiers == (
+        win32api.MOD_CONTROL | win32api.MOD_ALT
+    )
+    controller.set_enabled(False)
+    assert controller._escape_modifiers == 0
+    released: list[int] = []
+    monkeypatch.setattr(win32api, "send_key_up", lambda vk, **_kw: released.append(vk))
+    controller._dispatch(MOUSE_LOCK_HOTKEY_ID)  # 功能未开启：早退，无补发
+    assert released == []
 
 
 def test_escape_without_engagement_is_noop(registered_ids):

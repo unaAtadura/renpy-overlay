@@ -683,6 +683,124 @@ def unregister_hotkey(hotkey_id: int) -> None:
         pass
 
 
+#: 修饰键虚拟键码与 SendInput 键事件标志（与 win32con 同值）
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+VK_LSHIFT = 0xA0
+VK_RSHIFT = 0xA1
+VK_LCONTROL = 0xA2
+VK_RCONTROL = 0xA3
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+#: MapVirtualKey 映射方向：虚拟键码 → 扫描码
+MAPVK_VK_TO_VSC = 0
+
+INPUT_KEYBOARD = 1
+
+
+class KEYBDINPUT(ctypes.Structure):
+    """SendInput 键盘事件结构（scancode 路径注入所需）。"""
+
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    """INPUT 联合的对齐成员（仅保证联合尺寸正确，注入不使用）。"""
+
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    """INPUT 的事件联合（键盘 / 鼠标取大者对齐）。"""
+
+    _fields_ = [("ki", KEYBDINPUT), ("mi", _MOUSEINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    """Win32 INPUT 结构（SendInput 的数组元素）。"""
+
+    _anonymous_ = ("u",)
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
+
+
+def get_async_key_state(vk: int) -> bool:
+    """物理层异步键状态：该键当前是否被按下（GetAsyncKeyState 最高位）。
+
+    异步状态由系统原始输入线程按物理按键维护，不受目标线程消息队列吞键
+    影响——用于区分“物理已松开但 key-up 消息被全局热键吞掉”与“用户
+    仍按住”。
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+    except OSError:  # pragma: no cover
+        return False
+
+
+def send_key_up(vk: int, *, extended: bool = False) -> None:
+    """注入一枚物理形态的 key-up（SendInput，scancode 路径，不带 key-down）。
+
+    以 KEYEVENTF_SCANCODE 按**扫描码**注入（vk 经 MapVirtualKey 转换），
+    系统将其视作与物理按键完全对称的释放：按下时投递的 VK_LCONTROL 等
+    左右变体、RawInput/按扫描码解析的游戏引擎都能配对。此前 keybd_event
+    以通用 VK_CONTROL、扫描码 0 注入的合成事件与按下不对称，会被按
+    扫描码解析的引擎丢弃（实测 ctrl+alt+t 后游戏内 Ctrl 持续快进）。
+    ``extended``：右 Ctrl/Alt/Win 与左右 Win 等扩展键须置位
+    KEYEVENTF_EXTENDEDKEY。调用前提是 GetAsyncKeyState 已确认物理松开，
+    注入只为把前台应用键状态里“停在按下”的修饰键复位。
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return
+    scan = ctypes.windll.user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC)
+    flags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP
+    if extended:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    item = INPUT(type=INPUT_KEYBOARD)
+    item.ki = KEYBDINPUT(0, scan & 0xFFFF, flags, 0, 0)
+    try:
+        sent = ctypes.windll.user32.SendInput(
+            1, ctypes.byref(item), ctypes.sizeof(INPUT)
+        )
+    except OSError:  # pragma: no cover
+        return
+    if sent == 1:
+        logger.debug(
+            "已注入 key-up：vk=%#x sc=%#x extended=%s flags=%#x",
+            vk,
+            scan,
+            extended,
+            flags,
+        )
+    else:
+        logger.warning(
+            "注入 key-up 失败（SendInput 返回 %d）：vk=%#x sc=%#x extended=%s",
+            sent,
+            vk,
+            scan,
+            extended,
+        )
+
+
 # ---------------------------------------------------------------- 鼠标活动范围
 
 
