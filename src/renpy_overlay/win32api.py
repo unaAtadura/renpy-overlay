@@ -683,6 +683,128 @@ def unregister_hotkey(hotkey_id: int) -> None:
         pass
 
 
+# ---------------------------------------------------------------- 鼠标活动范围
+
+
+# 低级鼠标钩子：消息号与点击类事件集合（与 win32con 同值）
+WH_MOUSE_LL = 14
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
+WM_MOUSEWHEEL = 0x020A
+WM_MOUSEHWHEEL = 0x020E
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    """WH_MOUSE_LL 钩子回调的 lParam 结构（光标物理坐标 pt 等）。"""
+
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+if _IS_WINDOWS:  # pragma: no cover - 分支本身仅平台差异
+    #: WH_MOUSE_LL 回调类型（回调实例必须保持引用，防垃圾回收）。
+    #: 原型必须与 Win32 的 LowLevelMouseProc(int nCode, WPARAM, LPARAM)
+    #: 三参完全一致 —— 缺 nCode 时 ctypes 按两参解栈，bound method 收不到
+    #: lparam，每次鼠标事件都抛 TypeError 并被 ctypes 忽略（实测缺陷：
+    #: 钩子逻辑完全不执行且报错只打 stderr 不进日志）
+    LOWLEVEL_MOUSE_PROC = ctypes.WINFUNCTYPE(
+        ctypes.c_ssize_t,
+        wintypes.INT,  # nCode
+        wintypes.WPARAM,  # wParam：鼠标消息号（WM_MOUSEMOVE 等）
+        wintypes.LPARAM,  # lParam：MSLLHOOKSTRUCT 指针
+    )
+else:  # pragma: no cover
+    LOWLEVEL_MOUSE_PROC = None
+
+
+def set_mouse_hook(callback) -> int | None:
+    """安装 WH_MOUSE_LL 全系统低级鼠标钩子；返回钩子句柄，失败返回 None。
+
+    ``callback`` 须为 :data:`LOWLEVEL_MOUSE_PROC` 包装的回调（调用方保持
+    引用防 GC）；钩子回调在安装线程执行，安装线程必须有消息循环（Qt
+    主线程满足）。低级钩子位于系统输入分发链：对远程桌面/驱动注入产生
+    的输入事件同样生效（ClipCursor 被绕过时的双保险）。失败（权限/会话
+    隔离等）返回 None，由调用方记日志降级。
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        handle = user32.SetWindowsHookExW(WH_MOUSE_LL, callback, None, 0)
+        return int(handle) if handle else None
+    except OSError:  # pragma: no cover
+        return None
+
+
+def unset_mouse_hook(hook: int | None) -> None:
+    """卸载低级鼠标钩子（未安装时静默忽略）。"""
+    if not _IS_WINDOWS or not hook:  # pragma: no cover
+        return
+    try:
+        ctypes.windll.user32.UnhookWindowsHookEx(ctypes.c_void_p(hook))
+    except OSError:  # pragma: no cover
+        pass
+
+
+def call_next_mouse_hook(hook: int | None, ncode: int, wparam: int, lparam: int) -> int:
+    """把鼠标钩子事件传给钩子链的下一环（返回链路结果）。"""
+    if not _IS_WINDOWS or not hook:  # pragma: no cover
+        return 0
+    try:
+        user32 = ctypes.windll.user32
+        user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        return int(user32.CallNextHookEx(hook, ncode, wparam, lparam))
+    except OSError:  # pragma: no cover
+        return 0
+
+
+def clip_cursor(rect: tuple[int, int, int, int] | None) -> bool:
+    """限制鼠标光标活动范围到 ``rect``（物理像素 ltrb）；``None`` 解除限制。
+
+    ClipCursor 是系统级的临时限制：其它进程可再次调用覆盖，Alt+Tab 等
+    系统行为也会清除 —— 调用方（MouseLockController）以定时器周期重申。
+    失败返回 False（参数非法 / 权限不足），由调用方记日志降级。
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        if rect is None:
+            return bool(user32.ClipCursor(None))
+        left, top, right, bottom = (int(value) for value in rect)
+        box = wintypes.RECT(left, top, right, bottom)
+        return bool(user32.ClipCursor(ctypes.byref(box)))
+    except OSError:  # pragma: no cover
+        return False
+
+
+def get_clip_cursor() -> tuple[int, int, int, int] | None:
+    """读取当前生效的鼠标限制区域；未限制时返回 None（诊断 / 测试用）。"""
+    if not _IS_WINDOWS:  # pragma: no cover
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        box = wintypes.RECT()
+        if not user32.GetClipCursor(ctypes.byref(box)):
+            return None
+        return (box.left, box.top, box.right, box.bottom)
+    except OSError:  # pragma: no cover
+        return None
+
+
 def enable_dpi_awareness() -> str:
     """开启 Per-Monitor DPI 感知，保证 GetWindowRect 拿到物理像素、与游戏窗口对齐。"""
     if not _IS_WINDOWS:  # pragma: no cover
