@@ -10,6 +10,9 @@
 - :mod:`window`     —— 单个截图窗口（8 色边框识别框，PyQt6）
 - :mod:`frame_overlay` —— 快捷键模式框选提示覆盖层（整窗穿透线框，PyQt6）
 - :mod:`hotkeys`    —— 快捷键模式（全局热键主开关 + 8 窗口键，联动布局锁定）
+- :mod:`mouse_lock_window` —— 锁鼠标区域的范围框选窗口（灰边框八向拉伸）
+- :mod:`mouse_lock_indicator` —— 锁鼠标区域锁定态提示窗口（等大小穿透）
+- :mod:`mouse_lock` —— 锁鼠标区域控制器（ClipCursor 限制 + 逃脱热键）
 - :mod:`history_window` —— 截图历史浏览窗口（缩略图条带 + 原图 + 译文）
 - :mod:`chat_history_window` —— 对话历史浏览窗口（两列表格：查找/删除/复制）
 - :mod:`viewer_window`  —— 原图全尺寸查看弹窗（拖拽移动，单击关闭）
@@ -27,6 +30,9 @@ from .chat_window import AIChatWindow, color_label, color_swatch_pixmap
 from .frame_overlay import FrameOverlayLayer
 from .history_window import ScreenshotHistoryWindow
 from .hotkeys import HotkeyMode
+from .mouse_lock import MouseLockController
+from .mouse_lock_indicator import MouseLockIndicatorWindow
+from .mouse_lock_window import MouseLockRegionWindow
 from .processing import (
     constrain_aspect_ratio,
     encode_jpeg_base64,
@@ -46,6 +52,9 @@ __all__ = [
     "FrameOverlayLayer",
     "ImageViewerWindow",
     "HotkeyMode",
+    "MouseLockController",
+    "MouseLockIndicatorWindow",
+    "MouseLockRegionWindow",
     "ScreenshotHistoryWindow",
     "ScreenshotStore",
     "ScreenshotWindow",

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import QApplication, QMenu
 
 from .screenshot.frame_overlay import FrameOverlayLayer
 from .screenshot.hotkeys import HOTKEY_MODE_OFF_TEXT, HOTKEY_MODE_ON_TEXT
+from .screenshot.mouse_lock import MOUSE_LOCK_OFF_TEXT, MOUSE_LOCK_ON_TEXT
 from .screenshot.window import FRAME_COLORS, ScreenshotWindow
 
 logger = logging.getLogger("renpy_overlay.quick_menu")
@@ -57,6 +58,7 @@ class QuickMenu:
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
+        self._mouse_lock = None  # 锁鼠标区域（宿主经 attach_mouse_lock 注入）
         # 框选提示覆盖层（锁定期线框）：惰性创建；工厂可注入（离线测试用）
         self._frame_overlay = None
         self._frame_overlay_factory = frame_overlay_factory or FrameOverlayLayer
@@ -85,6 +87,13 @@ class QuickMenu:
             hotkey_mode_action = menu.addAction(
                 HOTKEY_MODE_ON_TEXT if self._hotkey_mode.enabled else HOTKEY_MODE_OFF_TEXT
             )
+        # 锁鼠标区域（需求：快捷键模式之下、与听歌识曲的分割线之上，
+        # 与快捷键模式按钮间不需要分割线）
+        mouse_lock_action = None
+        if self._mouse_lock is not None:
+            mouse_lock_action = menu.addAction(
+                MOUSE_LOCK_ON_TEXT if self._mouse_lock.enabled else MOUSE_LOCK_OFF_TEXT
+            )
         menu.addSeparator()
         song_action = menu.addAction("听歌识曲")
         menu.addSeparator()
@@ -105,6 +114,8 @@ class QuickMenu:
             self.destroy_latest()
         elif hotkey_mode_action is not None and chosen is hotkey_mode_action:
             self._hotkey_mode.toggle()
+        elif mouse_lock_action is not None and chosen is mouse_lock_action:
+            self._mouse_lock.toggle()
         elif chosen is song_action and callable(self._on_recognize_song):
             self._on_recognize_song()
         elif chosen is chat_action and callable(self._on_open_chat):
@@ -218,6 +229,16 @@ class QuickMenu:
         宿主按「先建菜单、再附着模式」的顺序组装。
         """
         self._hotkey_mode = hotkey_mode
+
+    def attach_mouse_lock(self, mouse_lock) -> None:
+        """注入锁鼠标区域控制器（菜单项按其状态显示文案与切换）。
+
+        同 attach_hotkey_mode 的附着约定。隔离不变量（需求）：控制器持有
+        自己的窗口，不进本实例的截图窗口池 —— lock_layout / unlock_layout /
+        locked_windows / hide_all / show_all / reassert_topmost 均只遍历池内
+        窗口，不会隐藏、恢复或捕获锁鼠标区域的任何窗口。
+        """
+        self._mouse_lock = mouse_lock
 
     def lock_layout(self) -> None:
         """锁定截图布局：整体隐藏全部截图窗口 + 屏蔽创建/销毁入口。
