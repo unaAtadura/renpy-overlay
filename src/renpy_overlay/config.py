@@ -38,6 +38,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "hotkey_window_6": "6",             # 蓝色截图窗口的全局热键
       "hotkey_window_7": "7",             # 紫色截图窗口的全局热键
       "hotkey_window_8": "8",             # 黑色截图窗口的全局热键
+      "hotkey_mouse_escape": "ctrl+alt+o", # 锁鼠标区域的逃脱快捷键（全局热键）
       "api_base_url_stanby": "",          # 备选 API 链路地址；留空即不启用备选链路
       "model_stanby": "",                 # 备选链路的文本模型（留空则自动发现）
       "api_key_stanby": "",               # 备选链路的 API Key（留空则不携带鉴权头）
@@ -54,6 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .screenshot.hotkeys import DEFAULT_MAIN_HOTKEY, DEFAULT_WINDOW_HOTKEYS, parse_hotkey
+from .screenshot.mouse_lock import DEFAULT_MOUSE_ESCAPE_HOTKEY
 from .translator import (
     DEFAULT_BASE_URL,
     DEFAULT_REASONING_EFFORT,
@@ -91,6 +93,8 @@ DEFAULT_RECORDING_DURATION = 8
 #: 快捷键模式：主开关键默认 Ctrl+Alt+P，窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
 DEFAULT_HOTKEY_MAIN = DEFAULT_MAIN_HOTKEY
 DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
+#: 锁鼠标区域：逃脱快捷键默认 Ctrl+Alt+O（功能开启期间全程注册的保底退出）
+DEFAULT_HOTKEY_MOUSE_ESCAPE = DEFAULT_MOUSE_ESCAPE_HOTKEY
 #: 备选 API 链路：主链路（api_base_url）不可达时自动切换；base_url 留空即不启用
 DEFAULT_API_BASE_URL_STANBY = ""
 DEFAULT_MODEL_STANBY = ""
@@ -149,6 +153,8 @@ class AppConfig:
     # 截图翻译快捷键模式（主开关 + 8 个窗口键，均为全局热键）
     hotkey_main: str = DEFAULT_HOTKEY_MAIN
     hotkey_windows: tuple[str, ...] = DEFAULT_HOTKEY_WINDOWS
+    # 锁鼠标区域（逃脱快捷键：功能开启期间全程注册的保底退出方式）
+    hotkey_mouse_escape: str = DEFAULT_HOTKEY_MOUSE_ESCAPE
     # 备选 API 链路（主链路不可达时自动切换；base_url 留空即不启用）
     api_base_url_stanby: str = DEFAULT_API_BASE_URL_STANBY
     model_stanby: str = DEFAULT_MODEL_STANBY
@@ -198,6 +204,7 @@ def _write_defaults(target: Path) -> None:
         "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "recording_duration": DEFAULT_RECORDING_DURATION,
         "hotkey_main": DEFAULT_HOTKEY_MAIN,
+        "hotkey_mouse_escape": DEFAULT_HOTKEY_MOUSE_ESCAPE,
         "api_base_url_stanby": DEFAULT_API_BASE_URL_STANBY,
         "model_stanby": DEFAULT_MODEL_STANBY,
         "api_key_stanby": DEFAULT_API_KEY_STANBY,
@@ -426,6 +433,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         ),
         hotkey_main=_read_hotkey(raw, "hotkey_main", DEFAULT_HOTKEY_MAIN),
         hotkey_windows=_read_hotkeys(raw),
+        hotkey_mouse_escape=_read_hotkey(
+            raw, "hotkey_mouse_escape", DEFAULT_HOTKEY_MOUSE_ESCAPE
+        ),
         api_base_url_stanby=_read_str(
             raw, "api_base_url_stanby", DEFAULT_API_BASE_URL_STANBY
         ),
@@ -442,7 +452,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
         "chat_window（size=%dx%d），"
         "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s），"
-        "hotkeys（main=%r，windows=%r），"
+        "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
         "stanby（base_url=%s，model=%r，api_key=%s，screenshot_model=%r）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
@@ -469,6 +479,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         target,
         app_config.hotkey_main,
         app_config.hotkey_windows,
+        app_config.hotkey_mouse_escape,
         app_config.api_base_url_stanby or "<未启用>",
         app_config.model_stanby,
         "已设置" if app_config.api_key_stanby else "未设置",

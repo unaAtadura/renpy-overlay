@@ -50,6 +50,7 @@ from .screenshot import (
     AIChatWindow,
     ChatHistoryWindow,
     HotkeyMode,
+    MouseLockController,
     ScreenshotHistoryWindow,
     capture_region,
     constrain_aspect_ratio,
@@ -860,6 +861,13 @@ class StreamOverlayWindow:
             window_hotkeys=self._config.hotkey_windows,
         )
         self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
+        # 锁鼠标区域：ClipCursor 限制 + 逃脱全局热键（保底退出）；窗口由
+        # 控制器自持，不进截图窗口池，与布局锁定三组接口互不影响
+        self._mouse_lock = MouseLockController(
+            notify=self._update_title,
+            escape_hotkey=self._config.hotkey_mouse_escape,
+        )
+        self._quick_menu.attach_mouse_lock(self._mouse_lock)
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
         self._chat_history_window: ChatHistoryWindow | None = None
@@ -979,6 +987,7 @@ class StreamOverlayWindow:
             self._chat_store.close()
             self._chat_store = None
         self._hotkey_mode.shutdown()
+        self._mouse_lock.shutdown()  # 必须先于退出解除 ClipCursor，否则鼠标被永久限制
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:

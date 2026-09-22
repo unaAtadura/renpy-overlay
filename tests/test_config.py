@@ -41,6 +41,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "screenshot_model": "",
         "recording_duration": 8,
         "hotkey_main": "ctrl+alt+p",
+        "hotkey_mouse_escape": "ctrl+alt+o",
         "hotkey_window_1": "1",
         "hotkey_window_2": "2",
         "hotkey_window_3": "3",
@@ -175,6 +176,28 @@ def test_hotkey_invalid_type_falls_back(tmp_path):
     loaded = config.load_config(target)
     assert loaded.hotkey_main == "ctrl+alt+p"
     assert loaded.hotkey_windows[2] == "3"
+
+
+def test_hotkey_mouse_escape_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"hotkey_mouse_escape": "ctrl+alt+k"}), encoding="utf-8")
+    assert config.load_config(target).hotkey_mouse_escape == "ctrl+alt+k"
+
+
+def test_hotkey_mouse_escape_defaults_when_missing(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退默认 ctrl+alt+o
+    loaded = config.load_config(target)
+    assert loaded.hotkey_mouse_escape == "ctrl+alt+o"
+    assert loaded.hotkey_mouse_escape == config.DEFAULT_HOTKEY_MOUSE_ESCAPE
+
+
+def test_hotkey_mouse_escape_invalid_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    for bad in ("ctrl", "1+2", "foo", "ctrl+", 123, None):  # 格式非法与类型非法
+        target.write_text(json.dumps({"hotkey_mouse_escape": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.hotkey_mouse_escape == "ctrl+alt+o", f"{bad!r} 应回退默认"
 
 
 # ---------------------------------------------------------------- 备选 API 链路
