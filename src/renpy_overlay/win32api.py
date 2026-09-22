@@ -760,11 +760,22 @@ def unset_mouse_hook(hook: int | None) -> None:
 
 
 def call_next_mouse_hook(hook: int | None, ncode: int, wparam: int, lparam: int) -> int:
-    """把鼠标钩子事件传给钩子链的下一环（返回链路结果）。"""
+    """把鼠标钩子事件传给钩子链的下一环（返回链路结果）。
+
+    必须声明 64 位安全的 argtypes：无 argtypes 时 ctypes 把 Python int
+    按 C int（32 位）转换，而 lparam 是 MSLLHOOKSTRUCT 指针（64 位进程
+    中普遍 > 2^31），会间歇抛 OverflowError 且钩子链不被转发（实测缺陷）。
+    """
     if not _IS_WINDOWS or not hook:  # pragma: no cover
         return 0
     try:
         user32 = ctypes.windll.user32
+        user32.CallNextHookEx.argtypes = [
+            ctypes.c_void_p,  # hhk（低级钩子忽略，传句柄兼容）
+            ctypes.c_int,  # nCode
+            ctypes.c_size_t,  # wParam（UINT_PTR）
+            ctypes.c_ssize_t,  # lParam（LONG_PTR，指针宽）
+        ]
         user32.CallNextHookEx.restype = ctypes.c_ssize_t
         return int(user32.CallNextHookEx(hook, ncode, wparam, lparam))
     except OSError:  # pragma: no cover

@@ -389,9 +389,9 @@ class MouseLockController(QAbstractNativeEventFilter):
 
         回调在安装线程（Qt 主线程）执行，必须快速返回 —— 仅做几何判断
         与结构体坐标改写，日志经节流避免刷屏；逃脱热键走键盘链路，
-        不受本钩子影响。回调体内任何异常都被就地捕获并记入日志：
+        不受本钩子影响。整个回调体（含钩子链转发）都包在异常兑底内：
         ctypes 回调抛出的异常会被忽略（只打 stderr 不进日志）且返回零，
-        钩子逻辑将静默失效（实测缺陷）。
+        任何异常都就地记入日志并返回安全值，绝不向外层传播。
         """
         try:
             if ncode >= 0 and self._engaged and self._region_rect is not None:
@@ -409,9 +409,10 @@ class MouseLockController(QAbstractNativeEventFilter):
                     self._log_hook_throttled(
                         "范围外移动已钳回 %r -> %r", pt, clamped
                     )
-        except Exception:  # pragma: no cover - 防御：回调异常不得静默失效
+            return self._call_next_mouse_hook(self._mouse_hook, ncode, wparam, lparam)
+        except Exception:
             logger.exception("低级鼠标钩子回调异常，本次事件已放行")
-        return self._call_next_mouse_hook(self._mouse_hook, ncode, wparam, lparam)
+            return 0  # “未处理”语义：系统继续正常分发，事件流不中断
 
     def _log_hook_throttled(self, msg: str, *args) -> None:
         """钩子活动日志节流（高频事件下每 HOOK_LOG_INTERVAL_S 最多一条）。"""

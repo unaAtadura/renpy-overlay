@@ -559,7 +559,7 @@ def test_lowlevel_mouse_proc_signature_matches_win32():
 def test_on_mouse_hook_exception_degrades_to_pass_through(
     mouse_hook, registered_ids, caplog
 ):
-    """回调体内异常必须就地捕获：返回放行值并记入日志，不静默失效。"""
+    """回调体内（含转发）异常必须就地捕获：返回 0 放行并记日志，不外传播。"""
     controller, _notices, regions, _indicators, _clip = _make_controller()
     controller.set_enabled(True)
     regions[0].double_click()
@@ -568,18 +568,28 @@ def test_on_mouse_hook_exception_degrades_to_pass_through(
     def broken_outcome(*_args):
         raise RuntimeError("钩子决策异常")
 
-    controller._region_rect = (100, 200, 500, 400)
-    original_outcome = mouse_hook_outcome
     import renpy_overlay.screenshot.mouse_lock as ml
 
+    original_outcome = ml.mouse_hook_outcome
     ml.mouse_hook_outcome = broken_outcome  # 模拟决策路径抛异常
     try:
         with caplog.at_level("ERROR", logger="renpy_overlay.screenshot.mouse_lock"):
             result = controller._on_mouse_hook(0, win32api.WM_LBUTTONDOWN, lparam)
     finally:
         ml.mouse_hook_outcome = original_outcome
-    assert result == 7  # 异常路径也放行给钩子链（不返回零、不中断事件流）
+    assert result == 0  # “未处理”语义：系统继续正常分发，不向 ctypes 传播
+    assert mouse_hook["next_calls"] == []  # 异常路径不再转发钩子链
     assert any("钩子回调异常" in r.getMessage() for r in caplog.records)
+
+
+def test_call_next_mouse_hook_accepts_wide_lparam():
+    """回归：CallNextHookEx 已声明 64 位 argtypes，指针宽 lparam 不再溢出。
+
+    缺陷实测：无 argtypes 时 ctypes 按 C int（32 位）转换 lparam 指针值，
+    抛 OverflowError 且钩子链不被转发（终端刷屏、其它低级钩子被跳过）。
+    """
+    result = win32api.call_next_mouse_hook(0x1234, 0, 0x0201, 0x7FFF_FFFF_FFFF)
+    assert isinstance(result, int)
 
 
 def test_clamp_point_to_rect_nearest_inside():
