@@ -20,7 +20,24 @@ def _action(aid: str, label: str = "预构建翻译缓存", enabled=None) -> Bou
     return BoundAction(id=aid, label=label, on_click=lambda: None, enabled=enabled)
 
 
-# ---- 入口条宽度与去重 --------------------------------------------------------
+# ---- 弹窗纯函数（含整行点击切换勾选） ------------------------------------------
+
+
+def test_toggle_item_check_flips_state_both_ways():
+    """整行点击的翻转语义：勾选 ↔ 取消勾选，纯粹状态切换无副作用。"""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QListWidgetItem
+
+    from renpy_overlay.pretranslate_dialog import toggle_item_check
+
+    item = QListWidgetItem("game/script.rpy")
+    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+    item.setCheckState(Qt.CheckState.Unchecked)  # 需求：默认不勾选
+
+    toggle_item_check(item)  # 未勾选 → 勾选
+    assert item.checkState() == Qt.CheckState.Checked
+    toggle_item_check(item)  # 再点一次 → 取消勾选
+    assert item.checkState() == Qt.CheckState.Unchecked
 
 
 def test_strip_width_empty_single_and_multiple():

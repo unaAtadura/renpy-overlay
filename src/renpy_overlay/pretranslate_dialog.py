@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -51,6 +51,15 @@ _FINISHED_TEXT = {
 def collect_checked(items: list[tuple[str, bool]]) -> list[str]:
     """从 ``(路径, 勾选)`` 列表收集勾选路径，保持展示顺序（纯函数，测试用）。"""
     return [path for path, checked in items if checked]
+
+
+def toggle_item_check(item: QListWidgetItem) -> None:
+    """整行点击的复选框状态翻转（勾选 ↔ 取消勾选；纯状态切换，无副作用）。"""
+    item.setCheckState(
+        Qt.CheckState.Unchecked
+        if item.checkState() == Qt.CheckState.Checked
+        else Qt.CheckState.Checked
+    )
 
 
 def format_counting(discovered: int) -> str:
@@ -121,6 +130,8 @@ class PretranslateDialog(QDialog):
         layout.addWidget(self._file_list, 1)
         layout.addWidget(self._progress_label)
         layout.addLayout(buttons)
+        # 整行点击切换勾选：接管视口释放事件（拦截原生指示器切换，避免双重翻转）
+        self._file_list.viewport().installEventFilter(self)
         self._apply_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
@@ -135,6 +146,26 @@ class PretranslateDialog(QDialog):
         """
         event.ignore()  # 销毁交由宿主 _cancel_prebuild 的 deleteLater
         self._emit_cancel()
+
+    # ---- 整行点击切换勾选 ---------------------------------------------------
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        """列表视口的释放事件：选择态下条目行内任意位置翻转该行复选框。
+
+        拦截（返回 True）同时吃掉原生指示器的切换，避免双重翻转；点击落在
+        条目行之外（列表空白区）或非选择态（运行/终态整表禁用）时不处理，
+        交回默认行为。不产生解析/取消/隐藏等任何其它副作用。
+        """
+        if (
+            obj is self._file_list.viewport()
+            and self._state == STATE_SELECT
+            and event.type() == QEvent.Type.MouseButtonRelease
+        ):
+            item = self._file_list.itemAt(event.position().toPoint())
+            if item is not None:
+                toggle_item_check(item)
+                return True
+        return False
 
     # ---- 状态 ------------------------------------------------------------
 
