@@ -175,18 +175,27 @@ class QuickMenu:
         return True
 
     def hide_all(self) -> None:
-        """截图时短暂隐藏全部截图窗口（宿主负责流式窗口的隐藏）。"""
+        """抓屏前短暂隐藏全部截图窗口与框选提示窗口（宿主负责流式窗）。
+
+        布局锁定（快捷键模式）期间，框选提示窗口与截屏抓取范围精确重合、
+        边框画在其内沿，抓屏前必须一并隐藏，否则线框会被截进识别画面；
+        与截图窗口同一对 hide/show 原语，恢复侧见 :meth:`show_all`。
+        """
+        self._hide_frame_overlay()
         for window in self._windows:
             window.hide()
 
     def show_all(self) -> None:
-        """截图结束后恢复显示全部截图窗口。
+        """抓屏结束后恢复显示（翻译流程 finally 中无条件调用）。
 
-        布局锁定（快捷键模式）期间窗口被刻意整体隐藏，此时跳过恢复——
-        否则锁定期内触发一次截图翻译，本方法（翻译流程 finally 中无条件
-        调用）就会把窗口全部放出来。
+        布局锁定（快捷键模式）期间窗口被刻意整体隐藏，此时只恢复框选
+        提示窗口、不放出截图窗口——否则锁定期内触发一次截图翻译，本方法
+        就会把窗口全部放出来；提示窗口与隐藏侧成对恢复（抓屏后立即，
+        几何保持 hide 前状态），异常路径同样恢复。
         """
         if self._layout_locked:
+            if self._frame_overlay is not None:
+                self._frame_overlay.restore()
             return
         for window in self._windows:
             window.show()
@@ -198,7 +207,7 @@ class QuickMenu:
             window.deleteLater()
         self._windows.clear()
         if self._frame_overlay is not None:
-            self._frame_overlay.deleteLater()
+            self._frame_overlay.destroy()
             self._frame_overlay = None
 
     def reassert_topmost(self) -> None:
@@ -210,11 +219,8 @@ class QuickMenu:
                 win32api.set_topmost(window.hwnd)
             except Exception:  # pragma: no cover - 窗口销毁竞态
                 return
-        if self._frame_overlay is not None:  # 线框覆盖层随周期一并重申置顶
-            try:
-                win32api.set_topmost(self._frame_overlay.hwnd)
-            except Exception:  # pragma: no cover - 覆盖层销毁竞态
-                pass
+        if self._frame_overlay is not None:  # 框选提示窗口随周期一并重申置顶
+            self._frame_overlay.reassert_topmost()
 
     @property
     def window_count(self) -> int:
@@ -271,11 +277,12 @@ class QuickMenu:
         logger.info("截图布局已解锁（窗口已恢复显示，创建/销毁入口已恢复）")
 
     def _show_frame_overlay(self) -> None:
-        """在屏幕上绘制锁定期框选提示线框（覆盖层整窗穿透，不阻挡交互）。
+        """显示锁定期框选提示窗口组（整窗穿透，不阻挡交互）。
 
-        线框快照在锁定时刻生成：几何取各窗口 ``geometry()``（Qt 全局逻辑
+        快照在锁定时刻生成：几何取各窗口 ``geometry()``（Qt 全局逻辑
         坐标，进程 Per-Monitor DPI Aware、与物理像素一致），颜色取各自
-        ``border_color``；线框相对截图区域向外偏移绘制，不污染识别截图。
+        ``border_color``；提示窗口与截屏抓取范围精确一致（零偏移），
+        边框画在其内沿，抓屏时经 hide_all 隐藏、不污染识别截图。
         """
         frames = [
             (

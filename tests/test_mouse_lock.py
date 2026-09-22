@@ -486,12 +486,18 @@ def test_shutdown_releases_clip_and_unregisters_idempotent(registered_ids):
 
 
 class _FakeOverlay:
-    """框选提示覆盖层 stub（QuickMenu 布局锁定用）。"""
+    """框选提示窗口组 stub（QuickMenu 布局锁定用）。"""
 
     def show_frames(self, frames) -> None:
         self.frames = frames
 
     def hide_overlay(self) -> None:
+        pass
+
+    def restore(self) -> None:
+        pass
+
+    def destroy(self) -> None:
         pass
 
 

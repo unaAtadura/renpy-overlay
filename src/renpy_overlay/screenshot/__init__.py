@@ -8,7 +8,7 @@
 - :mod:`store`      —— screenshot.db 的 SQLite 存取（降级安全）
 - :mod:`chat_store` —— chat.db 的 SQLite 存取（AI 对话成对记录，降级安全）
 - :mod:`window`     —— 单个截图窗口（8 色边框识别框，PyQt6）
-- :mod:`frame_overlay` —— 快捷键模式框选提示覆盖层（整窗穿透线框，PyQt6）
+- :mod:`frame_overlay` —— 快捷键模式框选提示窗口组（每区域一个等大小穿透窗口，PyQt6）
 - :mod:`hotkeys`    —— 快捷键模式（全局热键主开关 + 8 窗口键，联动布局锁定）
 - :mod:`mouse_lock_window` —— 锁鼠标区域的范围框选窗口（灰边框八向拉伸）
 - :mod:`mouse_lock_indicator` —— 锁鼠标区域锁定态提示窗口（等大小穿透）

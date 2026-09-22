@@ -14,7 +14,7 @@ from PyQt6.QtGui import QColor
 
 from renpy_overlay import win32api
 from renpy_overlay.quick_menu import QuickMenu
-from renpy_overlay.screenshot.frame_overlay import FRAME_OFFSET_PX, offset_frame_rect
+from renpy_overlay.screenshot.frame_overlay import hint_geometry
 from renpy_overlay.screenshot.window import needs_reshow_after_flags_change
 
 
@@ -55,13 +55,14 @@ class _StubWindow:
 
 
 class _FakeOverlay:
-    """框选提示覆盖层鸭子接口 stub：记录快照与显示/隐藏次数。"""
+    """框选提示窗口组鸭子接口 stub：记录快照与显示/隐藏/恢复次数。"""
 
     def __init__(self) -> None:
         self.frames: list | None = None
         self.shown = 0
         self.hidden = 0
-        self.deleted = False
+        self.restored = 0
+        self.destroyed = False
 
     def show_frames(self, frames) -> None:
         self.frames = list(frames)
@@ -70,8 +71,11 @@ class _FakeOverlay:
     def hide_overlay(self) -> None:
         self.hidden += 1
 
-    def deleteLater(self) -> None:  # noqa: N802 - Qt 约定
-        self.deleted = True
+    def restore(self) -> None:
+        self.restored += 1
+
+    def destroy(self) -> None:
+        self.destroyed = True
 
 
 def _menu_with(*locked_flags: bool, overlay: _FakeOverlay | None = None) -> QuickMenu:
@@ -126,16 +130,15 @@ def test_show_all_respects_layout_lock():
     assert all(w.visible for w in menu._windows)
 
 
-# ---- 框选提示覆盖层：快照与生命周期 -------------------------------------------
+# ---- 框选提示窗口组：快照与生命周期 -------------------------------------------
 
 
-def test_offset_frame_rect_expands_outside_region():
-    # 线框中心线外扩 FRAME_OFFSET_PX（留缝 3 + 半线宽 1）：
-    # 内沿距截图区域 3px（含抗锯齿溢出仍在区域外），不污染识别截图
-    rect = (100, 200, 400, 300)
-    assert offset_frame_rect(rect, FRAME_OFFSET_PX) == (96, 196, 404, 304)
-    left, top, right, bottom = offset_frame_rect(rect)
-    assert left < rect[0] and top < rect[1] and right > rect[2] and bottom > rect[3]
+def test_hint_geometry_matches_capture_region_exactly():
+    # 提示窗口几何精确等于截屏区域：宽、高、位置零偏移（不外扩也不内缩），
+    # 提示框所标示的范围即实际截屏范围
+    assert hint_geometry((100, 200, 400, 300)) == QRect(100, 200, 300, 100)
+    # 退化矩形钳制为最小 1x1，不产生负尺寸窗口
+    assert hint_geometry((100, 200, 100, 200)) == QRect(100, 200, 1, 1)
 
 
 def test_lock_layout_shows_frame_overlay_with_snapshot():
@@ -145,12 +148,36 @@ def test_lock_layout_shows_frame_overlay_with_snapshot():
     assert overlay.shown == 1
     assert overlay.frames is not None and len(overlay.frames) == 1
     rect, color = overlay.frames[0]
-    # 快照取窗口几何（全局逻辑坐标 ltrb）与各自边框色
+    # 快照取窗口几何（全局逻辑坐标 ltrb）与各自边框色，零偏移——
+    # 截屏抓取范围（隐藏窗口的 GetWindowRect）即该矩形本身
     assert rect == (100, 200, 400, 400)
     assert isinstance(color, QColor)
-    # 线框整体绘制在截图区域之外（偏移规则）
-    fl, ft, fr, fb = offset_frame_rect(rect)
-    assert fl < rect[0] and ft < rect[1] and fr > rect[2] and fb > rect[3]
+
+
+def test_capture_cycle_in_layout_lock_hides_and_restores_frame_overlay():
+    # 快捷键模式（布局锁定）触发截图翻译的时序（需求）：hide_all（抓屏前，
+    # request_screenshot_translation 调用）必须连同提示窗口一起隐藏，
+    # show_all（抓屏收尾 finally 调用）立即恢复提示窗口且不放出截图窗口
+    menu = _menu_with(True)
+    menu.lock_layout()
+    overlay = menu._frame_overlay
+    menu.hide_all()
+    assert overlay.hidden == 1  # 抓屏前：线框随之隐藏，不进入识别截图
+    menu.show_all()
+    assert overlay.restored == 1  # 抓屏后：立即恢复显示
+    assert all(not w.visible for w in menu._windows)  # 截图窗口仍保持隐藏
+
+
+def test_capture_cycle_without_layout_lock_does_not_show_frame_overlay():
+    # 普通单击截屏（未锁定布局）：hide_all/show_all 不复活提示窗口
+    menu = _menu_with(False)
+    menu.lock_layout()
+    menu.unlock_layout()
+    overlay = menu._frame_overlay
+    menu.hide_all()
+    menu.show_all()
+    assert overlay.shown == 1
+    assert menu._windows[0].visible  # 窗口照常恢复
 
 
 def test_unlock_layout_hides_frame_overlay():
@@ -162,16 +189,17 @@ def test_unlock_layout_hides_frame_overlay():
 
 
 def test_frame_overlay_roundtrip_is_stable():
-    # 多轮开启/关闭：每次锁定重新快照并显示、解锁隐藏，无累积状态
+    # 多轮开启/关闭：每次锁定重新快照并显示、解锁隐藏；再次锁定时
+    # hide_all 侧先做一次幂等隐藏清理（防上一轮残留），随后重新显示
     menu = _menu_with(True)
-    menu.lock_layout()  # 首次锁定：惰性创建覆盖层
+    menu.lock_layout()  # 首次锁定：惰性创建覆盖层（hide_all 清理 1 次）
     overlay = menu._frame_overlay
-    for round_no in range(1, 4):
-        menu.unlock_layout()
-        assert overlay.hidden == round_no
-        menu.lock_layout()
+    for _ in range(3):
+        menu.unlock_layout()  # 解锁隐藏（+1）
+        menu.lock_layout()  # hide_all 幂等清理（+1）+ 重新快照显示
         assert overlay.frames is not None  # 每次锁定重新快照
     assert overlay.shown == 4  # 首次 + 3 轮重开
+    assert overlay.hidden == 6  # 首次锁定时覆盖层尚未创建（惰性），每轮（解锁 1 + 再锁定清理 1）× 3
 
 
 def test_close_all_destroys_frame_overlay():
@@ -179,7 +207,7 @@ def test_close_all_destroys_frame_overlay():
     menu.lock_layout()
     overlay = menu._frame_overlay
     menu.close_all()
-    assert overlay.deleted
+    assert overlay.destroyed
     assert menu._frame_overlay is None
 
 
