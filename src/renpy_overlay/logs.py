@@ -5,6 +5,11 @@
   便于排查注入与 Hook 过程中的细节。
 - 目标进程内的 agent 通过 IPC 把自身日志回灌到同一个 logger（前缀 ``[game]``），
   这样"注入端"和"游戏端"的日志出现在同一份时间线上，时序问题一目了然。
+- 统一日志管理：接管三类绕过 logging 直接打印到 stderr 的诊断输出 ——
+  Qt 诊断消息（qInstallMessageHandler）、被 Python 忽略的异常（
+  sys.unraisablehook，如 ctypes 回调异常的 "Exception ignored"）与
+  Python warnings（captureWarnings），全部转为标准 DEBUG 级日志，
+  受 ``--log-level`` 与文件全量日志统一管理。
 """
 
 from __future__ import annotations
@@ -87,6 +92,12 @@ def setup_logging(
         _log_file = None
 
     _configured = True
+    # 统一日志管理：接管三类绕过 logging 的直接输出（warnings / 被忽略
+    # 异常 / Qt 诊断消息），全部转为本命名空间下的标准级别日志
+    logging.captureWarnings(True)
+    logging.getLogger("py.warnings").parent = root
+    install_unraisable_hook()
+    install_qt_message_handler()
     root.debug("日志系统已初始化：level=%s file=%s", level, _log_file)
     return _log_file
 
@@ -94,6 +105,67 @@ def setup_logging(
 def get_logger(name: str = "") -> logging.Logger:
     """获取子 logger，例如 ``get_logger("injector")`` -> ``renpy_overlay.injector``。"""
     return logging.getLogger(f"{LOGGER_NAME}.{name}" if name else LOGGER_NAME)
+
+
+def _qt_message_handler(msg_type, _context, message) -> None:
+    """Qt 诊断消息 → logging 转发（按 QtMsgType 映射标准级别）。
+
+    映射键用 QtMsgType 枚举对象本身：PyQt6 不同版本的枚举 ``str()``
+    形态不一致（名称或纯数值），按字符串解析会间歇回退 INFO（实测）。
+    """
+    try:
+        from PyQt6.QtCore import QtMsgType
+
+        level = {
+            QtMsgType.QtDebugMsg: logging.DEBUG,
+            QtMsgType.QtInfoMsg: logging.INFO,
+            QtMsgType.QtWarningMsg: logging.WARNING,
+            QtMsgType.QtCriticalMsg: logging.ERROR,
+            QtMsgType.QtFatalMsg: logging.CRITICAL,
+        }.get(msg_type, logging.INFO)
+    except ImportError:  # pragma: no cover - PyQt6 为硬依赖，防御性降级
+        level = logging.INFO
+    get_logger("qt").log(level, "%s", message)
+
+
+def install_qt_message_handler() -> None:
+    """把 Qt 诊断消息（qDebug/qWarning 等）转发到本日志系统。
+
+    PyQt6 默认把 Qt 的 debug/warning 直接打到 stderr，绕过 logging——
+    它们正是"默认级别下运行输出仍出现 DEBUG 级诊断内容"的主要现实来源
+    （如 QObject::startTimer 线程警告）。安装后按类型映射为 DEBUG/INFO/
+    WARNING/ERROR/CRITICAL，统一受 ``--log-level`` 与文件全量日志管理；
+    未安装 PyQt6 的环境静默跳过。QtFatalMsg 转发后 Qt 仍会自行 abort。
+    """
+    try:
+        from PyQt6.QtCore import qInstallMessageHandler
+    except ImportError:  # pragma: no cover - PyQt6 为硬依赖，防御性降级
+        return
+    qInstallMessageHandler(_qt_message_handler)
+
+
+def _unraisable_to_log(unraisable) -> None:
+    """sys.unraisablehook 替身：被忽略的异常转为 DEBUG 日志（含堆栈）。"""
+    get_logger("unraisable").debug(
+        "被忽略的异常：object=%r",
+        unraisable.object,
+        exc_info=(
+            unraisable.exc_type,
+            unraisable.exc_value,
+            unraisable.exc_traceback,
+        ),
+    )
+
+
+def install_unraisable_hook() -> None:
+    """接管被 Python 忽略的异常，转为 DEBUG 日志（不再打印到 stderr）。
+
+    ctypes 回调抛出的异常由 _ctypes 经 PyErr_WriteUnraisable 上报，默认
+    只打印 "Exception ignored ..." 到 stderr，不进 logging 也无法留档
+    （实测缺陷来源）；接管 sys.unraisablehook 后统一转为 DEBUG 日志，
+    与"忽略"语义对齐，同时消除并行的 stderr 打印路径。
+    """
+    sys.unraisablehook = _unraisable_to_log
 
 
 def log_file_path() -> Path | None:
