@@ -102,8 +102,8 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   OpenAI 兼容服务（`http://127.0.0.1:1234`），翻译走 SSE 流式接口（`stream: true`），
   译文增量逐块流入正文窗；请求在后台守护线程执行、同一时刻只允许一条在途，
   未锁定时单击不触发；
-- **自动翻译（可选，config.json 开关）**：`auto_translate` 开启后，锁定状态下按
-  `auto_translate_interval`（默认 3 秒）轮询最新游戏原文并自动翻译 —— 同一原文只翻
+- **自动翻译（config.json 开关，默认开启）**：`auto_translate` 开启后，锁定状态下按
+  `auto_translate_interval`（默认 1 秒）轮询最新游戏原文并自动翻译 —— 同一原文只翻
   一次、在途请求不重复发起；进入锁定需先经过一个完整轮询间隔才会首次触发；
   两级缓存命中时直接上屏；解锁即停用并中止在途（手动单击路径不受影响）；
 - **分支选项捕获**：注入代理同时捕获剧情分支选项（menu choice）—— 选项出现时
@@ -125,14 +125,14 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
   即锁定生效：窗口隐藏，由等大小的鼠标穿透提示窗口替换（边框精确显示框选范围，
   不外扩一个像素），鼠标活动被限制（Win32 ClipCursor，每 200ms 周期重申，对抗
   Alt+Tab / 其它程序覆盖）。窗口隐藏后无法双击解锁、流式窗也可能在限制范围外，
-  故逃脱快捷键（`hotkey_mouse_escape`，默认 `ctrl+alt+o`，功能开启期间全程注册）
+  故逃脱快捷键（`hotkey_mouse_escape`，默认 `alt+o`，功能开启期间全程注册）
   为保底退出：按下即解除限制、销毁提示窗口并恢复范围窗口的可拖拽状态（可再次
   双击锁定，解锁无提示）；菜单再点「锁鼠标区域: 开」则彻底销毁两个窗口。与截图
   布局锁定互不影响（lock_layout / unlock_layout / locked_windows 不会隐藏或捕获
   本功能窗口）；
 - **快捷键模式**：快捷菜单开关（默认关）。开启后整体隐藏全部截图窗口并锁定布局
   （不阻挡鼠标与屏幕交互），并注册全局热键：主开关键（`hotkey_main`，默认
-  `ctrl+alt+p`）+ 数字 1-8（对应八色截图窗口）；主开关开启后，数字键命中"模式
+  `alt+t`）+ 数字 1-8（对应八色截图窗口）；主开关开启后，数字键命中"模式
   开启时已双击锁定的窗口"等同该窗口锁定态左键——按窗口现取几何坐标触发截图
   翻译；主开关关闭时按数字键仅提示主开关状态；关闭模式即注销全部热键并恢复
   布局。⚠️ 已知引擎级行为（A/B 对照实测）：含 Ctrl 的快捷键（如 `ctrl+alt+t` /
@@ -279,7 +279,7 @@ uv run renpy-overlay --pid 12345
 - 按住任一窗口拖动即可整体调整位置；滚轮可回看当前对话全文；双击锁定后
   按住正文文字上下滑动可拖拽滚动文本；
 - 双击锁定位置后，单击会把对话原文流式翻译成中文（未锁定不触发）；
-- 在 `config.json` 中开启 `auto_translate` 后，锁定状态下会自动翻译最新对话。
+- `auto_translate` 默认开启：锁定状态下会自动翻译最新对话（可在 `config.json` 中关闭）。
 
 ### 鼠标操作
 
@@ -307,14 +307,14 @@ uv run renpy-overlay --pid 12345
   | 字段 | 默认值 | 说明 |
   | --- | --- | --- |
   | `api_base_url` | `http://127.0.0.1:1234` | API 地址（OpenAI / LM Studio / DeepSeek 等兼容平台） |
-  | `api_timeout` | `20.0` | 请求超时（秒，非正数回退默认） |
+  | `api_timeout` | `30.0` | 请求超时（秒，非正数回退默认） |
   | `model` | `""` | 模型代号；留空自动读取 `/v1/models` 的第一个已加载模型 |
   | `system_prompt` | 内置游戏翻译提示词 | 系统提示词，可整个覆盖 |
   | `api_key` | `""` | 配置后请求附带 `Authorization: Bearer <key>`；留空不带鉴权头 |
   | `enable_thinking` | `false` | 模型思考（reasoning）模式开关，**默认关闭**。关闭时一并声明 `enable_thinking: false` + `chat_template_kwargs` + `reasoning_effort`：LM Studio 会忽略前两者、需 `reasoning_effort` 才能真正关闭（实测：关闭后单条翻译约 0.5s，开启思考则需 30s+）；vLLM / SGLang 识别 `chat_template_kwargs`、Qwen Cloud 识别顶层 `enable_thinking` |
   | `reasoning_effort` | `"none"` | 关闭思考时使用的 `reasoning_effort` 取值（LM Studio 等本地服务靠它真正关闭思考）；置空则不发送该字段 |
-  | `api_base_url_stanby` | `""` | 备选 API 链路地址：主链路 `api_base_url` 不可达（连接失败/超时）时自动切换到该端点重试；**留空即不启用备选链路** |
-  | `model_stanby` | `""` | 备选链路的模型代号；留空自动读取备选端点 `/v1/models` 的第一个已加载模型 |
+  | `api_base_url_stanby` | `https://api.deepseek.com` | 备选 API 链路地址：主链路 `api_base_url` 不可达（连接失败/超时）时自动切换到该端点重试；**留空即不启用备选链路** |
+  | `model_stanby` | `"deepseek-flash"` | 备选链路的模型代号；留空自动读取备选端点 `/v1/models` 的第一个已加载模型 |
   | `api_key_stanby` | `""` | 备选链路的 API Key；留空不带鉴权头 |
   | `screenshot_model_stanby` | `""` | 备选链路的识图模型；留空回退 `model_stanby`（与 `screenshot_model` 回退 `model` 的规则一致） |
 
@@ -325,29 +325,29 @@ uv run renpy-overlay --pid 12345
 
   ```json
   {
-    "auto_translate": false,          // 改为 true 开启自动翻译
-    "auto_translate_interval": 3.0,   // 轮询间隔（秒）
-    "show_original_text": true,       // 正文区是否随对话显示游戏原文（默认开启）
-    "translation_cache_size_kb": 256, // 内存翻译缓存上限（KB，默认 256）
+    "auto_translate": true,           // 改为 false 关闭自动翻译（默认开启）
+    "auto_translate_interval": 1.0,   // 轮询间隔（秒）
+    "show_original_text": false,      // 正文区是否随对话显示游戏原文（默认关闭）
+    "translation_cache_size_kb": 2048, // 内存翻译缓存上限（KB，默认 2048）
     "stream_window_width": 1760,      // 流式正文窗宽度（像素，最小 240；会被游戏窗口宽度钳制）
     "stream_window_height": 200,      // 流式正文窗高度（像素，最小 80）
-    "stream_window_font_size": 14,    // 流式正文窗字号（像素，最小 6）
-    "stream_window_line_spacing": 1.45, // 流式正文行距倍数（最小 1.0）
-    "stream_window_title_font_size": 8, // 流式标题窗字号（像素，最小 6）
-    "stream_window_title_gap": 4,     // 标题窗与正文窗间距（像素，非负）
+    "stream_window_font_size": 16,    // 流式正文窗字号（像素，最小 6）
+    "stream_window_line_spacing": 1.15, // 流式正文行距倍数（最小 1.0）
+    "stream_window_title_font_size": 12, // 流式标题窗字号（像素，最小 6）
+    "stream_window_title_gap": 2,     // 标题窗与正文窗间距（像素，非负）
     "chat_window_width": 1760,        // AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
     "chat_window_height": 200,        // AI 对话窗高度（像素；缺省回退流式正文窗高度）
     "screenshot_compress_percent": 10, // 截图翻译发送 API 前的等比压缩百分比（1~100）
     "screenshot_model": "",           // 识图模型；空则回退 model（需 vision 多模态模型）
     "recording_duration": 8,          // 听歌识曲录制系统音频时长（秒，最小 3）
     "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
-    "api_timeout": 20.0,              // 请求超时（秒）
+    "api_timeout": 30.0,              // 请求超时（秒）
     "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个
     "api_key": "",                     // API Key；空则不携带鉴权头（本地服务通常不需要）
     "enable_thinking": false,         // 模型思考模式开关，默认关闭
     "reasoning_effort": "none",       // 关闭思考时的 reasoning_effort 取值
-    "api_base_url_stanby": "",        // 备选 API 链路地址；主链路不可达时自动切换，留空即不启用
-    "model_stanby": "",               // 备选链路模型；空则自动取备选端点 /v1/models 的第一个
+    "api_base_url_stanby": "https://api.deepseek.com",  // 备选 API 链路地址；主链路不可达时自动切换，留空即不启用
+    "model_stanby": "deepseek-flash", // 备选链路模型；空则自动取备选端点 /v1/models 的第一个
     "api_key_stanby": "",             // 备选链路 API Key；空则不携带鉴权头
     "screenshot_model_stanby": "",    // 备选链路识图模型；空则回退 model_stanby
     // system_prompt 默认使用内置的游戏对话翻译提示词，可按需覆盖（见下表）
@@ -365,7 +365,7 @@ uv run renpy-overlay --pid 12345
 - **翻译缓存（两级，自动翻译专用）**：内存缓存以**原文哈希**（sha256 前 128 位，
   跨重启稳定）为键分桶存储 —— 每个哈希对应一个「(原文, 译文) 记录列表」，哈希
   相同但原文不同的记录可同桶共存，查询时按原文逐一精确匹配；容量由
-  `translation_cache_size_kb` 控制（默认 256KB，哈希+原文+译文的 UTF-8 字节合计，
+  `translation_cache_size_kb` 控制（默认 2048KB，哈希+原文+译文的 UTF-8 字节合计，
   超限按记录粒度的最旧优先 FIFO 淘汰）。SQLite 持久化在**游戏目录**下的
   `renpy_overlay_cache/translations.db`，以 (哈希, 原文) 为复合主键增量保存记录
   （与内存分桶语义一致；旧版单主键数据库打开时自动迁移并保留数据；重启后仍可查询；
