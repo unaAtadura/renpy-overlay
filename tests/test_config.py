@@ -54,6 +54,9 @@ def test_missing_file_creates_defaults(tmp_path):
         "hotkey_window_7": "7",
         "hotkey_window_8": "8",
         "hotkey_mouse_escape": "alt+o",
+        "remote_screenshot_enable": True,
+        "remote_screenshot_diameterA": 100,
+        "remote_screenshot_diameterB": 100,
     }
 
 
@@ -99,6 +102,9 @@ def test_default_file_key_order_matches_target(tmp_path):
         "hotkey_window_7",
         "hotkey_window_8",
         "hotkey_mouse_escape",
+        "remote_screenshot_enable",
+        "remote_screenshot_diameterA",
+        "remote_screenshot_diameterB",
     ]
 
 
@@ -125,6 +131,62 @@ def test_screenshot_compress_percent_loaded(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"screenshot_compress_percent": 25}), encoding="utf-8")
     assert config.load_config(target).screenshot_compress_percent == 25
+
+
+# ---- 遥控截图（remote screenshot）三配置项 ---------------------------------------
+
+
+def test_remote_screenshot_defaults_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    assert loaded.remote_screenshot_enable is True
+    assert loaded.remote_screenshot_diameter_a == 100
+    assert loaded.remote_screenshot_diameter_b == 100
+
+
+def test_remote_screenshot_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "remote_screenshot_enable": False,
+                "remote_screenshot_diameterA": 150,
+                "remote_screenshot_diameterB": 80,
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.remote_screenshot_enable is False
+    assert loaded.remote_screenshot_diameter_a == 150
+    assert loaded.remote_screenshot_diameter_b == 80
+
+
+def test_remote_screenshot_invalid_values_fall_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "remote_screenshot_enable": "yes",  # 非布尔
+                "remote_screenshot_diameterA": "big",  # 非数字
+                "remote_screenshot_diameterB": -5,  # 负数
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.remote_screenshot_enable is True
+    assert loaded.remote_screenshot_diameter_a == 100
+    assert loaded.remote_screenshot_diameter_b == 100
+
+
+def test_remote_screenshot_small_diameter_falls_back(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"remote_screenshot_diameterA": 10}),  # 低于下限 20
+        encoding="utf-8",
+    )
+    assert config.load_config(target).remote_screenshot_diameter_a == 100
 
 
 def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):

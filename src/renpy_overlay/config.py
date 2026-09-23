@@ -43,6 +43,9 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "model_stanby": "deepseek-flash",   # 备选链路的文本模型（留空则自动发现）
       "api_key_stanby": "",               # 备选链路的 API Key（留空则不携带鉴权头）
       "screenshot_model_stanby": "",      # 备选链路的截图模型；留空回退 model_stanby
+      "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
+      "remote_screenshot_diameterA": 100, # 遥控截图窗口 A（触发器）直径（像素）
+      "remote_screenshot_diameterB": 100, # 遥控截图窗口 B（瞄准器）直径（像素）
     }
 """
 
@@ -100,6 +103,11 @@ DEFAULT_API_BASE_URL_STANBY = "https://api.deepseek.com"
 DEFAULT_MODEL_STANBY = "deepseek-flash"
 DEFAULT_API_KEY_STANBY = ""
 DEFAULT_SCREENSHOT_MODEL_STANBY = ""
+#: 遥控截图：快捷键模式期间生成的 A/B 触发/瞄准小圆窗（开关 + 各自直径，像素）
+DEFAULT_REMOTE_SCREENSHOT_ENABLE = True
+DEFAULT_REMOTE_SCREENSHOT_DIAMETER = 100
+#: 直径下限：再小无法瞄准与点击，低于回退默认
+MIN_REMOTE_SCREENSHOT_DIAMETER = 20
 #: 录制时长下限：过短的采样难以命中 Shazam 指纹库
 MIN_RECORDING_DURATION = 3
 #: 字号下限：再小就不可辨认；行距下限：小于 1.0 会上下行重叠
@@ -160,6 +168,10 @@ class AppConfig:
     model_stanby: str = DEFAULT_MODEL_STANBY
     api_key_stanby: str = DEFAULT_API_KEY_STANBY
     screenshot_model_stanby: str = DEFAULT_SCREENSHOT_MODEL_STANBY
+    # 遥控截图（快捷键模式期间存在的 A/B 触发/瞄准小圆窗；与主开关相互独立）
+    remote_screenshot_enable: bool = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
+    remote_screenshot_diameter_b: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
 
 
 def default_path() -> Path:
@@ -212,6 +224,9 @@ def _write_defaults(target: Path) -> None:
     for index, hotkey in enumerate(DEFAULT_HOTKEY_WINDOWS, start=1):
         payload[f"hotkey_window_{index}"] = hotkey
     payload["hotkey_mouse_escape"] = DEFAULT_HOTKEY_MOUSE_ESCAPE
+    payload["remote_screenshot_enable"] = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
+    payload["remote_screenshot_diameterB"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     try:
         target.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -444,6 +459,21 @@ def load_config(path: Path | None = None) -> AppConfig:
         screenshot_model_stanby=_read_str(
             raw, "screenshot_model_stanby", DEFAULT_SCREENSHOT_MODEL_STANBY
         ),
+        remote_screenshot_enable=_read_bool(
+            raw, "remote_screenshot_enable", DEFAULT_REMOTE_SCREENSHOT_ENABLE
+        ),
+        remote_screenshot_diameter_a=_read_positive_int(
+            raw,
+            "remote_screenshot_diameterA",
+            DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
+            MIN_REMOTE_SCREENSHOT_DIAMETER,
+        ),
+        remote_screenshot_diameter_b=_read_positive_int(
+            raw,
+            "remote_screenshot_diameterB",
+            DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
+            MIN_REMOTE_SCREENSHOT_DIAMETER,
+        ),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
@@ -453,7 +483,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         "chat_window（size=%dx%d），"
         "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "stanby（base_url=%s，model=%r，api_key=%s，screenshot_model=%r）",
+        "stanby（base_url=%s，model=%r，api_key=%s，screenshot_model=%r），"
+        "remote_screenshot（enable=%s，diameterA=%d，diameterB=%d）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -484,5 +515,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.model_stanby,
         "已设置" if app_config.api_key_stanby else "未设置",
         app_config.screenshot_model_stanby or "<回退 model_stanby>",
+        app_config.remote_screenshot_enable,
+        app_config.remote_screenshot_diameter_a,
+        app_config.remote_screenshot_diameter_b,
     )
     return app_config
