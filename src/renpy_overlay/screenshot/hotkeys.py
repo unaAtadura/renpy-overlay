@@ -264,6 +264,8 @@ class HotkeyMode(QAbstractNativeEventFilter):
         self._window_by_id: dict[int, object] = {}  # 窗口键 id → 已锁定窗口/None
         self._modifiers_by_id: dict[int, int] = {}  # 已注册热键 id → 修饰符掩码
         self._modifier_releaser = StuckModifierReleaser()  # 吞键 key-up 补发
+        # 遥控截图控制器（宿主经 attach_remote_screenshot 注入；模式开/关时通知）
+        self._remote_screenshot = None
 
     @property
     def enabled(self) -> bool:
@@ -299,6 +301,9 @@ class HotkeyMode(QAbstractNativeEventFilter):
                 # 同一轮多个失败只提示一次（详细原因逐条在日志）；提示放在
                 # 模式开启提示之后发出，覆盖式出口最终展示的是失败提示
                 self._notify(MSG_HOTKEY_REGISTER_FAILED)
+            if self._remote_screenshot is not None:
+                # 遥控截图：模式开启即生成 A/B（配置开关关闭时控制器自身跳过）
+                self._remote_screenshot.on_hotkey_mode_changed(True)
             logger.info(
                 "快捷键模式已开启（可响应窗口键 %d 个，主开关键 %r）",
                 sum(window is not None for window in self._window_by_id.values()),
@@ -309,11 +314,22 @@ class HotkeyMode(QAbstractNativeEventFilter):
             self._unregister_all()
             self._window_by_id = {}
             self._controller.unlock_layout()
+            if self._remote_screenshot is not None:
+                self._remote_screenshot.on_hotkey_mode_changed(False)
             self._notify(MSG_MODE_OFF)
             logger.info("快捷键模式已关闭（布局已解锁，热键已注销）")
 
     def toggle(self) -> None:
         self.set_enabled(not self._enabled)
+
+    def attach_remote_screenshot(self, remote_screenshot) -> None:
+        """注入遥控截图控制器（模式开/关时通知其生成/销毁 A/B 小圆窗）。
+
+        鸭子类型注入（同 controller/notify 约定，不 import 控制器模块）。
+        遥控截图与主开关（``_main_on``）相互独立（需求）：只要模式开启即
+        生成窗口，主开关状态不影响其工作。
+        """
+        self._remote_screenshot = remote_screenshot
 
     def shutdown(self) -> None:
         """宿主退出时调用：注销热键（模式状态随对象销毁，无需还原布局）。"""

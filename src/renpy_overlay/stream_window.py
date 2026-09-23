@@ -51,6 +51,7 @@ from .screenshot import (
     ChatHistoryWindow,
     HotkeyMode,
     MouseLockController,
+    RemoteScreenshotController,
     ScreenshotHistoryWindow,
     capture_region,
     constrain_aspect_ratio,
@@ -861,6 +862,16 @@ class StreamOverlayWindow:
             window_hotkeys=self._config.hotkey_windows,
         )
         self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
+        # 遥控截图：快捷键模式期间存在的 A/B 触发/瞄准小圆窗（与主开关相互
+        # 独立）；A 单击经 B 的装填状态复用截图翻译入口（含在途互斥与提示）
+        self._remote_screenshot = RemoteScreenshotController(
+            enable=self._config.remote_screenshot_enable,
+            diameter_a=self._config.remote_screenshot_diameter_a,
+            diameter_b=self._config.remote_screenshot_diameter_b,
+            locked_windows_provider=self._quick_menu.locked_windows,
+            trigger=self.request_screenshot_translation,
+        )
+        self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
         # 锁鼠标区域：ClipCursor 限制 + 逃脱全局热键（保底退出）；窗口由
         # 控制器自持，不进截图窗口池，与布局锁定三组接口互不影响
         self._mouse_lock = MouseLockController(
@@ -987,6 +998,7 @@ class StreamOverlayWindow:
             self._chat_store.close()
             self._chat_store = None
         self._hotkey_mode.shutdown()
+        self._remote_screenshot.shutdown()  # 遥控截图 A/B 随退出销毁（幂等）
         self._mouse_lock.shutdown()  # 必须先于退出解除 ClipCursor，否则鼠标被永久限制
         self._quick_menu.close_all()
         if self._history_window is not None:
@@ -1342,6 +1354,7 @@ class StreamOverlayWindow:
             win32api.set_topmost(self._body_hwnd)
             win32api.set_topmost(self._title_hwnd)
             self._quick_menu.reassert_topmost()  # 截图窗锁定态同样对抗独占全屏覆盖
+            self._remote_screenshot.reassert_topmost()  # 遥控截图 A/B 随周期一并重申
         except Exception:  # pragma: no cover - pywin32 缺失等
             return
         now = time.time()
@@ -1988,6 +2001,7 @@ class StreamOverlayWindow:
             return
         self._screenshot_suppress = True
         self._quick_menu.hide_all()
+        self._remote_screenshot.hide_windows()  # A/B 随抓屏一并隐藏（与截图翻译同一时序）
         was_visible = self._visible
         saved_rects = None
         if was_visible:
@@ -2034,6 +2048,7 @@ class StreamOverlayWindow:
         # 文字绘制到窗口垂直中央而"跑到正文窗下方/不可见"）
         self._screenshot_suppress = True
         self._quick_menu.hide_all()
+        self._remote_screenshot.hide_windows()  # 遥控截图 A/B 随截图一并隐藏（需求）
         was_visible = self._visible
         saved_rects = None
         if was_visible:
@@ -2110,6 +2125,7 @@ class StreamOverlayWindow:
         finally:
             self._screenshot_suppress = False
             self._quick_menu.show_all()
+            self._remote_screenshot.show_windows()  # A/B 无条件恢复（不受布局锁定分支影响）
             if was_visible:
                 self._set_visible(True)
                 if saved_rects is not None:
