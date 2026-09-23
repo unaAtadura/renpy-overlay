@@ -7,12 +7,12 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
 当前配置项（与 ``AppConfig`` 字段一一对应）::
 
     {
-      "auto_translate": false,            # 自动翻译开关（仅悬浮窗锁定状态生效）
-      "auto_translate_interval": 3.0,     # 自动翻译轮询间隔（秒）
-      "show_original_text": true,         # 悬浮窗正文区是否随对话显示游戏原文
-      "translation_cache_size_kb": 256,    # 内存翻译缓存上限（KB）
+      "auto_translate": true,             # 自动翻译开关（仅悬浮窗锁定状态生效，默认开启）
+      "auto_translate_interval": 1.0,     # 自动翻译轮询间隔（秒）
+      "show_original_text": false,        # 悬浮窗正文区是否随对话显示游戏原文（默认关闭）
+      "translation_cache_size_kb": 2048,  # 内存翻译缓存上限（KB）
       "api_base_url": "http://127.0.0.1:1234",  # OpenAI 兼容 API 地址
-      "api_timeout": 20.0,                # 请求超时（秒）
+      "api_timeout": 30.0,                # 请求超时（秒）
       "model": "",                        # 模型代号；空 = 自动用 /v1/models 的第一个
       "system_prompt": "...",             # 系统提示词（默认见 translator.DEFAULT_SYSTEM_PROMPT）
       "api_key": "",                      # API Key；空 = 不携带鉴权头
@@ -29,7 +29,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
       "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
       "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
-      "hotkey_main": "ctrl+alt+p",        # 快捷键模式主开关键（全局热键，Ctrl+Alt+P；含 Ctrl 的组合在 Ren'Py 内触发后会持续快进，可换如 alt+f9）
+      "hotkey_main": "alt+t",             # 快捷键模式主开关键（全局热键，Alt+T；不含 Ctrl 以规避 Ren'Py 持续快进）
       "hotkey_window_1": "1",             # 红色截图窗口的全局热键
       "hotkey_window_2": "2",             # 橙色截图窗口的全局热键
       "hotkey_window_3": "3",             # 黄色截图窗口的全局热键
@@ -38,9 +38,9 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "hotkey_window_6": "6",             # 蓝色截图窗口的全局热键
       "hotkey_window_7": "7",             # 紫色截图窗口的全局热键
       "hotkey_window_8": "8",             # 黑色截图窗口的全局热键
-      "hotkey_mouse_escape": "ctrl+alt+o", # 锁鼠标区域的逃脱快捷键（全局热键；含 Ctrl 在 Ren'Py 内触发后会持续快进，可换如 alt+f10）
-      "api_base_url_stanby": "",          # 备选 API 链路地址；留空即不启用备选链路
-      "model_stanby": "",                 # 备选链路的文本模型（留空则自动发现）
+      "hotkey_mouse_escape": "alt+o",     # 锁鼠标区域的逃脱快捷键（全局热键，Alt+O；不含 Ctrl 以规避 Ren'Py 持续快进）
+      "api_base_url_stanby": "https://api.deepseek.com",  # 备选 API 链路地址；留空即不启用备选链路
+      "model_stanby": "deepseek-flash",   # 备选链路的文本模型（留空则自动发现）
       "api_key_stanby": "",               # 备选链路的 API Key（留空则不携带鉴权头）
       "screenshot_model_stanby": "",      # 备选链路的截图模型；留空回退 model_stanby
     }
@@ -54,33 +54,33 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .screenshot.hotkeys import DEFAULT_MAIN_HOTKEY, DEFAULT_WINDOW_HOTKEYS, parse_hotkey
-from .screenshot.mouse_lock import DEFAULT_MOUSE_ESCAPE_HOTKEY
+from .screenshot.hotkeys import DEFAULT_WINDOW_HOTKEYS, parse_hotkey
 from .translator import (
     DEFAULT_BASE_URL,
     DEFAULT_REASONING_EFFORT,
     DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_TIMEOUT,
 )
 
 logger = logging.getLogger("renpy_overlay.config")
 
 CONFIG_FILENAME = "config.json"
 
-DEFAULT_AUTO_TRANSLATE = False
-DEFAULT_AUTO_TRANSLATE_INTERVAL = 3.0
-DEFAULT_SHOW_ORIGINAL_TEXT = True
-DEFAULT_TRANSLATION_CACHE_SIZE_KB = 256
+DEFAULT_AUTO_TRANSLATE = True  # 默认开启：锁定状态下自动翻译最新对话
+DEFAULT_AUTO_TRANSLATE_INTERVAL = 1.0
+DEFAULT_SHOW_ORIGINAL_TEXT = False
+DEFAULT_TRANSLATION_CACHE_SIZE_KB = 2048
 DEFAULT_MODEL = ""  # 空：自动向 /v1/models 查询第一个已加载模型
 DEFAULT_API_KEY = ""  # 空：不携带 Authorization 头
 DEFAULT_ENABLE_THINKING = False  # 模型思考（reasoning）模式默认关闭
+#: 请求超时（秒）：独立于 translator 的兜底常量（20.0），对慢端点更宽松
+DEFAULT_API_TIMEOUT = 30.0
 #: 正文窗尺寸：默认宽 = 历史 CLI 默认 880 的 2 倍，高与历史默认一致
 DEFAULT_STREAM_WINDOW_WIDTH = 1760
 DEFAULT_STREAM_WINDOW_HEIGHT = 200
-DEFAULT_STREAM_WINDOW_FONT_SIZE = 14  # 正文窗字号（像素）
-DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.45  # 正文行距倍数（参考项目验证值）
-DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 8  # 标题窗字号（像素）
-DEFAULT_STREAM_WINDOW_TITLE_GAP = 4  # 标题窗与正文窗间距（像素）
+DEFAULT_STREAM_WINDOW_FONT_SIZE = 16  # 正文窗字号（像素）
+DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.15  # 正文行距倍数
+DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 12  # 标题窗字号（像素）
+DEFAULT_STREAM_WINDOW_TITLE_GAP = 2  # 标题窗与正文窗间距（像素）
 #: AI 对话窗尺寸：缺省时使用流式正文窗的（配置后）值，默认常量同源
 DEFAULT_CHAT_WINDOW_WIDTH = DEFAULT_STREAM_WINDOW_WIDTH
 DEFAULT_CHAT_WINDOW_HEIGHT = DEFAULT_STREAM_WINDOW_HEIGHT
@@ -90,14 +90,14 @@ DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
 DEFAULT_SCREENSHOT_MODEL = ""
 #: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
 DEFAULT_RECORDING_DURATION = 8
-#: 快捷键模式：主开关键默认 Ctrl+Alt+P，窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
-DEFAULT_HOTKEY_MAIN = DEFAULT_MAIN_HOTKEY
+#: 快捷键模式：主开关键默认 Alt+T（不含 Ctrl 以规避 Ren'Py 持续快进），窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
+DEFAULT_HOTKEY_MAIN = "alt+t"
 DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
-#: 锁鼠标区域：逃脱快捷键默认 Ctrl+Alt+O（功能开启期间全程注册的保底退出）
-DEFAULT_HOTKEY_MOUSE_ESCAPE = DEFAULT_MOUSE_ESCAPE_HOTKEY
+#: 锁鼠标区域：逃脱快捷键默认 Alt+O（功能开启期间全程注册的保底退出，同理不含 Ctrl）
+DEFAULT_HOTKEY_MOUSE_ESCAPE = "alt+o"
 #: 备选 API 链路：主链路（api_base_url）不可达时自动切换；base_url 留空即不启用
-DEFAULT_API_BASE_URL_STANBY = ""
-DEFAULT_MODEL_STANBY = ""
+DEFAULT_API_BASE_URL_STANBY = "https://api.deepseek.com"
+DEFAULT_MODEL_STANBY = "deepseek-flash"
 DEFAULT_API_KEY_STANBY = ""
 DEFAULT_SCREENSHOT_MODEL_STANBY = ""
 #: 录制时长下限：过短的采样难以命中 Shazam 指纹库
@@ -129,7 +129,7 @@ class AppConfig:
     show_original_text: bool = DEFAULT_SHOW_ORIGINAL_TEXT
     translation_cache_size_kb: int = DEFAULT_TRANSLATION_CACHE_SIZE_KB
     api_base_url: str = DEFAULT_BASE_URL
-    api_timeout: float = DEFAULT_TIMEOUT
+    api_timeout: float = DEFAULT_API_TIMEOUT
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     model: str = DEFAULT_MODEL
     api_key: str = DEFAULT_API_KEY
@@ -186,12 +186,17 @@ def _write_defaults(target: Path) -> None:
         "show_original_text": DEFAULT_SHOW_ORIGINAL_TEXT,
         "translation_cache_size_kb": DEFAULT_TRANSLATION_CACHE_SIZE_KB,
         "api_base_url": DEFAULT_BASE_URL,
-        "api_timeout": DEFAULT_TIMEOUT,
         "model": DEFAULT_MODEL,
-        "system_prompt": DEFAULT_SYSTEM_PROMPT,
+        "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "api_key": DEFAULT_API_KEY,
+        "api_base_url_stanby": DEFAULT_API_BASE_URL_STANBY,
+        "model_stanby": DEFAULT_MODEL_STANBY,
+        "screenshot_model_stanby": DEFAULT_SCREENSHOT_MODEL_STANBY,
+        "api_key_stanby": DEFAULT_API_KEY_STANBY,
         "enable_thinking": DEFAULT_ENABLE_THINKING,
         "reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "api_timeout": DEFAULT_API_TIMEOUT,
+        "system_prompt": DEFAULT_SYSTEM_PROMPT,
         "stream_window_width": DEFAULT_STREAM_WINDOW_WIDTH,
         "stream_window_height": DEFAULT_STREAM_WINDOW_HEIGHT,
         "stream_window_font_size": DEFAULT_STREAM_WINDOW_FONT_SIZE,
@@ -201,17 +206,12 @@ def _write_defaults(target: Path) -> None:
         "chat_window_width": DEFAULT_CHAT_WINDOW_WIDTH,
         "chat_window_height": DEFAULT_CHAT_WINDOW_HEIGHT,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
-        "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "recording_duration": DEFAULT_RECORDING_DURATION,
         "hotkey_main": DEFAULT_HOTKEY_MAIN,
-        "hotkey_mouse_escape": DEFAULT_HOTKEY_MOUSE_ESCAPE,
-        "api_base_url_stanby": DEFAULT_API_BASE_URL_STANBY,
-        "model_stanby": DEFAULT_MODEL_STANBY,
-        "api_key_stanby": DEFAULT_API_KEY_STANBY,
-        "screenshot_model_stanby": DEFAULT_SCREENSHOT_MODEL_STANBY,
     }
     for index, hotkey in enumerate(DEFAULT_HOTKEY_WINDOWS, start=1):
         payload[f"hotkey_window_{index}"] = hotkey
+    payload["hotkey_mouse_escape"] = DEFAULT_HOTKEY_MOUSE_ESCAPE
     try:
         target.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -314,14 +314,14 @@ def _read_percent(raw: dict, key: str, default: int) -> int:
 
 
 def _read_api_timeout(raw: dict) -> float:
-    value = raw.get("api_timeout", DEFAULT_TIMEOUT)
+    value = raw.get("api_timeout", DEFAULT_API_TIMEOUT)
     # 注意 bool 是 int 的子类，True/False 不算合法数字
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        logger.warning("api_timeout 不是数字（%r），回退默认 %.1f", value, DEFAULT_TIMEOUT)
-        return DEFAULT_TIMEOUT
+        logger.warning("api_timeout 不是数字（%r），回退默认 %.1f", value, DEFAULT_API_TIMEOUT)
+        return DEFAULT_API_TIMEOUT
     if value <= 0:
-        logger.warning("api_timeout 非正数（%r），回退默认 %.1f", value, DEFAULT_TIMEOUT)
-        return DEFAULT_TIMEOUT
+        logger.warning("api_timeout 非正数（%r），回退默认 %.1f", value, DEFAULT_API_TIMEOUT)
+        return DEFAULT_API_TIMEOUT
     return float(value)
 
 

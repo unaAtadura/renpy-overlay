@@ -11,37 +11,40 @@ def test_missing_file_creates_defaults(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
     assert loaded == config.AppConfig()
-    assert loaded.auto_translate is False
-    assert loaded.auto_translate_interval == 3.0
-    assert loaded.show_original_text is True
-    assert loaded.translation_cache_size_kb == 256
+    assert loaded.auto_translate is True
+    assert loaded.auto_translate_interval == 1.0
+    assert loaded.show_original_text is False
+    assert loaded.translation_cache_size_kb == 2048
     assert target.is_file(), "首次运行应自动创建配置文件"
     written = json.loads(target.read_text(encoding="utf-8"))
     assert written == {
-        "auto_translate": False,
-        "auto_translate_interval": 3.0,
-        "show_original_text": True,
-        "translation_cache_size_kb": 256,
+        "auto_translate": True,
+        "auto_translate_interval": 1.0,
+        "show_original_text": False,
+        "translation_cache_size_kb": 2048,
         "api_base_url": "http://127.0.0.1:1234",
-        "api_timeout": 20.0,
         "model": "",
-        "system_prompt": translator.DEFAULT_SYSTEM_PROMPT,
+        "screenshot_model": "",
         "api_key": "",
+        "api_base_url_stanby": "https://api.deepseek.com",
+        "model_stanby": "deepseek-flash",
+        "screenshot_model_stanby": "",
+        "api_key_stanby": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
+        "api_timeout": 30.0,
+        "system_prompt": translator.DEFAULT_SYSTEM_PROMPT,
         "stream_window_width": 1760,
         "stream_window_height": 200,
-        "stream_window_font_size": 14,
-        "stream_window_line_spacing": 1.45,
-        "stream_window_title_font_size": 8,
-        "stream_window_title_gap": 4,
+        "stream_window_font_size": 16,
+        "stream_window_line_spacing": 1.15,
+        "stream_window_title_font_size": 12,
+        "stream_window_title_gap": 2,
         "chat_window_width": 1760,
         "chat_window_height": 200,
         "screenshot_compress_percent": 10,
-        "screenshot_model": "",
         "recording_duration": 8,
-        "hotkey_main": "ctrl+alt+p",
-        "hotkey_mouse_escape": "ctrl+alt+o",
+        "hotkey_main": "alt+t",
         "hotkey_window_1": "1",
         "hotkey_window_2": "2",
         "hotkey_window_3": "3",
@@ -50,19 +53,61 @@ def test_missing_file_creates_defaults(tmp_path):
         "hotkey_window_6": "6",
         "hotkey_window_7": "7",
         "hotkey_window_8": "8",
-        "api_base_url_stanby": "",
-        "model_stanby": "",
-        "api_key_stanby": "",
-        "screenshot_model_stanby": "",
+        "hotkey_mouse_escape": "alt+o",
     }
+
+
+def test_default_file_key_order_matches_target(tmp_path):
+    """默认配置文件的键顺序必须与目标基准（future_更改默认配置）一致。"""
+    target = tmp_path / "config.json"
+    config.load_config(target)
+    written = json.loads(target.read_text(encoding="utf-8"))
+    assert list(written) == [
+        "auto_translate",
+        "auto_translate_interval",
+        "show_original_text",
+        "translation_cache_size_kb",
+        "api_base_url",
+        "model",
+        "screenshot_model",
+        "api_key",
+        "api_base_url_stanby",
+        "model_stanby",
+        "screenshot_model_stanby",
+        "api_key_stanby",
+        "enable_thinking",
+        "reasoning_effort",
+        "api_timeout",
+        "system_prompt",
+        "stream_window_width",
+        "stream_window_height",
+        "stream_window_font_size",
+        "stream_window_line_spacing",
+        "stream_window_title_font_size",
+        "stream_window_title_gap",
+        "chat_window_width",
+        "chat_window_height",
+        "screenshot_compress_percent",
+        "recording_duration",
+        "hotkey_main",
+        "hotkey_window_1",
+        "hotkey_window_2",
+        "hotkey_window_3",
+        "hotkey_window_4",
+        "hotkey_window_5",
+        "hotkey_window_6",
+        "hotkey_window_7",
+        "hotkey_window_8",
+        "hotkey_mouse_escape",
+    ]
 
 
 def test_api_defaults_loaded(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
-    # 默认值必须与 translator 的模块级常量完全一致（未改配置时零行为变化）
+    # base_url / system_prompt 仍与 translator 模块常量同源；超时改为独立的 30 秒默认
     assert loaded.api_base_url == translator.DEFAULT_BASE_URL
-    assert loaded.api_timeout == translator.DEFAULT_TIMEOUT
+    assert loaded.api_timeout == config.DEFAULT_API_TIMEOUT == 30.0
     assert loaded.system_prompt == translator.DEFAULT_SYSTEM_PROMPT
     assert loaded.model == ""
     assert loaded.api_key == ""
@@ -144,7 +189,7 @@ def test_recording_duration_below_minimum_falls_back(tmp_path):
 def test_hotkey_defaults_loaded(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
-    assert loaded.hotkey_main == "ctrl+alt+p"
+    assert loaded.hotkey_main == "alt+t"
     assert loaded.hotkey_windows == tuple(str(i) for i in range(1, 9))
 
 
@@ -165,7 +210,7 @@ def test_hotkey_invalid_format_falls_back(tmp_path):
     for bad in ("ctrl", "1+2", "foo", "ctrl+", "???", ""):
         target.write_text(json.dumps({"hotkey_main": bad}), encoding="utf-8")
         loaded = config.load_config(target)
-        assert loaded.hotkey_main == "ctrl+alt+p", f"{bad!r} 应回退默认"
+        assert loaded.hotkey_main == "alt+t", f"{bad!r} 应回退默认"
 
 
 def test_hotkey_invalid_type_falls_back(tmp_path):
@@ -174,7 +219,7 @@ def test_hotkey_invalid_type_falls_back(tmp_path):
         json.dumps({"hotkey_main": 123, "hotkey_window_3": None}), encoding="utf-8"
     )
     loaded = config.load_config(target)
-    assert loaded.hotkey_main == "ctrl+alt+p"
+    assert loaded.hotkey_main == "alt+t"
     assert loaded.hotkey_windows[2] == "3"
 
 
@@ -186,9 +231,9 @@ def test_hotkey_mouse_escape_loaded(tmp_path):
 
 def test_hotkey_mouse_escape_defaults_when_missing(tmp_path):
     target = tmp_path / "config.json"
-    target.write_text("{}", encoding="utf-8")  # 缺键：回退默认 ctrl+alt+o
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退默认 alt+o
     loaded = config.load_config(target)
-    assert loaded.hotkey_mouse_escape == "ctrl+alt+o"
+    assert loaded.hotkey_mouse_escape == "alt+o"
     assert loaded.hotkey_mouse_escape == config.DEFAULT_HOTKEY_MOUSE_ESCAPE
 
 
@@ -197,7 +242,7 @@ def test_hotkey_mouse_escape_invalid_falls_back(tmp_path):
     for bad in ("ctrl", "1+2", "foo", "ctrl+", 123, None):  # 格式非法与类型非法
         target.write_text(json.dumps({"hotkey_mouse_escape": bad}), encoding="utf-8")
         loaded = config.load_config(target)
-        assert loaded.hotkey_mouse_escape == "ctrl+alt+o", f"{bad!r} 应回退默认"
+        assert loaded.hotkey_mouse_escape == "alt+o", f"{bad!r} 应回退默认"
 
 
 # ---------------------------------------------------------------- 备选 API 链路
@@ -206,9 +251,9 @@ def test_hotkey_mouse_escape_invalid_falls_back(tmp_path):
 def test_standby_defaults_loaded(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
-    # 全部默认留空：备选链路不启用
-    assert loaded.api_base_url_stanby == ""
-    assert loaded.model_stanby == ""
+    # 默认指向 DeepSeek 备选链路；api_key_stanby 留空需用户自行填写
+    assert loaded.api_base_url_stanby == "https://api.deepseek.com"
+    assert loaded.model_stanby == "deepseek-flash"
     assert loaded.api_key_stanby == ""
     assert loaded.screenshot_model_stanby == ""
 
@@ -247,8 +292,8 @@ def test_standby_invalid_types_fall_back(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.api_base_url_stanby == ""  # 回退留空 = 不启用备选链路
-    assert loaded.model_stanby == ""
+    assert loaded.api_base_url_stanby == "https://api.deepseek.com"  # 类型非法回退默认值
+    assert loaded.model_stanby == "deepseek-flash"
     assert loaded.api_key_stanby == ""
     assert loaded.screenshot_model_stanby == ""
 
@@ -311,7 +356,7 @@ def test_api_invalid_types_fall_back_per_field(tmp_path):
     )
     loaded = config.load_config(target)
     assert loaded.api_base_url == translator.DEFAULT_BASE_URL
-    assert loaded.api_timeout == translator.DEFAULT_TIMEOUT
+    assert loaded.api_timeout == config.DEFAULT_API_TIMEOUT
     assert loaded.system_prompt == translator.DEFAULT_SYSTEM_PROMPT
     assert loaded.model == ""
     assert loaded.api_key == ""
@@ -327,7 +372,7 @@ def test_api_timeout_non_positive_falls_back(tmp_path):
     target = tmp_path / "config.json"
     for bad in (0, -3.5):
         target.write_text(json.dumps({"api_timeout": bad}), encoding="utf-8")
-        assert config.load_config(target).api_timeout == translator.DEFAULT_TIMEOUT, f"{bad!r}"
+        assert config.load_config(target).api_timeout == config.DEFAULT_API_TIMEOUT, f"{bad!r}"
 
 
 def test_translation_cache_size_kb_loaded(tmp_path):
@@ -339,14 +384,14 @@ def test_translation_cache_size_kb_loaded(tmp_path):
 def test_translation_cache_size_kb_missing_defaults(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"auto_translate": True}), encoding="utf-8")
-    assert config.load_config(target).translation_cache_size_kb == 256
+    assert config.load_config(target).translation_cache_size_kb == 2048
 
 
 def test_translation_cache_size_kb_invalid_falls_back(tmp_path):
     target = tmp_path / "config.json"
     for bad in ("big", 0, -5, True):
         target.write_text(json.dumps({"translation_cache_size_kb": bad}), encoding="utf-8")
-        assert config.load_config(target).translation_cache_size_kb == 256, f"{bad!r}"
+        assert config.load_config(target).translation_cache_size_kb == 2048, f"{bad!r}"
 
 
 def test_valid_values_loaded(tmp_path):
@@ -363,16 +408,16 @@ def test_valid_values_loaded(tmp_path):
     assert loaded.show_original_text is False
 
 
-def test_show_original_text_missing_defaults_to_true(tmp_path):
+def test_show_original_text_missing_defaults_to_false(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"auto_translate": True}), encoding="utf-8")
-    assert config.load_config(target).show_original_text is True
+    assert config.load_config(target).show_original_text is False
 
 
 def test_show_original_text_invalid_falls_back(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"show_original_text": "no"}), encoding="utf-8")
-    assert config.load_config(target).show_original_text is True
+    assert config.load_config(target).show_original_text is False
 
 
 def test_extra_keys_are_ignored(tmp_path):
@@ -380,7 +425,7 @@ def test_extra_keys_are_ignored(tmp_path):
     target.write_text(json.dumps({"auto_translate": True, "future_option": 42}), encoding="utf-8")
     loaded = config.load_config(target)
     assert loaded.auto_translate is True
-    assert loaded.auto_translate_interval == 3.0
+    assert loaded.auto_translate_interval == 1.0
 
 
 # ---------------------------------------------------------------- 流式悬浮窗
@@ -389,10 +434,10 @@ def test_extra_keys_are_ignored(tmp_path):
 def test_stream_window_defaults(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
-    assert loaded.stream_window_font_size == 14
-    assert loaded.stream_window_line_spacing == 1.45
-    assert loaded.stream_window_title_font_size == 8
-    assert loaded.stream_window_title_gap == 4
+    assert loaded.stream_window_font_size == 16
+    assert loaded.stream_window_line_spacing == 1.15
+    assert loaded.stream_window_title_font_size == 12
+    assert loaded.stream_window_title_gap == 2
 
 
 def test_stream_window_values_loaded(tmp_path):
@@ -421,7 +466,7 @@ def test_stream_window_integer_float_accepted(tmp_path):
     target.write_text(json.dumps({"stream_window_font_size": 16.0}), encoding="utf-8")
     assert config.load_config(target).stream_window_font_size == 16
     target.write_text(json.dumps({"stream_window_font_size": 16.5}), encoding="utf-8")
-    assert config.load_config(target).stream_window_font_size == 14
+    assert config.load_config(target).stream_window_font_size == 16
 
 
 def test_stream_window_invalid_types_fall_back_per_field(tmp_path):
@@ -438,10 +483,10 @@ def test_stream_window_invalid_types_fall_back_per_field(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.stream_window_font_size == 14
-    assert loaded.stream_window_line_spacing == 1.45
-    assert loaded.stream_window_title_font_size == 8
-    assert loaded.stream_window_title_gap == 4
+    assert loaded.stream_window_font_size == 16
+    assert loaded.stream_window_line_spacing == 1.15
+    assert loaded.stream_window_title_font_size == 12
+    assert loaded.stream_window_title_gap == 2
 
 
 def test_stream_window_out_of_range_falls_back(tmp_path):
@@ -458,10 +503,10 @@ def test_stream_window_out_of_range_falls_back(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.stream_window_font_size == 14
-    assert loaded.stream_window_line_spacing == 1.45
-    assert loaded.stream_window_title_font_size == 8
-    assert loaded.stream_window_title_gap == 4
+    assert loaded.stream_window_font_size == 16
+    assert loaded.stream_window_line_spacing == 1.15
+    assert loaded.stream_window_title_font_size == 12
+    assert loaded.stream_window_title_gap == 2
 
 
 def test_stream_window_size_loaded_and_fallback(tmp_path):
@@ -554,20 +599,20 @@ def test_wrong_types_fall_back_per_field(tmp_path):
         encoding="utf-8",
     )
     loaded = config.load_config(target)
-    assert loaded.auto_translate is False
-    assert loaded.auto_translate_interval == 3.0
+    assert loaded.auto_translate is True
+    assert loaded.auto_translate_interval == 1.0
 
 
 def test_bool_is_not_accepted_as_interval(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"auto_translate_interval": True}), encoding="utf-8")
-    assert config.load_config(target).auto_translate_interval == 3.0
+    assert config.load_config(target).auto_translate_interval == 1.0
 
 
 def test_tiny_interval_falls_back(tmp_path):
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"auto_translate_interval": 0.01}), encoding="utf-8")
-    assert config.load_config(target).auto_translate_interval == 3.0
+    assert config.load_config(target).auto_translate_interval == 1.0
 
 
 def test_frozen_default_path_uses_exe_dir(tmp_path, monkeypatch):
