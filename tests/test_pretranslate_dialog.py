@@ -160,3 +160,72 @@ def test_locate_entry_wiring_declares_icon_and_id():
     icon = Path(stream_window.BOUND_LOCATE_ICON)
     assert icon.name == "文档搜索_doc-search-two.svg"
     assert icon.is_file(), f"图标资产缺失：{icon}"
+
+
+# ---- 「切换翻译模式」入口（单击/自动翻译运行时切换） ------------------------------
+
+
+def test_translation_mode_icon_assets_exist_and_tinted():
+    """翻译模式两个图标资产存在，描边与既有入口同为淡蓝 #ADD8E6（无残留黑色）。"""
+    import renpy_overlay
+
+    icons = Path(renpy_overlay.__file__).parent / "assets" / "icons"
+    for name in ("播放_play-one.svg", "重新播放_replay-music.svg"):
+        svg = icons / name
+        assert svg.is_file(), f"图标资产缺失：{svg}"
+        content = svg.read_text(encoding="utf-8")
+        assert "#ADD8E6" in content, name
+        assert "#333" not in content, name
+
+
+def test_translation_mode_icon_mapping():
+    """启动图标与 auto_translate 一一对应：true=循环重播（自动），false=播放（单击）。"""
+    from renpy_overlay.stream_window import (
+        BOUND_MODE_AUTO_ICON,
+        BOUND_MODE_MANUAL_ICON,
+        translation_mode_icon,
+    )
+
+    assert translation_mode_icon(True) == BOUND_MODE_AUTO_ICON
+    assert translation_mode_icon(False) == BOUND_MODE_MANUAL_ICON
+    assert Path(BOUND_MODE_AUTO_ICON).is_file(), BOUND_MODE_AUTO_ICON
+    assert Path(BOUND_MODE_MANUAL_ICON).is_file(), BOUND_MODE_MANUAL_ICON
+
+
+def test_mode_entry_appends_after_existing_and_icon_overrides():
+    """切换入口追加在既有入口条末端；同 id 重注册可覆盖图标（点击切换后同步）。
+
+    复刻宿主注入时序：先注册 prebuild / locate-translation，再由
+    _sync_translation_mode_entry 追加 toggle-translate-mode；此后每次切换
+    只重注册同 id 条目 —— 位置不变、icon 即时换为新模式对应图标。
+    """
+    strip = TitleEntryStrip()
+    strip.set_actions([_action("prebuild"), _action("locate-translation")])
+    strip.set_actions(
+        [
+            BoundAction(
+                id="toggle-translate-mode",
+                label="切换翻译模式（当前：自动翻译）",
+                on_click=lambda: None,
+                icon="auto.svg",
+            )
+        ]
+    )
+    assert [a.id for a in strip.actions] == [
+        "prebuild",
+        "locate-translation",
+        "toggle-translate-mode",  # 既有入口在前，切换入口在末端
+    ]
+
+    strip.set_actions(
+        [
+            BoundAction(
+                id="toggle-translate-mode",
+                label="切换翻译模式（当前：单击翻译）",
+                on_click=lambda: None,
+                icon="manual.svg",
+            )
+        ]
+    )
+    assert len(strip.actions) == 3  # 同 id 覆盖：数量与位置均不变
+    assert strip.actions[-1].icon == "manual.svg"  # 图标已随模式切换同步

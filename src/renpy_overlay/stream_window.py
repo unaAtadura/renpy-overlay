@@ -91,6 +91,20 @@ BOUND_PREBUILD_ICON = str(
 BOUND_LOCATE_ICON = str(
     Path(__file__).parent / "assets" / "icons" / "文档搜索_doc-search-two.svg"
 )
+#: 「单击翻译」模式图标（淡蓝色播放，与既有入口同一视觉语言）
+BOUND_MODE_MANUAL_ICON = str(
+    Path(__file__).parent / "assets" / "icons" / "播放_play-one.svg"
+)
+#: 「自动翻译」模式图标（淡蓝色循环重播，与既有入口同一视觉语言）
+BOUND_MODE_AUTO_ICON = str(
+    Path(__file__).parent / "assets" / "icons" / "重新播放_replay-music.svg"
+)
+
+
+def translation_mode_icon(auto_translate_on: bool) -> str:
+    """翻译模式 → 入口图标（纯函数，离线测试用）：与生效模式一一对应。"""
+    return BOUND_MODE_AUTO_ICON if auto_translate_on else BOUND_MODE_MANUAL_ICON
+
 
 DRAIN_INTERVAL_MS = 80
 FOLLOW_INTERVAL_MS = 200
@@ -889,6 +903,9 @@ class StreamOverlayWindow:
         self._last_cache_hit_original: str | None = None  # 最近缓存命中原文（定位入口用）
         self._lock_started_at = 0.0
         self._auto_skip_reason: str | None = None
+        # 运行时翻译模式（仅内存状态）：初值取自 config.json 的 auto_translate，
+        # 标题窗「切换翻译模式」入口可随时切换，不回写配置文件
+        self._auto_translate_on = self._config.auto_translate
 
         self._drain_timer = QTimer()
         self._drain_timer.setInterval(DRAIN_INTERVAL_MS)
@@ -1520,7 +1537,7 @@ class StreamOverlayWindow:
         self._locked = not self._locked
         if self._locked:
             self._lock_started_at = time.time()
-            if self._config.auto_translate:
+            if self._auto_translate_on:
                 logger.info("已锁定悬浮窗位置（自动翻译开启：等一个轮询间隔后开始）")
                 self._update_title("已锁定，开始自动翻译")
             else:
@@ -1576,7 +1593,52 @@ class StreamOverlayWindow:
                 ),
             ]
         )
-        logger.info("注入成功：预构建/定位翻译入口已并入标题窗（图标跟随标题文本长度）")
+        # 「切换翻译模式」入口追加在既有入口条末端（图标由当前模式决定）
+        self._sync_translation_mode_entry()
+        logger.info(
+            "注入成功：预构建/定位/翻译模式切换入口已并入标题窗（图标跟随标题文本长度）"
+        )
+
+    def _sync_translation_mode_entry(self) -> None:
+        """把标题窗「切换翻译模式」入口图标同步为当前生效模式。
+
+        复用入口条同 id 覆盖语义：set_title_entries 按 id 合并覆盖后重排
+        标题（set_text → update），图标立即随模式更新，不影响其它入口。
+        """
+        mode = "自动翻译" if self._auto_translate_on else "单击翻译"
+        self._title_window.set_title_entries(
+            [
+                BoundAction(
+                    id="toggle-translate-mode",
+                    label=f"切换翻译模式（当前：{mode}）",
+                    on_click=self._toggle_translation_mode,
+                    icon=translation_mode_icon(self._auto_translate_on),
+                )
+            ]
+        )
+
+    def _toggle_translation_mode(self) -> None:
+        """入口回调：运行时在「单击翻译 / 自动翻译」间切换并同步图标。
+
+        只改内存状态（``_auto_translate_on``），不回写 config.json：重启后
+        仍以配置文件原值为准。开启即启动轮询定时器（行为与锁定一致：仅
+        锁定状态生效，新捕获台词走事件驱动路径即时评估）；关闭即停表。
+        """
+        self._auto_translate_on = not self._auto_translate_on
+        if self._auto_translate_on:
+            interval_ms = self._auto_interval_ms()
+            self._auto_timer.setInterval(interval_ms)
+            self._auto_timer.start()
+            logger.info(
+                "翻译模式已切换：自动翻译（每 %.1f 秒轮询，仅锁定状态生效；不写入 config.json）",
+                interval_ms / 1000.0,
+            )
+            self._update_title("翻译模式：自动翻译（锁定后按间隔自动翻译）")
+        else:
+            self._auto_timer.stop()
+            logger.info("翻译模式已切换：单击翻译（自动轮询停用；不写入 config.json）")
+            self._update_title("翻译模式：单击翻译（锁定后单击触发翻译）")
+        self._sync_translation_mode_entry()
 
     def request_prebuild(self) -> None:
         """绑定窗口入口回调：任务在途则唤回弹窗，否则重新进入扫描流程。"""
@@ -2356,12 +2418,12 @@ class StreamOverlayWindow:
     # -- 自动翻译（config.json: auto_translate / auto_translate_interval）
 
     def _start_auto_translate(self) -> None:
-        """启动自动翻译轮询（仅在配置开启时）。"""
+        """启动自动翻译轮询（仅在当前模式为自动翻译时；初值来自 config.json）。"""
         if self.skip_injection:
             # 跳过注入模式：无游戏文本捕获（需求：自动翻译不可用）
             logger.info("跳过注入模式：自动翻译不可用（需注入捕获游戏文本）")
             return
-        if not self._config.auto_translate:
+        if not self._auto_translate_on:
             logger.info("自动翻译未启用（config.json: auto_translate=false）")
             return
         interval_ms = self._auto_interval_ms()
@@ -2388,7 +2450,7 @@ class StreamOverlayWindow:
         锁定」间隔门——新捕获的文本是刚显示的台词，不存在锁定时立即翻译陈旧
         文本的问题；轮询路径（``immediate=False``）保持原间隔门不变。
         """
-        if not self._config.auto_translate:
+        if not self._auto_translate_on:
             return
         if not self._locked:
             self._auto_note_skip("未锁定")
