@@ -50,7 +50,8 @@ EPILOG = """\
   双击锁定    双击锁定 / 解锁位置；锁定后不再响应拖动，位置固定不被跟随拉回
   单击翻译    锁定状态下单击，把对话原文发给 OpenAI 兼容服务翻译成中文，
               译文经 SSE 流式接口逐块流入正文窗
-  自动翻译    config.json 开启（auto_translate: true）后，锁定状态按间隔自动翻译最新对话
+  自动翻译    config.json 开启（auto_translate: true）后，锁定状态按间隔自动翻译最新对话；
+              标题窗「切换翻译模式」图标可运行时切换单击/自动翻译（仅内存，不写回配置）
   显示原文    config.json 的 show_original_text（默认 true）控制正文区是否随对话显示原文
   缓存大小    config.json 的 translation_cache_size_kb（默认 256KB）控制内存缓存上限
   API 配置    config.json 的 api_base_url / api_timeout / model / system_prompt / api_key / enable_thinking / reasoning_effort
