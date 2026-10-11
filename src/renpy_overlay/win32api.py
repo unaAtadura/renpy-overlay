@@ -612,6 +612,18 @@ def set_topmost(hwnd: int) -> None:
     gui.SetWindowPos(hwnd, con.HWND_TOPMOST, 0, 0, 0, 0, flags)
 
 
+def place_below(hwnd: int, after_hwnd: int) -> None:
+    """把 hwnd 插入到 after_hwnd 之后的 z 序位（同层组内更低层级）。
+
+    需求（future_视频录制.txt）：帧放大窗须显示在截图窗口之下 —— 以截图
+    窗为插入参照，帧窗位于游戏之上、截图窗之下，保证截图翻译可用。
+    """
+    gui = _win32gui()
+    con = _win32con()
+    flags = con.SWP_NOMOVE | con.SWP_NOSIZE | con.SWP_NOACTIVATE
+    gui.SetWindowPos(hwnd, int(after_hwnd), 0, 0, 0, 0, flags)
+
+
 #: 扩展样式位（与 win32con 同值，避免仅为取常量而强依赖 pywin32）
 GWL_EXSTYLE = -16
 WS_EX_TRANSPARENT = 0x00000020

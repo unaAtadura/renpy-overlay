@@ -28,6 +28,9 @@ def test_missing_file_creates_defaults(tmp_path):
         "api_base_url_vision": "",
         "model_vision": "",
         "api_key_vision": "",
+        "api_base_url_asr": "",
+        "model_asr": "",
+        "api_key_asr": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
         "api_timeout": 30.0,
@@ -74,6 +77,9 @@ def test_default_file_key_order_matches_target(tmp_path):
         "api_base_url_vision",
         "model_vision",
         "api_key_vision",
+        "api_base_url_asr",
+        "model_asr",
+        "api_key_asr",
         "enable_thinking",
         "reasoning_effort",
         "api_timeout",
@@ -224,6 +230,42 @@ def test_api_key_vision_loaded_and_fallback(tmp_path):
     for bad in (123, None, ["k"]):
         target.write_text(json.dumps({"api_key_vision": bad}), encoding="utf-8")
         assert config.load_config(target).api_key_vision == "", f"{bad!r}"
+
+
+# ---------------------------------------------------------------- 语音识别（ASR）
+
+
+def test_api_base_url_asr_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_base_url_asr": "http://127.0.0.1:9999"}), encoding="utf-8")
+    assert config.load_config(target).api_base_url_asr == "http://127.0.0.1:9999"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 跟随主链路 api_base_url）
+    assert config.load_config(target).api_base_url_asr == ""
+    for bad in (123, None, ["url"]):
+        target.write_text(json.dumps({"api_base_url_asr": bad}), encoding="utf-8")
+        assert config.load_config(target).api_base_url_asr == "", f"{bad!r}"
+
+
+def test_model_asr_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"model_asr": "qwen-omni"}), encoding="utf-8")
+    assert config.load_config(target).model_asr == "qwen-omni"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 跟随主链路 model）
+    assert config.load_config(target).model_asr == ""
+    for bad in (123, None, ["m"]):
+        target.write_text(json.dumps({"model_asr": bad}), encoding="utf-8")
+        assert config.load_config(target).model_asr == "", f"{bad!r}"
+
+
+def test_api_key_asr_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_key_asr": "sk-asr"}), encoding="utf-8")
+    assert config.load_config(target).api_key_asr == "sk-asr"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 跟随主链路 api_key）
+    assert config.load_config(target).api_key_asr == ""
+    for bad in (123, None, ["k"]):
+        target.write_text(json.dumps({"api_key_asr": bad}), encoding="utf-8")
+        assert config.load_config(target).api_key_asr == "", f"{bad!r}"
 
 
 # ---------------------------------------------------------------- 听歌识曲
