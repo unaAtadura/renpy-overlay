@@ -109,20 +109,23 @@ def mux_args(
     ffmpeg_path: str,
     *,
     video_path: str | Path,
-    audio_path: str | Path,
+    audio_path: str | Path | None,
     out_path: str | Path,
 ) -> list[str]:
-    """双流合并命令：视频流不重编码（copy），音频编码为 aac，-shortest 对齐。"""
-    return [
-        ffmpeg_path,
-        "-i", str(video_path),
-        "-i", str(audio_path),
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-shortest",
-        "-y",
-        str(out_path),
-    ]
+    """停止阶段封装命令：视频流不重编码 copy 到最终 mp4 容器。
+
+    ``audio_path`` 为 None（仅视频降级）时省略音频输入，退化为单流 remux
+    （mkv 中间容器 → mp4，流 copy 秒级完成）；双流时音频编码为 aac 并用
+    -shortest 对齐到较短流。
+    """
+    args = [ffmpeg_path, "-i", str(video_path)]
+    if audio_path is not None:
+        args += ["-i", str(audio_path)]
+    args += ["-c:v", "copy"]
+    if audio_path is not None:
+        args += ["-c:a", "aac", "-shortest"]
+    args += ["-y", str(out_path)]
+    return args
 
 
 def normalize_range(start_s: float, end_s: float) -> tuple[float, float] | None:
@@ -201,13 +204,14 @@ def merge_streams(
     ffmpeg_path: str,
     *,
     video_path: str | Path,
-    audio_path: str | Path,
+    audio_path: str | Path | None,
     out_path: str | Path,
     run_fn=subprocess.run,
     timeout: float = MERGE_TIMEOUT_S,
 ) -> bool:
-    """双流合并执行；失败返回 ``False``（调用方回退保留无声视频）。
+    """停止阶段封装执行（双流合并或仅视频 remux）；失败返回 ``False``。
 
+    ``audio_path`` 为 None 时退化为单流 remux（mkv 中间容器 → mp4）。
     ``run_fn`` 仅供离线测试注入。
     """
     args = mux_args(

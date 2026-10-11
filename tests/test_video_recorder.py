@@ -52,6 +52,7 @@ class _StubProcess:
         self.errorOccurred = _Signal()
         self.started_program: str | None = None
         self.started_arguments: list = []
+        self.written: list[bytes] = []
         self.terminated = False
         self.killed = False
         self.wait_result = True
@@ -64,6 +65,10 @@ class _StubProcess:
         self.started_program = program
         self.started_arguments = list(arguments)
         self.started_args = [program, *self.started_arguments]  # 兼容既有断言
+
+    def write(self, data) -> None:
+        """对齐 QProcess.write：记录写入 stdin 的字节（ffmpeg 'q' 退出命令）。"""
+        self.written.append(bytes(data))
 
     def terminate(self):
         self.terminated = True
@@ -142,7 +147,7 @@ def test_start_starts_dual_streams_and_notifies(tmp_path):
     assert args[0] == "C:/tools/ffmpeg.exe"
     assert "-f" in args and args[args.index("-f") + 1] == "gdigrab"
     assert args[args.index("-video_size") + 1] == "800x600"
-    assert args[-1] == str(video_dir / "20261011-101010.tmp.mp4")  # 双流：临时视频
+    assert args[-1] == str(video_dir / "20261011-101010.tmp.mkv")  # 双流：mkv 中间容器
     assert len(harness.audio_calls) == 1  # 录音线程已拉起
     assert harness.audio_calls[0] == video_dir / "20261011-101010.tmp.wav"
     assert harness.notifies[0] == RECORD_START_TEXT
@@ -164,7 +169,7 @@ def test_start_uses_two_argument_start_form(tmp_path):
     assert process.started_program == "C:/tools/ffmpeg.exe"
     assert process.started_arguments[0] == "-f"
     assert process.started_arguments[-1] == str(
-        tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mp4"
+        tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
     )
 
 
@@ -204,8 +209,8 @@ def test_start_video_only_without_recorder_schemes(tmp_path):
     assert harness.recorder.start() is True
     args = harness.processes[0].started_args
     assert args[-1] == str(
-        tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"
-    ), "仅视频降级：直接录到最终名"
+        tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
+    ), "仅视频降级：同样录到 mkv 中间容器（停止时 remux 为 mp4）"
     assert harness.audio_calls == []
     assert harness.notifies[0] == RECORD_START_TEXT  # 三段提示文案不变
 
@@ -215,7 +220,8 @@ def test_stop_order_terminate_then_finish(tmp_path):
     harness.recorder.start()
     process = harness.processes[0]
     harness.recorder.stop()
-    assert process.terminated is True, "停止应先优雅结束 ffmpeg（收 moov）"
+    assert process.terminated is True, "停止应优雅结束 ffmpeg"
+    assert process.written == [b"q"], "应向 stdin 写 ffmpeg 交互退出命令（terminate 对无窗口进程无效）"
     assert harness.recorder.recording is True, "finished 到达前仍处于录制态"
     assert RECORD_STOP_TEXT not in harness.notifies
     process.finished.emit(0, 0)  # ffmpeg finalize 完成
@@ -223,7 +229,7 @@ def test_stop_order_terminate_then_finish(tmp_path):
     assert harness.notifies[-1] == RECORD_STOP_TEXT
     assert len(harness.merge_calls) == 1
     ffmpeg, video, audio, out = harness.merge_calls[0]
-    assert video == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mp4"
+    assert video == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
     assert audio == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.wav"
     assert out == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"
     assert "视频+系统音频" not in harness.notifies
@@ -237,16 +243,19 @@ def test_stop_joins_audio_thread_and_cleans_tmp(tmp_path):
     assert harness.recorder._audio_thread is None, "录音线程应已 join 并清引用"
 
 
-def test_merge_failure_falls_back_to_silent_video(tmp_path):
+def test_merge_failure_falls_back_to_intermediate_mkv(tmp_path):
+    """封装失败回退：mkv 中间文件改名为同 Stem 的 .mkv 最终产物。"""
     harness = _Harness(tmp_path, merge_result=False)
     harness.recorder.start()
     final = tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"
-    tmp_video = final.with_name("20261011-101010.tmp.mp4")
-    tmp_video.write_bytes(b"fake-video")  # 模拟 ffmpeg 已写出的临时视频
+    tmp_video = final.with_name("20261011-101010.tmp.mkv")
+    tmp_video.write_bytes(b"fake-mkv")  # 模拟 ffmpeg 已写出的中间容器
     harness.recorder.stop()
     harness.processes[0].finished.emit(0, 0)
-    assert final.is_file(), "合并失败应保留无声视频为最终产物"
+    fallback = final.with_suffix(".mkv")
+    assert fallback.is_file(), "封装失败应保留 mkv 中间容器为最终产物"
     assert not tmp_video.exists(), "临时视频应已改名"
+    assert not final.exists(), "封装失败时 mp4 最终名不应存在"
 
 
 def test_process_error_aborts_recording(tmp_path):
@@ -321,3 +330,74 @@ def test_start_ignored_while_recording(tmp_path):
     assert harness.recorder.start() is True
     assert harness.recorder.start() is False
     assert len(harness.processes) == 1
+
+
+# ---------------------------------------------------------------- 停止逻辑健壮性
+
+
+def test_stop_arms_grace_timeout_and_finish_cancels_it(tmp_path):
+    """停止时启动优雅退出超时兑底；正常收尾后撤销强杀兑底。"""
+    harness = _Harness(tmp_path)
+    harness.recorder.start()
+    harness.recorder.stop()
+    assert harness.recorder._stop_grace_timer.isActive(), "停止后应武装超时强杀兑底"
+    harness.processes[0].finished.emit(0, 0)
+    assert not harness.recorder._stop_grace_timer.isActive(), "正常收尾后应撤销超时兑底"
+    assert harness.processes[0].killed is False
+
+
+def test_stop_grace_timeout_kills_and_finishes(tmp_path):
+    """terminate + stdin 'q' 均未生效（ffmpeg 无窗口收不到 WM_CLOSE）时：
+    超时强杀兑底，mkv 中间容器保证产物仍可被封装为最终 mp4。"""
+    harness = _Harness(tmp_path)
+    harness.recorder.start()
+    harness.recorder.stop()
+    harness.recorder._on_stop_grace_timeout()  # 直接驱动超时回调（离线无事件循环）
+    assert harness.processes[0].killed is True, "超时后应强杀录制进程"
+    assert harness.recorder.recording is True, "强杀后等 finished 信号进入收尾"
+    harness.processes[0].finished.emit(0, 0)
+    assert harness.recorder.recording is False
+    assert len(harness.merge_calls) == 1, "强杀后仍应封装 mkv 中间容器为最终 mp4"
+    assert harness.notifies[-1] == RECORD_STOP_TEXT
+
+
+def test_stop_grace_timeout_ignored_after_normal_finish(tmp_path):
+    """正常收尾后超时回调不再生效（幂等守卫）：不重复封装/不触碰新进程。"""
+    harness = _Harness(tmp_path)
+    harness.recorder.start()
+    harness.recorder.stop()
+    harness.processes[0].finished.emit(0, 0)  # 正常收尾
+    assert len(harness.merge_calls) == 1
+    harness.recorder._on_stop_grace_timeout()  # 迟到的超时回调
+    assert len(harness.merge_calls) == 1, "收尾后迟到的超时兑底不应重复封装"
+
+
+def test_stop_repeated_clicks_are_idempotent(tmp_path):
+    """录制中重复点击菜单（stop 多次）与重复 finished 回调：收尾仅执行一次。"""
+    harness = _Harness(tmp_path)
+    harness.recorder.start()
+    harness.recorder.stop()
+    harness.recorder.stop()  # 重复点击：被 _stopping 守卫拦截
+    harness.recorder.toggle()  # toggle 亦走 stop 分支：同样被拦截
+    process = harness.processes[0]
+    assert process.written == [b"q"], "重复点击不应重复写入退出命令"
+    assert harness.recorder.recording is True  # 仍在等 finished
+    process.finished.emit(0, 0)
+    process.finished.emit(0, 0)  # 重复 finished 回调：幂等守卫拦截
+    assert harness.recorder.recording is False
+    assert len(harness.merge_calls) == 1, "收尾流程不应重入（不重复封装/清理）"
+    assert harness.notifies.count(RECORD_STOP_TEXT) == 1
+    assert harness.recorder.menu_label() == "录制视频", "结束后菜单文案应恢复"
+
+
+def test_video_only_stop_remuxes_without_audio(tmp_path):
+    """仅视频降级路径：统一 mkv 中间容器，停止时单流 remux（audio_path=None）。"""
+    harness = _Harness(tmp_path, audio_available=False)
+    harness.recorder.start()
+    harness.recorder.stop()
+    harness.processes[0].finished.emit(0, 0)
+    assert len(harness.merge_calls) == 1
+    _ffmpeg, video, audio, out = harness.merge_calls[0]
+    assert video == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
+    assert audio is None, "仅视频降级应退化为单流 remux（无音频输入）"
+    assert out == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"

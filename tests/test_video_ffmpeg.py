@@ -84,6 +84,17 @@ def test_mux_args_snapshot():
     ]
 
 
+def test_mux_args_remux_without_audio():
+    """仅视频降级：audio_path=None 退化为单流 remux（mkv → mp4 流 copy）。"""
+    assert ffmpeg.mux_args(FFMPEG, video_path=VIDEO, audio_path=None, out_path=OUT) == [
+        FFMPEG,
+        "-i", VIDEO,
+        "-c:v", "copy",
+        "-y",
+        OUT,
+    ]
+
+
 def test_audio_extract_args_snapshot():
     args = ffmpeg.audio_extract_args(
         FFMPEG, video_path=VIDEO, start_s=1.5, duration_s=3.25
@@ -177,6 +188,20 @@ def test_merge_streams_success(tmp_path):
         FFMPEG, video_path=VIDEO, audio_path=AUDIO, out_path=OUT,
         run_fn=lambda args, **kw: _Completed(),
     ) is True
+
+
+def test_merge_streams_remux_without_audio(tmp_path):
+    """仅视频降级：audio_path=None 时透传 remux 参数给 subprocess。"""
+    calls: list = []
+
+    def _run(args, **kwargs):
+        calls.append(args)
+        return _Completed()
+
+    assert ffmpeg.merge_streams(
+        FFMPEG, video_path=VIDEO, audio_path=None, out_path=OUT, run_fn=_run
+    ) is True
+    assert calls[0] == [FFMPEG, "-i", VIDEO, "-c:v", "copy", "-y", OUT]
 
 
 def test_merge_streams_failure_returns_false(tmp_path):
