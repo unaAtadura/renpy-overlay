@@ -17,7 +17,6 @@ from ..translator import (
     DEFAULT_BASE_URL,
     DEFAULT_REASONING_EFFORT,
     DEFAULT_TIMEOUT,
-    EndpointUnavailable,
     TranslationError,
     _api_url,
     _request_json,
@@ -125,21 +124,13 @@ def translate_image(
     enable_thinking: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     instruction: str = DEFAULT_SCREENSHOT_PROMPT,
-    base_url_stanby: str = "",
-    api_key_stanby: str = "",
-    model_stanby: str = "",
 ) -> str:
     """识图 + 翻译：把 base64 JPEG 发给 vision 模型，返回中文译文。
 
     ``model`` 为空时先向 ``/v1/models`` 取第一个已加载模型（与文本翻译一致）；
     ``enable_thinking=False`` 时按三方方言一并声明关闭思考（同
-    ``translator._chat_payload``）。响应缺字段 / 空译文抛 :class:`TranslationError`。
-
-    备选链路：``base_url_stanby`` 非空时启用——主链路发生
-    :class:`EndpointUnavailable`（连接失败/超时，含模型自动发现）时自动切换
-    到备选端点重试（鉴权用 ``api_key_stanby``、模型用 ``model_stanby``，留空
-    则同样自动发现）；备选端点也失败则抛出末次异常。服务可达但请求出错
-    （HTTP 错误、响应缺字段等）不触发切换。
+    ``translator._chat_payload``）。响应缺字段 / 空译文抛 :class:`TranslationError`；
+    连接失败/超时抛 :class:`EndpointUnavailable`（由调用方展示失败信息）。
     """
     if not jpeg_base64:
         raise ValueError("没有可识别的图片数据")
@@ -171,15 +162,7 @@ def translate_image(
         logger.info("截图识别翻译完成（译文 %d 字）", len(result))
         return result
 
-    try:
-        return _request(base_url, api_key, model)
-    except EndpointUnavailable:
-        if not base_url_stanby:
-            raise
-        logger.warning(
-            "主链路不可达（%s），切换备选链路（%s）", base_url, base_url_stanby
-        )
-        return _request(base_url_stanby, api_key_stanby, model_stanby)
+    return _request(base_url, api_key, model)
 
 
 def recognize_image(
@@ -192,9 +175,6 @@ def recognize_image(
     enable_thinking: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     instruction: str = DEFAULT_OCR_PROMPT,
-    base_url_stanby: str = "",
-    api_key_stanby: str = "",
-    model_stanby: str = "",
 ) -> str:
     """识图 + 识别原文：把 base64 JPEG 发给 vision 模型，返回图中文字原文。
 
@@ -215,7 +195,4 @@ def recognize_image(
         enable_thinking=enable_thinking,
         reasoning_effort=reasoning_effort,
         instruction=instruction,
-        base_url_stanby=base_url_stanby,
-        api_key_stanby=api_key_stanby,
-        model_stanby=model_stanby,
     )

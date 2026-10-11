@@ -27,7 +27,6 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "chat_window_width": 1760,          # AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
       "chat_window_height": 200,          # AI 对话窗高度（像素；缺省回退流式正文窗高度）
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
-      "screenshot_model": "",             # 截图识别翻译模型；空 = 回退 model（需 vision 能力）
       "recording_duration": 8,            # 听歌识曲录制系统音频的时长（秒）
       "hotkey_main": "alt+t",             # 快捷键模式主开关键（全局热键，Alt+T；不含 Ctrl 以规避 Ren'Py 持续快进）
       "hotkey_window_1": "1",             # 红色截图窗口的全局热键
@@ -39,10 +38,9 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "hotkey_window_7": "7",             # 紫色截图窗口的全局热键
       "hotkey_window_8": "8",             # 黑色截图窗口的全局热键
       "hotkey_mouse_escape": "alt+o",     # 锁鼠标区域的逃脱快捷键（全局热键，Alt+O；不含 Ctrl 以规避 Ren'Py 持续快进）
-      "api_base_url_stanby": "https://api.deepseek.com",  # 备选 API 链路地址；留空即不启用备选链路
-      "model_stanby": "deepseek-flash",   # 备选链路的文本模型（留空则自动发现）
-      "api_key_stanby": "",               # 备选链路的 API Key（留空则不携带鉴权头）
-      "screenshot_model_stanby": "",      # 备选链路的截图模型；留空回退 model_stanby
+      "api_base_url_vision": "",          # 视觉链路独立 API 基址；空 = 跟随主链路 api_base_url
+      "model_vision": "",                 # 视觉（识图）模型；空 = 自动向 /v1/models 发现（需 vision 能力）
+      "api_key_vision": "",               # 视觉链路的 API Key（留空则不携带鉴权头）
       "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
       "remote_screenshot_diameterA": 100, # 遥控截图窗口 A（触发器）直径（像素）
       "remote_screenshot_diameterB": 100, # 遥控截图窗口 B（瞄准器）直径（像素）
@@ -89,8 +87,11 @@ DEFAULT_CHAT_WINDOW_WIDTH = DEFAULT_STREAM_WINDOW_WIDTH
 DEFAULT_CHAT_WINDOW_HEIGHT = DEFAULT_STREAM_WINDOW_HEIGHT
 #: 截图翻译：发送 API 前副本等比压缩到的像素面积百分比（默认 10%）
 DEFAULT_SCREENSHOT_COMPRESS_PERCENT = 10
-#: 截图识别翻译的模型代号；空 = 回退 model（识图需 vision 多模态模型）
-DEFAULT_SCREENSHOT_MODEL = ""
+#: 视觉（识图）链路：基址/模型/密钥三键独立于文本链路；基址空 = 跟随主链路 api_base_url
+DEFAULT_API_BASE_URL_VISION = ""
+#: 视觉（识图）模型：与文本模型（model）彻底解耦；空 = 自动向 /v1/models 发现首个可用模型
+DEFAULT_MODEL_VISION = ""
+DEFAULT_API_KEY_VISION = ""  # 空：不携带 Authorization 头
 #: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
 DEFAULT_RECORDING_DURATION = 8
 #: 快捷键模式：主开关键默认 Alt+T（不含 Ctrl 以规避 Ren'Py 持续快进），窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
@@ -98,11 +99,6 @@ DEFAULT_HOTKEY_MAIN = "alt+t"
 DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
 #: 锁鼠标区域：逃脱快捷键默认 Alt+O（功能开启期间全程注册的保底退出，同理不含 Ctrl）
 DEFAULT_HOTKEY_MOUSE_ESCAPE = "alt+o"
-#: 备选 API 链路：主链路（api_base_url）不可达时自动切换；base_url 留空即不启用
-DEFAULT_API_BASE_URL_STANBY = "https://api.deepseek.com"
-DEFAULT_MODEL_STANBY = "deepseek-flash"
-DEFAULT_API_KEY_STANBY = ""
-DEFAULT_SCREENSHOT_MODEL_STANBY = ""
 #: 遥控截图：快捷键模式期间生成的 A/B 触发/瞄准小圆窗（开关 + 各自直径，像素）
 DEFAULT_REMOTE_SCREENSHOT_ENABLE = True
 DEFAULT_REMOTE_SCREENSHOT_DIAMETER = 100
@@ -118,14 +114,6 @@ MIN_STREAM_WINDOW_WIDTH = 240
 MIN_STREAM_WINDOW_HEIGHT = 80
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
-
-
-def resolve_screenshot_model(screenshot_model: str, model: str) -> str:
-    """截图模型的退避规则（纯函数）：``screenshot_model`` 留空回退 ``model``。
-
-    主链路与备选链路共用同一规则（备选侧传入各自的 stanby 配置对）。
-    """
-    return screenshot_model or model
 
 
 @dataclass(frozen=True)
@@ -153,9 +141,11 @@ class AppConfig:
     # AI 对话（尺寸缺省时回退流式正文窗的配置值）
     chat_window_width: int = DEFAULT_CHAT_WINDOW_WIDTH
     chat_window_height: int = DEFAULT_CHAT_WINDOW_HEIGHT
-    # 截图翻译
+    # 截图翻译（视觉链路独立于文本链路：基址/模型/密钥三键）
     screenshot_compress_percent: int = DEFAULT_SCREENSHOT_COMPRESS_PERCENT
-    screenshot_model: str = DEFAULT_SCREENSHOT_MODEL
+    api_base_url_vision: str = DEFAULT_API_BASE_URL_VISION
+    model_vision: str = DEFAULT_MODEL_VISION
+    api_key_vision: str = DEFAULT_API_KEY_VISION
     # 听歌识曲
     recording_duration: int = DEFAULT_RECORDING_DURATION
     # 截图翻译快捷键模式（主开关 + 8 个窗口键，均为全局热键）
@@ -163,11 +153,6 @@ class AppConfig:
     hotkey_windows: tuple[str, ...] = DEFAULT_HOTKEY_WINDOWS
     # 锁鼠标区域（逃脱快捷键：功能开启期间全程注册的保底退出方式）
     hotkey_mouse_escape: str = DEFAULT_HOTKEY_MOUSE_ESCAPE
-    # 备选 API 链路（主链路不可达时自动切换；base_url 留空即不启用）
-    api_base_url_stanby: str = DEFAULT_API_BASE_URL_STANBY
-    model_stanby: str = DEFAULT_MODEL_STANBY
-    api_key_stanby: str = DEFAULT_API_KEY_STANBY
-    screenshot_model_stanby: str = DEFAULT_SCREENSHOT_MODEL_STANBY
     # 遥控截图（快捷键模式期间存在的 A/B 触发/瞄准小圆窗；与主开关相互独立）
     remote_screenshot_enable: bool = DEFAULT_REMOTE_SCREENSHOT_ENABLE
     remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
@@ -199,12 +184,10 @@ def _write_defaults(target: Path) -> None:
         "translation_cache_size_kb": DEFAULT_TRANSLATION_CACHE_SIZE_KB,
         "api_base_url": DEFAULT_BASE_URL,
         "model": DEFAULT_MODEL,
-        "screenshot_model": DEFAULT_SCREENSHOT_MODEL,
         "api_key": DEFAULT_API_KEY,
-        "api_base_url_stanby": DEFAULT_API_BASE_URL_STANBY,
-        "model_stanby": DEFAULT_MODEL_STANBY,
-        "screenshot_model_stanby": DEFAULT_SCREENSHOT_MODEL_STANBY,
-        "api_key_stanby": DEFAULT_API_KEY_STANBY,
+        "api_base_url_vision": DEFAULT_API_BASE_URL_VISION,
+        "model_vision": DEFAULT_MODEL_VISION,
+        "api_key_vision": DEFAULT_API_KEY_VISION,
         "enable_thinking": DEFAULT_ENABLE_THINKING,
         "reasoning_effort": DEFAULT_REASONING_EFFORT,
         "api_timeout": DEFAULT_API_TIMEOUT,
@@ -442,7 +425,11 @@ def load_config(path: Path | None = None) -> AppConfig:
         screenshot_compress_percent=_read_percent(
             raw, "screenshot_compress_percent", DEFAULT_SCREENSHOT_COMPRESS_PERCENT
         ),
-        screenshot_model=_read_str(raw, "screenshot_model", DEFAULT_SCREENSHOT_MODEL),
+        api_base_url_vision=_read_str(
+            raw, "api_base_url_vision", DEFAULT_API_BASE_URL_VISION
+        ),
+        model_vision=_read_str(raw, "model_vision", DEFAULT_MODEL_VISION),
+        api_key_vision=_read_str(raw, "api_key_vision", DEFAULT_API_KEY_VISION),
         recording_duration=_read_positive_int(
             raw, "recording_duration", DEFAULT_RECORDING_DURATION, MIN_RECORDING_DURATION
         ),
@@ -450,14 +437,6 @@ def load_config(path: Path | None = None) -> AppConfig:
         hotkey_windows=_read_hotkeys(raw),
         hotkey_mouse_escape=_read_hotkey(
             raw, "hotkey_mouse_escape", DEFAULT_HOTKEY_MOUSE_ESCAPE
-        ),
-        api_base_url_stanby=_read_str(
-            raw, "api_base_url_stanby", DEFAULT_API_BASE_URL_STANBY
-        ),
-        model_stanby=_read_str(raw, "model_stanby", DEFAULT_MODEL_STANBY),
-        api_key_stanby=_read_str(raw, "api_key_stanby", DEFAULT_API_KEY_STANBY),
-        screenshot_model_stanby=_read_str(
-            raw, "screenshot_model_stanby", DEFAULT_SCREENSHOT_MODEL_STANBY
         ),
         remote_screenshot_enable=_read_bool(
             raw, "remote_screenshot_enable", DEFAULT_REMOTE_SCREENSHOT_ENABLE
@@ -481,9 +460,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
         "chat_window（size=%dx%d），"
-        "screenshot（compress=%d%%，model=%s），recording_duration=%ds（%s），"
+        "screenshot（compress=%d%%），"
+        "vision（base_url=%s，model=%s，api_key=%s），recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "stanby（base_url=%s，model=%r，api_key=%s，screenshot_model=%r），"
         "remote_screenshot（enable=%s，diameterA=%d，diameterB=%d）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
@@ -505,16 +484,14 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.chat_window_width,
         app_config.chat_window_height,
         app_config.screenshot_compress_percent,
-        app_config.screenshot_model or "<回退 model>",
+        app_config.api_base_url_vision or "<跟随主链路>",
+        app_config.model_vision or "<自动发现>",
+        "已设置" if app_config.api_key_vision else "未设置",
         app_config.recording_duration,
         target,
         app_config.hotkey_main,
         app_config.hotkey_windows,
         app_config.hotkey_mouse_escape,
-        app_config.api_base_url_stanby or "<未启用>",
-        app_config.model_stanby,
-        "已设置" if app_config.api_key_stanby else "未设置",
-        app_config.screenshot_model_stanby or "<回退 model_stanby>",
         app_config.remote_screenshot_enable,
         app_config.remote_screenshot_diameter_a,
         app_config.remote_screenshot_diameter_b,
