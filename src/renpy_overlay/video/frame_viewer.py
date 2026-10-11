@@ -90,6 +90,15 @@ class FrameViewerWindow(QWidget):
         self._label.setPixmap(pixmap)
         self._label.adjustSize()
         self.resize(pixmap.size())
+        # 显式居中到主屏可用区：顶层窗口不 move 时位置由系统决定，落到
+        # 不可预期位置会加重"看不到"的排查难度
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.move(
+                available.x() + (available.width() - self.width()) // 2,
+                available.y() + (available.height() - self.height()) // 2,
+            )
         self.show()
         self.raise_()
         self.activateWindow()

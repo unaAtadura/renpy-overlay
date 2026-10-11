@@ -237,6 +237,10 @@ class VideoEditorWindow(QWidget):
         #: set_locked_hwnd_provider 注入宿主的截图窗口池）
         self._frame_viewer_factory = frame_viewer_factory
         self._locked_hwnd_provider = None
+        #: 帧放大窗引用。PyQt 顶层窗口（无父）所有权归 Python：不持有引用，
+        #: 局部变量出栈后窗口会被垃圾回收立即销毁（表现为"日志显示已显示但
+        #: 界面看不到"，实测）。
+        self._frame_viewer = None
 
         # ---- 播放器（Qt Multimedia）：默认暂停 + 音量 0（静音，需求） ----------
         self._player = QMediaPlayer(self)
@@ -445,7 +449,11 @@ class VideoEditorWindow(QWidget):
             from .frame_viewer import FrameViewerWindow
 
             factory = FrameViewerWindow
+        if self._frame_viewer is not None:
+            self._frame_viewer.close()  # 关闭旧实例（closeEvent 已 deleteLater）
         viewer = factory(frame, lower_than=self._locked_hwnd_provider)
+        # 必须持有引用：顶层窗口所有权归 Python，局部变量出栈后即被销毁
+        self._frame_viewer = viewer
         viewer.show_frame()
         logger.info("已打开帧放大窗（帧号 %d）", ms_to_frame(self._player.position(), self._fps))
 
