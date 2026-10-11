@@ -13,6 +13,8 @@ from PyQt6.QtGui import QImage
 
 from renpy_overlay.video.editor_window import (
     DEFAULT_FPS,
+    FRAME_MIN_INTERVAL_MS,
+    SEEK_THROTTLE_MS,
     STEP_MS,
     VideoEditorWindow,
     fps_from_metadata,
@@ -21,6 +23,8 @@ from renpy_overlay.video.editor_window import (
     max_frame_for,
     ms_to_frame,
     parse_frame_text,
+    should_accept_frame,
+    should_seek_now,
     slider_value_from_click,
     volume_from_wheel,
 )
@@ -227,3 +231,98 @@ def test_destroyed_signal_clears_reference():
     VideoEditorWindow._open_frame_viewer(fake)  # 内部完成 destroyed 连接
     viewer.destroyed.emit(viewer)
     assert fake._frame_viewer is None
+
+
+# ---------------------------------------------------------------- 进度跳转节流
+
+
+def test_should_seek_now_first_call_and_throttle_window():
+    """首拍必放行（从未 seek）；节流窗口内挂起、超窗放行。"""
+    assert should_seek_now(1000.0, -1.0) is True  # 首拍
+    assert should_seek_now(1100.0, 1000.0) is False  # 窗口内（110ms < 150ms）
+    assert should_seek_now(1150.0, 1000.0) is True  # 超窗（150ms）
+    assert SEEK_THROTTLE_MS == 150
+
+
+def test_should_accept_frame_throttle():
+    """取帧节流：首帧必收、最小间隔内跳过、超窗接收。"""
+    assert should_accept_frame(100.0, -1.0) is True  # 首帧
+    assert should_accept_frame(110.0, 100.0) is False  # 10ms < 33ms
+    assert should_accept_frame(133.0, 100.0) is True  # 33ms 达到间隔
+    assert FRAME_MIN_INTERVAL_MS == 33
+
+
+class _SeekClock:
+    """可控毫秒钟 + setPosition 记录（拖拽 seek 路径的 fake）。"""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.seeks: list[int] = []
+
+    def player(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(setPosition=lambda p: self.seeks.append(p))
+
+
+def _seek_fake(clock: _SeekClock) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        _player=clock.player(),
+        _clock_ms=lambda: clock.now,
+        _last_seek_ms=-1.0,
+        _pending_seek=None,
+        _scrubbing=True,
+    )
+
+
+def test_slider_moved_throttles_seek_and_keeps_pending():
+    """拖拽节流：首拍立即 seek，窗口内的后续 moved 只挂起位置不再 seek。"""
+    clock = _SeekClock()
+    fake = _seek_fake(clock)
+    VideoEditorWindow._on_slider_moved(fake, 5000)
+    assert clock.seeks == [5000]  # 首拍立即 seek
+    clock.now = 1050.0  # 距上次 seek 仅 50ms（< 150ms 节流窗口）
+    VideoEditorWindow._on_slider_moved(fake, 6000)
+    assert clock.seeks == [5000], "节流窗口内不应重复 seek（seek 风暴实测撕裂/卡死）"
+    assert fake._pending_seek == 6000, "挂起位置应更新为最新拖拽值"
+
+
+def test_slider_released_seeks_pending_value():
+    """松手落定：节流期间挂起的最终位置补一次 seek 并清空。"""
+    clock = _SeekClock()
+    fake = _seek_fake(clock)
+    VideoEditorWindow._on_slider_moved(fake, 5000)
+    clock.now = 1050.0
+    VideoEditorWindow._on_slider_moved(fake, 8000)  # 挂起 8000
+    VideoEditorWindow._on_slider_released(fake)
+    assert clock.seeks == [5000, 8000], "拖拽终点应补 seek 落定"
+    assert fake._pending_seek is None
+    assert fake._scrubbing is False
+
+
+def test_slider_released_without_pending_does_not_seek():
+    clock = _SeekClock()
+    fake = _seek_fake(clock)
+    VideoEditorWindow._on_slider_released(fake)
+    assert clock.seeks == []  # 无挂起位置：不额外 seek
+
+
+def test_frame_changed_throttles_and_skips_invalid():
+    """取帧节流：无效帧跳过；最小间隔内的后续帧跳过（主线程 toImage 减负）。"""
+    frames: list = []
+    clock = types.SimpleNamespace(now=1000.0)
+    fake = types.SimpleNamespace(
+        _canvas=types.SimpleNamespace(set_frame=lambda img: frames.append(img)),
+        _clock_ms=lambda: clock.now,
+        _last_frame_ms=-1.0,
+    )
+    valid = types.SimpleNamespace(isValid=lambda: True, toImage=lambda: "IMG")
+    invalid = types.SimpleNamespace(isValid=lambda: False)
+    VideoEditorWindow._on_video_frame_changed(fake, invalid)
+    assert frames == [], "无效帧应被跳过"
+    VideoEditorWindow._on_video_frame_changed(fake, valid)
+    assert frames == ["IMG"]  # 首帧必收
+    clock.now = 1010.0  # 10ms < 33ms：节流窗口内
+    VideoEditorWindow._on_video_frame_changed(fake, valid)
+    assert frames == ["IMG"], "节流窗口内的帧应跳过（避免主线程 toImage 风暴）"
+    clock.now = 1033.0
+    VideoEditorWindow._on_video_frame_changed(fake, valid)
+    assert frames == ["IMG", "IMG"]

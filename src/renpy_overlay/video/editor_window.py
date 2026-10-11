@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
@@ -43,7 +44,12 @@ logger = logging.getLogger("renpy_overlay.video.editor_window")
 DEFAULT_FPS = 30.0
 #: 步退/步进的跨度（毫秒）
 STEP_MS = 5000
-#: 进度条单击跳转/拖拽的取值上限（毫秒；durationChanged 时更新）
+#: 拖拽 seek 节流窗口（毫秒）：sliderMoved 高频触发时距上次真实 seek 不足
+#: 该窗口则挂起（FFmpeg 后端 seek 是重操作，逐事件 seek 的风暴会撕裂画面
+#: 甚至拖垮主线程），最终位置由 sliderReleased 落定
+SEEK_THROTTLE_MS = 150
+#: 取帧最小间隔（毫秒）：videoFrameChanged 按 30fps 节流 toImage 大帧拷贝
+FRAME_MIN_INTERVAL_MS = 33
 #: 音量滚轮的单次步进（0-100 刻度）
 VOLUME_WHEEL_STEP = 5
 
@@ -104,6 +110,24 @@ def fps_from_metadata(numeric_value) -> float:
     except (TypeError, ValueError):
         return DEFAULT_FPS
     return value if value > 0 else DEFAULT_FPS
+
+
+def should_seek_now(
+    now_ms: float, last_seek_ms: float, throttle_ms: int = SEEK_THROTTLE_MS
+) -> bool:
+    """拖拽 seek 节流判定（纯函数，离线测试用）：距上次真实 seek 不足节流
+    窗口则挂起本次请求；``last_seek_ms < 0`` 表示从未 seek（首拍必放行）。"""
+    return last_seek_ms < 0 or now_ms - last_seek_ms >= throttle_ms
+
+
+def should_accept_frame(
+    now_ms: float,
+    last_frame_ms: float,
+    min_interval_ms: int = FRAME_MIN_INTERVAL_MS,
+) -> bool:
+    """取帧节流判定（纯函数，离线测试用）：距上次取帧不足最小间隔则跳过；
+    ``last_frame_ms < 0`` 表示从未取帧（首帧必收）。"""
+    return last_frame_ms < 0 or now_ms - last_frame_ms >= min_interval_ms
 
 
 def slider_value_from_click(pos_x: float, width: float, maximum: int) -> int:
@@ -216,6 +240,7 @@ class VideoEditorWindow(QWidget):
         pick_video=None,
         frame_viewer_factory=None,
         on_asr_request=None,
+        clock_ms=None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("视频编辑")
@@ -248,6 +273,17 @@ class VideoEditorWindow(QWidget):
         self._audio_output.setVolume(0.0)
         self._player.setAudioOutput(self._audio_output)
         self._fps = DEFAULT_FPS
+        # 解码器/后端异常只记日志（可见性），不影响主线程与其它功能
+        self._player.errorOccurred.connect(
+            lambda error, text="": logger.warning("媒体播放错误（%s）：%s", error, text)
+        )
+        #: 毫秒单调钟（构造注入，离线测试可控）：拖拽 seek 节流与取帧节流的时钟
+        self._clock_ms = clock_ms or (lambda: time.monotonic() * 1000.0)
+        #: 拖拽 seek 节流状态：上次真实 seek 时刻与挂起中的最终位置
+        self._last_seek_ms = -1.0
+        self._pending_seek: int | None = None
+        #: 取帧节流状态：上次取帧时刻
+        self._last_frame_ms = -1.0
 
         # ---- 布局（需求自上而下） ----------------------------------------------
         layout = QVBoxLayout(self)
@@ -382,9 +418,23 @@ class VideoEditorWindow(QWidget):
 
     def _on_slider_released(self) -> None:
         self._scrubbing = False
+        # 拖拽终点保证落定：节流期间挂起的最终位置补一次 seek
+        if self._pending_seek is not None:
+            self._player.setPosition(self._pending_seek)
+            self._pending_seek = None
 
     def _on_slider_moved(self, value: int) -> None:
-        self._player.setPosition(value)
+        """拖拽进度：节流 seek（高频 sliderMoved 不逐个触发 FFmpeg seek）。
+
+        每次 moved 都记录挂起位置；距上次真实 seek 超过节流窗口才落一次
+        seek，最终位置由 sliderReleased 补齐——消除 seek 风暴导致的画面
+        撕裂与主线程被解码竞争拖垮（实测卡死）。
+        """
+        self._pending_seek = value
+        now = self._clock_ms()
+        if should_seek_now(now, self._last_seek_ms):
+            self._last_seek_ms = now
+            self._player.setPosition(value)
 
     def _on_position_changed(self, position_ms: int) -> None:
         if not self._scrubbing:
@@ -479,7 +529,22 @@ class VideoEditorWindow(QWidget):
         logger.info("已打开帧放大窗（帧号 %d）", ms_to_frame(self._player.position(), self._fps))
 
     def _on_video_frame_changed(self, frame) -> None:
-        self._canvas.set_frame(frame.toImage())
+        """取帧自绘：按最小间隔节流 + 有效性检查 + 异常隔离。
+
+        videoFrameChanged 每帧触发，主线程 toImage 大帧拷贝与解码线程竞争
+        是跳转花屏/卡死的诱因之一：节流至 30fps、跳过无效帧、异常帧只记
+        日志不传播。
+        """
+        if not frame.isValid():
+            return
+        now = self._clock_ms()
+        if not should_accept_frame(now, self._last_frame_ms):
+            return
+        self._last_frame_ms = now
+        try:
+            self._canvas.set_frame(frame.toImage())
+        except Exception:  # pragma: no cover - 后端异常帧隔离，不拖垮主线程
+            logger.debug("取帧失败，跳过该帧", exc_info=True)
 
     # ---- 语音识别 ----------------------------------------------------------------
 
