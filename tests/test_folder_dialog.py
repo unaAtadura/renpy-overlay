@@ -14,12 +14,25 @@ import ctypes
 
 from renpy_overlay.folder_dialog import (
     CLSID_FILE_OPEN_DIALOG,
+    FOS_FILEMUSTEXIST,
+    FOS_FORCEFILESYSTEM,
+    FOS_PICKFOLDERS,
     _guid_from_string,
     _IFileOpenDialog,
     _IFileOpenDialogVtbl,
     _IShellItem,
     _IShellItemVtbl,
 )
+
+
+def test_fos_option_flags_match_sdk_values():
+    """FILEOPENDIALOGOPTIONS 标志值钉扎（防回归：FOS_FILEMUSTEXIST 曾被
+    误写为旧 OPENFILENAME 的 OFN_FILEMUSTEXIST=0x1000 系值 0x10——未定义
+    位使 SetOptions 返回 E_INVALIDARG，选视频对话框完全不可用，实测见
+    logs/renpy_overlay_20261011_162520.log）。"""
+    assert FOS_FILEMUSTEXIST == 0x800
+    assert FOS_FORCEFILESYSTEM == 0x40
+    assert FOS_PICKFOLDERS == 0x20
 
 
 def test_vtable_slots_match_sdk_header_order():

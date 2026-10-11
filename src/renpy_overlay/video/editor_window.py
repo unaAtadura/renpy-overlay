@@ -25,7 +25,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QImage
-from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PyQt6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -95,6 +95,15 @@ def max_frame_for(duration_ms: int, fps: float) -> int:
     if duration_ms <= 0:
         return -1  # 任何帧都越界：未打开视频时不响应
     return ms_to_frame(duration_ms, fps)
+
+
+def fps_from_metadata(numeric_value) -> float:
+    """媒体元数据帧率 → fps（纯函数，离线测试用）：非法/缺失回退 30fps。"""
+    try:
+        value = float(numeric_value)
+    except (TypeError, ValueError):
+        return DEFAULT_FPS
+    return value if value > 0 else DEFAULT_FPS
 
 
 def slider_value_from_click(pos_x: float, width: float, maximum: int) -> int:
@@ -345,13 +354,21 @@ class VideoEditorWindow(QWidget):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self._play_button.setText(PLAY_BUTTON_TEXT_PLAYING if playing else PLAY_BUTTON_TEXT_PAUSED)
 
-    def _on_meta_changed(self, metadata) -> None:
-        """帧率取媒体元数据（需求：帧位置精确到帧）；读不到回退 30fps。"""
-        try:
-            value = metadata.numericValue(metadata.Key.VideoFrameRate)
-        except Exception:  # pragma: no cover - 元数据缺失
-            value = None
-        self._fps = float(value) if value and value > 0 else DEFAULT_FPS
+    def _on_meta_changed(self) -> None:
+        """帧率取媒体元数据（需求：帧位置精确到帧）；读不到回退 30fps。
+
+        PyQt6 的 metaDataChanged 信号无参数：槽必须无参，元数据经
+        :meth:`QMediaPlayer.metaData` 主动读取（带参槽会 TypeError
+        使进程崩溃，实测见 logs/renpy_overlay_20261011_162520.log）。
+        """
+        metadata = self._player.metaData()
+        value = None
+        if metadata is not None:
+            try:
+                value = metadata.numericValue(QMediaMetaData.Key.VideoFrameRate)
+            except Exception:  # pragma: no cover - 元数据缺失/后端差异
+                value = None
+        self._fps = fps_from_metadata(value)
         logger.debug("视频帧率：%s fps", self._fps)
 
     # ---- 进度条 -----------------------------------------------------------------

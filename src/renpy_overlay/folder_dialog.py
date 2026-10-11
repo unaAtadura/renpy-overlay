@@ -38,7 +38,7 @@ IID_I_FILE_OPEN_DIALOG = "{D57C7288-D4AD-4768-BE02-9D969532D960}"
 
 FOS_PICKFOLDERS = 0x20  # 限制为选择文件夹
 FOS_FORCEFILESYSTEM = 0x40  # 只允许文件系统路径（取文件路径名的前提）
-FOS_FILEMUSTEXIST = 0x10  # 文件选择：所选文件必须存在
+FOS_FILEMUSTEXIST = 0x800  # 文件选择：所选文件必须存在（FILEOPENDIALOGOPTIONS；勿与旧 OPENFILENAME 的 OFN_FILEMUSTEXIST=0x1000 混淆，错值会使 SetOptions 返回 E_INVALIDARG）
 SIGDN_FILESYSPATH = 0x80058000
 IID_I_SHELL_ITEM = "{43826d1e-e718-42ee-bc55-a1e261c37bfe}"  # IShellItem IID
 S_OK = 0
@@ -216,17 +216,26 @@ def _run_file_dialog(
             logger.warning("设置对话框选项失败：0x%08X", hr & 0xFFFFFFFF)
             return None
 
-        # 文件模式：类型过滤器 + 默认目录（目录不存在时跳过，用系统默认位置）
+        # 文件模式：类型过滤器 + 默认目录（目录不存在时跳过，用系统默认位置）；
+        # 过滤器/默认目录为锦上添花：设置失败降级继续（弹系统默认状态对话框），
+        # 记日志便于诊断
         if not folders_only and filters:
             spec_array = (_FilterSpec * len(filters))(
                 *[_FilterSpec(name=name, spec=spec) for name, spec in filters]
             )
-            vtbl.SetFileTypes(iface, len(filters), ctypes.byref(spec_array))
-            vtbl.SetFileTypeIndex(iface, 1)
+            hr = vtbl.SetFileTypes(iface, len(filters), ctypes.byref(spec_array))
+            if hr != S_OK:
+                logger.warning("设置文件类型过滤器失败：0x%08X", hr & 0xFFFFFFFF)
+            else:
+                hr = vtbl.SetFileTypeIndex(iface, 1)
+                if hr != S_OK:
+                    logger.warning("设置默认过滤器索引失败：0x%08X", hr & 0xFFFFFFFF)
         if not folders_only and default_dir:
             default_item = _shell_item_from_path(default_dir)
             if default_item:
-                vtbl.SetDefaultFolder(iface, default_item)
+                hr = vtbl.SetDefaultFolder(iface, default_item)
+                if hr != S_OK:
+                    logger.warning("设置默认目录失败：0x%08X", hr & 0xFFFFFFFF)
 
         try:
             hr = vtbl.Show(iface, ctypes.c_void_p(owner_hwnd))

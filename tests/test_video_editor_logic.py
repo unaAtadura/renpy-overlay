@@ -9,6 +9,7 @@ from __future__ import annotations
 from renpy_overlay.video.editor_window import (
     DEFAULT_FPS,
     STEP_MS,
+    fps_from_metadata,
     frame_duration_ms,
     frame_to_ms,
     max_frame_for,
@@ -18,6 +19,17 @@ from renpy_overlay.video.editor_window import (
     volume_from_wheel,
 )
 from renpy_overlay.video.frame_viewer import MAX_SCALE, MIN_SCALE, next_scale
+
+
+def test_fps_from_metadata_valid_and_fallback():
+    """元数据帧率解析（防回归：PyQt6 metaDataChanged 信号无参，槽内经
+    QMediaPlayer.metaData() 主动读取后交本纯函数换算）。"""
+    assert fps_from_metadata(30.0) == 30.0
+    assert fps_from_metadata(23.976) == 23.976
+    assert fps_from_metadata(0) == DEFAULT_FPS  # 零值回退
+    assert fps_from_metadata(-5) == DEFAULT_FPS  # 非法回退
+    assert fps_from_metadata(None) == DEFAULT_FPS  # 元数据缺失回退
+    assert fps_from_metadata("abc") == DEFAULT_FPS  # 类型非法回退
 
 
 def test_frame_duration_ms_default_and_invalid_fps():
