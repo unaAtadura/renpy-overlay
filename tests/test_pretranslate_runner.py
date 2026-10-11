@@ -104,7 +104,7 @@ def test_full_success_pipeline(monkeypatch, patch_collect):
         # 运行时一致：API 参数集必须与 AppConfig 字段一一对应
         assert options["base_url"] == AppConfig().api_base_url
         assert options["reasoning_effort"] == AppConfig().reasoning_effort
-        assert "base_url_stanby" in options
+        assert "base_url_stanby" not in options  # 备选链路已废弃：不得再注入
         return f"译[{text}]"
 
     patch_translate(monkeypatch, fake_translate)

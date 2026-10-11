@@ -24,12 +24,10 @@ def test_missing_file_creates_defaults(tmp_path):
         "translation_cache_size_kb": 2048,
         "api_base_url": "http://127.0.0.1:1234",
         "model": "",
-        "screenshot_model": "",
         "api_key": "",
-        "api_base_url_stanby": "https://api.deepseek.com",
-        "model_stanby": "deepseek-flash",
-        "screenshot_model_stanby": "",
-        "api_key_stanby": "",
+        "api_base_url_vision": "",
+        "model_vision": "",
+        "api_key_vision": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
         "api_timeout": 30.0,
@@ -61,7 +59,7 @@ def test_missing_file_creates_defaults(tmp_path):
 
 
 def test_default_file_key_order_matches_target(tmp_path):
-    """默认配置文件的键顺序必须与目标基准（future_更改默认配置）一致。"""
+    """默认配置文件的键顺序固定（回归保护：意外增删或移动键立即失败）。"""
     target = tmp_path / "config.json"
     config.load_config(target)
     written = json.loads(target.read_text(encoding="utf-8"))
@@ -72,12 +70,10 @@ def test_default_file_key_order_matches_target(tmp_path):
         "translation_cache_size_kb",
         "api_base_url",
         "model",
-        "screenshot_model",
         "api_key",
-        "api_base_url_stanby",
-        "model_stanby",
-        "screenshot_model_stanby",
-        "api_key_stanby",
+        "api_base_url_vision",
+        "model_vision",
+        "api_key_vision",
         "enable_thinking",
         "reasoning_effort",
         "api_timeout",
@@ -197,22 +193,37 @@ def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
         assert loaded.screenshot_compress_percent == 10, f"{bad!r} 应回退默认"
 
 
-def test_screenshot_model_loaded_and_fallback(tmp_path):
+def test_api_base_url_vision_loaded_and_fallback(tmp_path):
     target = tmp_path / "config.json"
-    target.write_text(json.dumps({"screenshot_model": "qwen-vl"}), encoding="utf-8")
-    assert config.load_config(target).screenshot_model == "qwen-vl"
-    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串
-    assert config.load_config(target).screenshot_model == ""
+    target.write_text(json.dumps({"api_base_url_vision": "http://127.0.0.1:9999"}), encoding="utf-8")
+    assert config.load_config(target).api_base_url_vision == "http://127.0.0.1:9999"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 跟随主链路 api_base_url）
+    assert config.load_config(target).api_base_url_vision == ""
+    for bad in (123, None, ["url"]):
+        target.write_text(json.dumps({"api_base_url_vision": bad}), encoding="utf-8")
+        assert config.load_config(target).api_base_url_vision == "", f"{bad!r}"
+
+
+def test_model_vision_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"model_vision": "qwen-vl"}), encoding="utf-8")
+    assert config.load_config(target).model_vision == "qwen-vl"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 自动发现视觉模型）
+    assert config.load_config(target).model_vision == ""
     for bad in (123, None, ["vl"]):
-        target.write_text(json.dumps({"screenshot_model": bad}), encoding="utf-8")
-        assert config.load_config(target).screenshot_model == "", f"{bad!r}"
+        target.write_text(json.dumps({"model_vision": bad}), encoding="utf-8")
+        assert config.load_config(target).model_vision == "", f"{bad!r}"
 
 
-def test_resolve_screenshot_model_fallback_rule():
-    # 退避规则：screenshot_model 留空回退 model；主/备链路共用同一规则
-    assert config.resolve_screenshot_model("qwen-vl", "text-model") == "qwen-vl"
-    assert config.resolve_screenshot_model("", "text-model") == "text-model"
-    assert config.resolve_screenshot_model("", "") == ""
+def test_api_key_vision_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_key_vision": "sk-vl"}), encoding="utf-8")
+    assert config.load_config(target).api_key_vision == "sk-vl"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串（空 = 不携带鉴权头）
+    assert config.load_config(target).api_key_vision == ""
+    for bad in (123, None, ["k"]):
+        target.write_text(json.dumps({"api_key_vision": bad}), encoding="utf-8")
+        assert config.load_config(target).api_key_vision == "", f"{bad!r}"
 
 
 # ---------------------------------------------------------------- 听歌识曲
@@ -305,59 +316,6 @@ def test_hotkey_mouse_escape_invalid_falls_back(tmp_path):
         target.write_text(json.dumps({"hotkey_mouse_escape": bad}), encoding="utf-8")
         loaded = config.load_config(target)
         assert loaded.hotkey_mouse_escape == "alt+o", f"{bad!r} 应回退默认"
-
-
-# ---------------------------------------------------------------- 备选 API 链路
-
-
-def test_standby_defaults_loaded(tmp_path):
-    target = tmp_path / "config.json"
-    loaded = config.load_config(target)
-    # 默认指向 DeepSeek 备选链路；api_key_stanby 留空需用户自行填写
-    assert loaded.api_base_url_stanby == "https://api.deepseek.com"
-    assert loaded.model_stanby == "deepseek-flash"
-    assert loaded.api_key_stanby == ""
-    assert loaded.screenshot_model_stanby == ""
-
-
-def test_standby_values_loaded(tmp_path):
-    target = tmp_path / "config.json"
-    target.write_text(
-        json.dumps(
-            {
-                "api_base_url_stanby": "https://example.com/v1",
-                "model_stanby": "stanby-model",
-                "api_key_stanby": "sk-stanby",
-                "screenshot_model_stanby": "stanby-vl",
-            }
-        ),
-        encoding="utf-8",
-    )
-    loaded = config.load_config(target)
-    assert loaded.api_base_url_stanby == "https://example.com/v1"
-    assert loaded.model_stanby == "stanby-model"
-    assert loaded.api_key_stanby == "sk-stanby"
-    assert loaded.screenshot_model_stanby == "stanby-vl"
-
-
-def test_standby_invalid_types_fall_back(tmp_path):
-    target = tmp_path / "config.json"
-    target.write_text(
-        json.dumps(
-            {
-                "api_base_url_stanby": 123,
-                "model_stanby": None,
-                "api_key_stanby": ["k"],
-                "screenshot_model_stanby": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    loaded = config.load_config(target)
-    assert loaded.api_base_url_stanby == "https://api.deepseek.com"  # 类型非法回退默认值
-    assert loaded.model_stanby == "deepseek-flash"
-    assert loaded.api_key_stanby == ""
-    assert loaded.screenshot_model_stanby == ""
 
 
 def test_reasoning_effort_invalid_falls_back(tmp_path):

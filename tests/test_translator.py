@@ -238,58 +238,7 @@ def test_translate_text_with_v1_suffixed_base(stub_server):
     assert received[0]["path"] == "/v1/chat/completions"
 
 
-def test_translate_text_falls_back_to_standby(stub_server):
-    base, received = stub_server
-    dead = f"http://127.0.0.1:{_closed_port()}"
-    result = translator.translate_text(
-        "hi",
-        base_url=dead,
-        timeout=5,
-        base_url_stanby=base,
-        model_stanby="stanby-model",
-    )
-    assert result == "你好，世界"  # 备选链路完成翻译
-    assert len(received) == 1  # model_stanby 显式：跳过备选端点的模型发现
-    assert received[0]["body"]["model"] == "stanby-model"
-
-
-def test_translate_text_standby_auto_model_and_key(stub_server):
-    base, received = stub_server
-    dead = f"http://127.0.0.1:{_closed_port()}"
-    result = translator.translate_text(
-        "hi", base_url=dead, timeout=5, base_url_stanby=base, api_key_stanby="sk-stanby"
-    )
-    assert result == "你好，世界"
-    # model_stanby 留空：备选端点同样自动发现模型；鉴权用 api_key_stanby
-    assert received[0]["body"]["model"] == "stub-model"
-    assert received[0]["authorization"] == "Bearer sk-stanby"
-
-
-def test_translate_text_without_standby_raises():
+def test_translate_text_unreachable_raises():
     dead = f"http://127.0.0.1:{_closed_port()}"
     with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
-        translator.translate_text("hi", base_url=dead, timeout=2)  # 未启用备选链路
-
-
-def test_translate_text_http_error_does_not_fallback(stub_server):
-    # 服务可达但 HTTP 错误（404）不属于「不可达」：不切换备选链路
-    base, received = stub_server
-    with pytest.raises(translator.TranslationError, match="HTTP 404"):
-        translator.translate_text(
-            "hi",
-            base_url=f"{base}/wrong-prefix",
-            timeout=5,
-            model="m",  # 跳过模型发现，直接命中 404
-            base_url_stanby=base,
-        )
-    # 仅主链路被访问一次（wrong-prefix 路径 404），备选链路未被访问
-    assert len(received) == 1
-    assert received[0]["path"] == "/wrong-prefix/v1/chat/completions"
-
-
-def test_translate_text_standby_also_unreachable_raises_last():
-    dead = f"http://127.0.0.1:{_closed_port()}"
-    with pytest.raises(translator.EndpointUnavailable, match="无法连接"):
-        translator.translate_text(
-            "hi", base_url=dead, timeout=2, base_url_stanby=dead
-        )
+        translator.translate_text("hi", base_url=dead, timeout=2)  # 单链路：不可达直接抛出

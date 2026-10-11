@@ -334,10 +334,9 @@ uv run renpy-overlay --pid 12345
   | `api_key` | `""` | 配置后请求附带 `Authorization: Bearer <key>`；留空不带鉴权头 |
   | `enable_thinking` | `false` | 模型思考（reasoning）模式开关，**默认关闭**。关闭时一并声明 `enable_thinking: false` + `chat_template_kwargs` + `reasoning_effort`：LM Studio 会忽略前两者、需 `reasoning_effort` 才能真正关闭（实测：关闭后单条翻译约 0.5s，开启思考则需 30s+）；vLLM / SGLang 识别 `chat_template_kwargs`、Qwen Cloud 识别顶层 `enable_thinking` |
   | `reasoning_effort` | `"none"` | 关闭思考时使用的 `reasoning_effort` 取值（LM Studio 等本地服务靠它真正关闭思考）；置空则不发送该字段 |
-  | `api_base_url_stanby` | `https://api.deepseek.com` | 备选 API 链路地址：主链路 `api_base_url` 不可达（连接失败/超时）时自动切换到该端点重试；**留空即不启用备选链路** |
-  | `model_stanby` | `"deepseek-flash"` | 备选链路的模型代号；留空自动读取备选端点 `/v1/models` 的第一个已加载模型 |
-  | `api_key_stanby` | `""` | 备选链路的 API Key；留空不带鉴权头 |
-  | `screenshot_model_stanby` | `""` | 备选链路的识图模型；留空回退 `model_stanby`（与 `screenshot_model` 回退 `model` 的规则一致） |
+  | `api_base_url_vision` | `""` | 视觉链路独立 API 基址：留空跟随主链路 `api_base_url`，填入后截图翻译/识图走独立端点 |
+  | `model_vision` | `""` | 视觉（识图）模型代号：截图翻译与 AI 对话识图专用，与文本模型独立；留空自动读取 `/v1/models` 的第一个已加载模型（需 vision 多模态模型） |
+  | `api_key_vision` | `""` | 视觉请求的 API Key；留空不带鉴权头 |
 
 - 请求在后台线程执行，不阻塞窗口；同一时刻只允许一条在途请求；双击可随时中止；
 - 翻译走 SSE 流式接口（`stream: true`），译文增量实时逐块流入正文窗（打字机呈现）；
@@ -359,18 +358,16 @@ uv run renpy-overlay --pid 12345
     "chat_window_width": 1760,        // AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
     "chat_window_height": 200,        // AI 对话窗高度（像素；缺省回退流式正文窗高度）
     "screenshot_compress_percent": 10, // 截图翻译发送 API 前的等比压缩百分比（1~100）
-    "screenshot_model": "",           // 识图模型；空则回退 model（需 vision 多模态模型）
     "recording_duration": 8,          // 听歌识曲录制系统音频时长（秒，最小 3）
     "api_base_url": "http://127.0.0.1:1234",  // OpenAI 兼容 API 地址
     "api_timeout": 30.0,              // 请求超时（秒）
     "model": "",                      // 模型代号；空则自动取 /v1/models 的第一个
     "api_key": "",                     // API Key；空则不携带鉴权头（本地服务通常不需要）
+    "api_base_url_vision": "",        // 视觉链路独立 API 基址；空则跟随 api_base_url
+    "model_vision": "",               // 视觉识图模型；空则自动取 /v1/models 的第一个（需 vision 多模态模型）
+    "api_key_vision": "",             // 视觉请求 API Key；空则不携带鉴权头
     "enable_thinking": false,         // 模型思考模式开关，默认关闭
     "reasoning_effort": "none",       // 关闭思考时的 reasoning_effort 取值
-    "api_base_url_stanby": "https://api.deepseek.com",  // 备选 API 链路地址；主链路不可达时自动切换，留空即不启用
-    "model_stanby": "deepseek-flash", // 备选链路模型；空则自动取备选端点 /v1/models 的第一个
-    "api_key_stanby": "",             // 备选链路 API Key；空则不携带鉴权头
-    "screenshot_model_stanby": "",    // 备选链路识图模型；空则回退 model_stanby
     "remote_screenshot_enable": true,  // 遥控截图开关（快捷键模式期间生成 A/B 小圆窗）
     "remote_screenshot_diameterA": 100, // 窗口 A（触发器）直径（像素，最小 20）
     "remote_screenshot_diameterB": 100, // 窗口 B（瞄准器）直径（像素，最小 20）
