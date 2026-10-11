@@ -30,8 +30,11 @@ def test_vtable_slots_match_sdk_header_order():
     vtbl = _IFileOpenDialogVtbl
     assert vtbl.QueryInterface.offset == 0
     assert vtbl.Show.offset == 3 * ptr  # IModalWindow 唯一方法
+    assert vtbl.SetFileTypes.offset == 4 * ptr  # 文件选择过滤器（pick_file 用）
+    assert vtbl.SetFileTypeIndex.offset == 5 * ptr
     assert vtbl.SetOptions.offset == 9 * ptr
     assert vtbl.GetOptions.offset == 10 * ptr
+    assert vtbl.SetDefaultFolder.offset == 11 * ptr  # 默认目录（pick_file 用）
     assert vtbl.GetResult.offset == 20 * ptr
     # IShellItem：对象首成员 = lpVtbl 指针；QI/AddRef/Release + BindToHandler/
     # GetParent 之后是 GetDisplayName
