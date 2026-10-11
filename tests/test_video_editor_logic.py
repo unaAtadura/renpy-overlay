@@ -305,6 +305,23 @@ def test_slider_released_without_pending_does_not_seek():
     assert clock.seeks == []  # 无挂起位置：不额外 seek
 
 
+def test_drag_sequence_press_move_move_release():
+    """完整拖拽序列（窗口端契约）：press 单击跳转首拍 → 拖动节流挂起 →
+    松手落定最终位置；拖动中 seek 次数被节流，终点必达。"""
+    clock = _SeekClock()
+    fake = _seek_fake(clock)
+    VideoEditorWindow._on_slider_moved(fake, 5000)  # press：单击跳转（首拍）
+    assert clock.seeks == [5000]
+    clock.now += 10
+    VideoEditorWindow._on_slider_moved(fake, 6000)  # 拖动（窗口内：挂起）
+    clock.now += 10
+    VideoEditorWindow._on_slider_moved(fake, 7000)  # 拖动（挂起更新）
+    assert clock.seeks == [5000], "拖动中仅节流首拍已 seek"
+    VideoEditorWindow._on_slider_released(fake)  # 松手：落定最终位置
+    assert clock.seeks == [5000, 7000]
+    assert fake._pending_seek is None and fake._scrubbing is False
+
+
 def test_frame_changed_throttles_and_skips_invalid():
     """取帧节流：无效帧跳过；最小间隔内的后续帧跳过（主线程 toImage 减负）。"""
     frames: list = []

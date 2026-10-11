@@ -148,18 +148,55 @@ def volume_from_wheel(delta_y: int, current: int, step: int = VOLUME_WHEEL_STEP)
 
 
 class _ClickableSlider(QSlider):
-    """进度条：单击任意位置直接跳转（QSlider 默认只按页步进）。"""
+    """进度条：左键单击任意位置跳转；按住左键拖动连续调节。
+
+    拖拽采用控件自管状态机（_dragging）：QSlider 内部拖拽需父类处理
+    press 事件，而单击跳转必须接管 press（accept 后父类拖拽永远不会
+    启动，表现为只有单击跳转、无连续拖拽）——因此 press/move/release
+    全部自管：press 跳转并进入拖拽态，move 按 x 位置连续发 sliderMoved
+    （窗口端节流 seek），release 发最终值与 sliderReleased（窗口端落定）。
+    """
+
+    def __init__(self, orientation, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self._dragging = False
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            # 单击跳转（需求：点击刻度任意位置直接跳转到对应进度）；
+            # 随后进入拖拽跟踪，按住移动即连续调节（sliderMoved → 窗口端
+            # 节流 seek + 挂起，sliderReleased 落定）
             value = slider_value_from_click(
                 event.position().x(), self.width(), self.maximum()
             )
             self.setValue(value)
-            self.sliderMoved.emit(value)  # 与拖拽同一通路驱动播放位置
+            self.sliderMoved.emit(value)
+            self._dragging = True
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            value = slider_value_from_click(
+                event.position().x(), self.width(), self.maximum()
+            )
+            self.setValue(value)
+            self.sliderMoved.emit(value)  # 窗口端节流 seek + 挂起
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            # 松手落定：先发最终 moved（窗口更新挂起位置），再发 released
+            # （窗口端把挂起位置补 seek 落定）
+            self.sliderMoved.emit(self.value())
+            self.sliderReleased.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class _VolumeSlider(QSlider):
