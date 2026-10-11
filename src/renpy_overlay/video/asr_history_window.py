@@ -1,9 +1,10 @@
 """语音识别历史窗口：三列浏览 ``asr.db``（播放/时长倒计时/语音文本）。
 
-布局与交互（需求给定 future_视频录制.txt，参考翻译/识曲历史窗口）：上部
-「查找」行（标签 + 输入框 + 上一个/下一个/删除按钮）；下部 QTableView
-三列表格 —— 第一列为播放/停止按钮（逐行 setIndexWidget），第二列显示
-音频时长（播放中每秒倒计时剩余时长，停止或播放结束后恢复时长），第三列
+布局与交互（需求给定 future_视频录制.txt，参考翻译/识曲历史窗口）：自上而下
+三段式 —— 「查找」行（标签 + 输入框 + 上一个/下一个/删除按钮）、音量控制条
+（拖拽/滚轮调节，所有播放条目共用同一音量，每次打开重置为静音 0）、下部
+QTableView 三列表格 —— 第一列为播放/停止按钮（逐行 setIndexWidget），第二列
+显示音频时长（播放中每秒倒计时剩余时长，停止或播放结束后恢复时长），第三列
 为语音文本。
 
 行为约定（需求 + 查找参考翻译历史窗口）：
@@ -42,6 +43,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSlider,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -73,6 +75,24 @@ def format_duration(seconds: int) -> str:
 def normalize(text) -> str:
     """查找与比较用的归一化：None → 空串，去除首尾空白并转小写。"""
     return str(text or "").strip().casefold()
+
+
+#: 音量滚轮的单次步进（0-100 刻度）：与视频编辑窗口音量条同口径
+VOLUME_WHEEL_STEP = 5
+
+
+def volume_from_wheel(delta_y: int, current: int, step: int = VOLUME_WHEEL_STEP) -> int:
+    """音量条滚轮步进（纯函数，与视频编辑窗口同口径）：上滚增、下滚减。
+
+    结果钳制到 0..100；delta_y 为 0 时保持原值。
+    """
+    direction = 1 if delta_y > 0 else -1
+    return max(0, min(100, current + direction * step))
+
+
+def clamp_volume(value: int) -> int:
+    """音量刻度钳制到 0..100（纯函数，适配器 set_volume 用）。"""
+    return max(0, min(100, int(value)))
 
 
 def next_match(
@@ -263,6 +283,22 @@ class _TextCopyTableView(QTableView):
             logger.debug("已复制语音识别文本（%d 条）", len(texts))
 
 
+class _VolumeSlider(QSlider):
+    """音量控制条：鼠标拖拽与滚轮线性调节，不响应键盘（参考视频编辑窗口）。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setRange(0, 100)
+        self.setValue(0)  # 初始静音（每次打开重置由 showEvent 负责）
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta != 0:
+            self.setValue(volume_from_wheel(delta, self.value()))
+        event.accept()
+
+
 class _QtPlayerAdapter:
     """QMediaPlayer 封装：播放内存 wav 字节（真实实现；离线测试注入 stub）。"""
 
@@ -292,6 +328,10 @@ class _QtPlayerAdapter:
 
     def stop(self) -> None:
         self._player.stop()
+
+    def set_volume(self, value: int) -> None:
+        """设置播放音量（0-100，与音量控制条刻度一致）：所有条目共用。"""
+        self._audio.setVolume(clamp_volume(value) / 100.0)
 
 
 class AsrHistoryWindow(QWidget):
@@ -343,6 +383,13 @@ class AsrHistoryWindow(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top_row)
+        # 音量控制条（查找行与表格之间）：鼠标拖拽/滚轮调节，所有播放条目
+        # 共用同一音量（设在播放适配器的 QAudioOutput 上，切换条目不重置）；
+        # 每次打开（含隐藏后再显示）重置为静音 0（showEvent → _reset_volume）
+        self._volume_slider = _VolumeSlider()
+        self._volume_slider.valueChanged.connect(self._on_volume_changed)
+        self._reset_volume()  # 初始静音显式同步适配器（QAudioOutput 默认为最大音量）
+        layout.addWidget(self._volume_slider)
         layout.addWidget(self._table, stretch=1)
 
         #: 倒计时定时器：播放中每秒刷新剩余时长
@@ -401,6 +448,30 @@ class AsrHistoryWindow(QWidget):
             logger.info("语音识别历史查找无匹配（query=%r）", query)
             return
         self._select_row(index)
+
+    # ---- 音量（所有播放条目共用，主线程操作） -----------------------------------
+
+    def _on_volume_changed(self, value: int) -> None:
+        """音量滑块 → 播放适配器：所有条目共用同一音量（切换条目不重置）。"""
+        self._player.set_volume(value)
+
+    def _reset_volume(self) -> None:
+        """每次打开（含隐藏后再显示）音量重置为静音 0（需求）。
+
+        显式同步适配器（不走 valueChanged 信号）：Qt 信号仅在数值变化时
+        触发，滑块已为 0 时重复 setValue(0) 不会发出信号——不同步则适配器
+        保持 QAudioOutput 默认最大音量，出现「滑块显示静音、实际播放最大」
+        的脱节（实测 logs/renpy_overlay_20261011_211608.log）。
+        """
+        self._volume_slider.blockSignals(True)
+        self._volume_slider.setValue(0)
+        self._volume_slider.blockSignals(False)
+        self._player.set_volume(0)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        # 单例复用（关闭 = 隐藏）：showEvent 在首次与隐藏后再显示时都会触发
+        self._reset_volume()
+        super().showEvent(event)
 
     # ---- 播放（单条互斥：切播放先停前一条） ---------------------------------------
 

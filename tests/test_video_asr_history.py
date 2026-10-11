@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import types
+
 import pytest
 from PyQt6.QtCore import QCoreApplication, Qt
 
@@ -14,12 +16,16 @@ from renpy_overlay.video.asr_history_window import (
     HEADERS,
     MATCH_COLOR,
     TEXT_COLUMN,
+    VOLUME_WHEEL_STEP,
+    AsrHistoryWindow,
     _AsrTableModel,
     _index_after_delete,
+    clamp_volume,
     duration_cell_text,
     format_duration,
     next_match,
     normalize,
+    volume_from_wheel,
 )
 
 
@@ -193,3 +199,55 @@ def test_model_query_highlights_matching_rows():
     # 清空查询：高亮消失
     model.set_query("")
     assert model.data(model.index(1, 1), Qt.ItemDataRole.BackgroundRole) is None
+
+
+# ---------------------------------------------------------------- 音量控制条
+
+
+def test_volume_from_wheel_step_and_clamp():
+    """音量条滚轮步进（与视频编辑窗口同口径）：上滚增、下滚减、钳制 0..100。"""
+    assert volume_from_wheel(120, 50) == 50 + VOLUME_WHEEL_STEP
+    assert volume_from_wheel(-120, 50) == 50 - VOLUME_WHEEL_STEP
+    assert volume_from_wheel(120, 98) == 100  # 上限钳制
+    assert volume_from_wheel(-120, 2) == 0  # 下限钳制
+
+
+def test_clamp_volume():
+    assert clamp_volume(0) == 0
+    assert clamp_volume(100) == 100
+    assert clamp_volume(-5) == 0  # 负值钳零
+    assert clamp_volume(150) == 100  # 超界钳满
+
+
+def test_on_volume_changed_forwards_to_player():
+    """音量滑块 → 播放适配器：所有条目共用同一音量（切换条目不重置）。"""
+    calls: list[int] = []
+    fake = types.SimpleNamespace(
+        _player=types.SimpleNamespace(set_volume=lambda v: calls.append(v))
+    )
+    AsrHistoryWindow._on_volume_changed(fake, 40)
+    AsrHistoryWindow._on_volume_changed(fake, 80)
+    assert calls == [40, 80]
+
+
+def test_reset_volume_sets_slider_to_mute():
+    """每次打开（含隐藏后再显示）音量重置为静音 0。
+
+    须显式同步适配器：Qt 的 valueChanged 信号仅在数值变化时发出，滑块
+    已为 0 时重复 setValue(0) 不触发——若依赖信号，初始/重复重置场景下
+    适配器保持 QAudioOutput 默认最大音量，滑块显示与实际播放脱节
+    （实测 logs/renpy_overlay_20261011_211608.log）。"""
+    slider_sets: list[int] = []
+    player_calls: list[int] = []
+    blocks: list[bool] = []
+    fake = types.SimpleNamespace(
+        _volume_slider=types.SimpleNamespace(
+            setValue=lambda v: slider_sets.append(v),
+            blockSignals=lambda flag: blocks.append(flag),
+        ),
+        _player=types.SimpleNamespace(set_volume=lambda v: player_calls.append(v)),
+    )
+    AsrHistoryWindow._reset_volume(fake)
+    assert slider_sets == [0], "滑块应重置为静音显示"
+    assert player_calls == [0], "重置必须显式应用静音到适配器（不依赖信号）"
+    assert blocks == [True, False], "setValue 期间应屏蔽信号（避免重复同步）"
