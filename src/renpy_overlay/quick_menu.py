@@ -45,6 +45,9 @@ class QuickMenu:
         on_open_chat_history=None,
         on_open_translation_history=None,
         on_quit=None,
+        on_record_video=None,
+        on_open_video_editor=None,
+        on_open_asr_history=None,
         frame_overlay_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
@@ -55,6 +58,12 @@ class QuickMenu:
         self._on_open_chat_history = on_open_chat_history
         self._on_open_translation_history = on_open_translation_history
         self._on_quit = on_quit
+        # 视频功能（需求：录制视频/视频编辑入口 + 语音识别历史）：
+        # 录制控制器经 attach_recorder 注入（菜单文案随录制状态变化）
+        self._on_record_video = on_record_video
+        self._on_open_video_editor = on_open_video_editor
+        self._on_open_asr_history = on_open_asr_history
+        self._recorder = None
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
@@ -95,16 +104,27 @@ class QuickMenu:
                 MOUSE_LOCK_ON_TEXT if self._mouse_lock.enabled else MOUSE_LOCK_OFF_TEXT
             )
         menu.addSeparator()
+        # 视频功能（需求：位于「锁定鼠标区域」与「听歌识曲」之间，含分隔线）：
+        # 录制中菜单项显示「录制视频 mm:ss」，未录制显示「录制视频」
+        record_action = menu.addAction(
+            self._recorder.menu_label()
+            if self._recorder is not None
+            else "录制视频"
+        )
+        editor_action = menu.addAction("视频编辑")
+        menu.addSeparator()
         song_action = menu.addAction("听歌识曲")
         menu.addSeparator()
         chat_action = menu.addAction("对话")
         menu.addSeparator()
-        # 查看历史二级菜单（需求给定顺序）：翻译历史 / 截图历史 / 识曲历史 / 对话历史
+        # 查看历史二级菜单（需求给定顺序）：翻译历史 / 截图历史 / 识曲历史 /
+        # 对话历史 / 语音识别历史（末尾追加，不需分隔线）
         view_history_menu = menu.addMenu("查看历史")
         translation_history_action = view_history_menu.addAction("翻译历史")
         screenshot_history_action = view_history_menu.addAction("截图历史")
         song_history_action = view_history_menu.addAction("识曲历史")
         chat_history_action = view_history_menu.addAction("对话历史")
+        asr_history_action = view_history_menu.addAction("语音识别历史")
         menu.addSeparator()
         quit_action = menu.addAction("退出")
         chosen = menu.exec(global_pos)
@@ -116,6 +136,10 @@ class QuickMenu:
             self._hotkey_mode.toggle()
         elif mouse_lock_action is not None and chosen is mouse_lock_action:
             self._mouse_lock.toggle()
+        elif chosen is record_action and callable(self._on_record_video):
+            self._on_record_video()
+        elif chosen is editor_action and callable(self._on_open_video_editor):
+            self._on_open_video_editor()
         elif chosen is song_action and callable(self._on_recognize_song):
             self._on_recognize_song()
         elif chosen is chat_action and callable(self._on_open_chat):
@@ -130,6 +154,8 @@ class QuickMenu:
             self._on_open_song_history()
         elif chosen is chat_history_action and callable(self._on_open_chat_history):
             self._on_open_chat_history()
+        elif chosen is asr_history_action and callable(self._on_open_asr_history):
+            self._on_open_asr_history()
         elif chosen is quit_action and callable(self._on_quit):
             self._on_quit()
 
@@ -245,6 +271,14 @@ class QuickMenu:
         窗口，不会隐藏、恢复或捕获锁鼠标区域的任何窗口。
         """
         self._mouse_lock = mouse_lock
+
+    def attach_recorder(self, recorder) -> None:
+        """注入视频录制控制器（菜单项按其状态显示「录制视频 mm:ss」）。
+
+        同 attach_hotkey_mode 的附着约定：VideoRecorder 需要 QuickMenu
+        先存在才能由宿主组装（先建菜单、再附着控制器）。
+        """
+        self._recorder = recorder
 
     def lock_layout(self) -> None:
         """锁定截图布局：整体隐藏全部截图窗口 + 屏蔽创建/销毁入口。
