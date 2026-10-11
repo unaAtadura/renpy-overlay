@@ -7,8 +7,10 @@ QTableView + QAbstractTableModel 的四列表格（曲名/艺术家/游戏场景
 
 行为约定：
 
-- 查找：精确匹配（整格相等）、不区分大小写，上一个/下一个循环跳转到匹配
-  行并整行高亮；所有列都参与匹配；无匹配与空库只记日志，不做界面提示；
+- 查找：部分文字匹配（任一数据列归一化后**包含**查询词即命中，与翻译
+  历史/语音识别历史窗口同口径）、不区分大小写，上一个/下一个循环跳转到
+  匹配行并整行高亮；所有数据列都参与匹配（曲名/艺术家/游戏场景/备注）；
+  无匹配与空库只记日志，不做界面提示；
 - 删除：删除当前选中行并同步删除数据库记录，随后重建表格并原位回选；
 - 编辑：仅第三、四列（游戏场景/备注）可编辑，编辑文本框内回车提交时写回
   数据库；第一、二列（曲名/艺术家）只读；
@@ -56,12 +58,12 @@ def normalize(text) -> str:
 
 
 def next_match(row_texts: list[tuple[str, ...]], query: str, start: int, forward: bool) -> int:
-    """查找下一个匹配行索引（纯函数，便于离线单测）。
+    """查找下一个匹配行索引（纯函数，便于离线单测；与翻译/语音识别历史同口径）。
 
-    精确匹配：任一列归一化后与查询词相等（不区分大小写）即命中；从 ``start``
-    行起沿 ``forward`` 方向循环扫描（next 从下一行、prev 从上一行开始）；
-    ``start`` 为 -1（无当前行）时 next 从第 0 行、prev 从最后一行开始；
-    找不到或查询词为空返回 -1。
+    部分文字匹配：任一列归一化后**包含**查询词即命中（不区分大小写）；
+    从 ``start`` 行起沿 ``forward`` 方向循环扫描（next 从下一行、prev 从
+    上一行开始）；``start`` 为 -1（无当前行）时 next 从第 0 行、prev 从
+    最后一行开始；找不到或查询词为空返回 -1。
     """
     count = len(row_texts)
     needle = normalize(query)
@@ -70,7 +72,9 @@ def next_match(row_texts: list[tuple[str, ...]], query: str, start: int, forward
     base = start if start >= 0 else (-1 if forward else count)
     for offset in range(1, count + 1):
         index = (base + (offset if forward else -offset)) % count
-        if needle in (normalize(cell) for cell in row_texts[index]):
+        # 部分文字匹配（子串包含）：注意 in 对生成器是相等成员测试（旧精确
+        # 匹配语义），部分匹配必须 any(子串)，与 next_match/模型高亮同口径
+        if any(needle in normalize(cell) for cell in row_texts[index]):
             return index
     return -1
 
@@ -125,7 +129,9 @@ class _SongTableModel(QAbstractTableModel):
             if not self._query:
                 return None
             row = self._rows[index.row()]
-            if self._query in (normalize(cell) for cell in row[1:]):
+            # 部分文字匹配（子串包含），与 next_match 同口径；注意 in 对
+            # 生成器是相等成员测试，不可用旧写法
+            if any(self._query in normalize(cell) for cell in row[1:]):
                 return MATCH_COLOR
             return None
         if role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):

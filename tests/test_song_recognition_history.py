@@ -39,6 +39,7 @@ def _rows(*texts: str) -> list[tuple[str, ...]]:
 
 
 def test_next_match_forward_and_backward():
+    """部分匹配下单字符行语义与整格一致（子串包含）。"""
     rows = _rows("A", "B", "C", "B")
     assert next_match(rows, "B", 0, forward=True) == 1  # 从下一行起向后
     assert next_match(rows, "B", 1, forward=True) == 3  # 命中行之后继续找
@@ -59,10 +60,13 @@ def test_next_match_without_current_row():
     assert next_match(rows, "A", -1, forward=False) == 0
 
 
-def test_next_match_exact_and_case_insensitive():
+def test_next_match_partial_and_case_insensitive():
+    """部分文字匹配（与翻译历史/语音识别历史同口径）：子串包含即命中。"""
     rows = _rows("My Song", "Other", "my song")
-    assert next_match(rows, "MY SONG", -1, forward=True) == 0  # 不区分大小写
-    assert next_match(rows, "My", -1, forward=True) == -1  # 子串不算（精确匹配）
+    assert next_match(rows, "MY SONG", -1, forward=True) == 0  # 不区分大小写（整串）
+    assert next_match(rows, "My", -1, forward=True) == 0  # 子串命中（原精确匹配下为 -1）
+    assert next_match(rows, "SONG", -1, forward=True) == 0  # 不区分大小写的子串
+    assert next_match(rows, "Other Song", -1, forward=True) == -1  # 无该子串
 
 
 def test_next_match_searches_every_column():
@@ -70,6 +74,7 @@ def test_next_match_searches_every_column():
     assert next_match(rows, "Artist", -1, forward=True) == 0  # 第二列命中
     assert next_match(rows, "战斗", -1, forward=True) == 0  # 第三列命中
     assert next_match(rows, "城镇", -1, forward=True) == 1  # 第四列命中
+    assert next_match(rows, "rti", -1, forward=True) == 0  # 部分匹配：Artist 的子串
 
 
 def test_next_match_no_hit_or_no_query():
@@ -189,7 +194,8 @@ def test_model_set_data_store_failure_keeps_cache():
     assert model.data(model.index(0, 3)) == ""  # 写库失败不更新缓存
 
 
-def test_model_query_highlights_matching_rows_only():
+def test_model_query_highlights_matching_rows_partial():
+    """部分文字匹配高亮：与 next_match 同口径（子串包含，不再整格相等）。"""
     model = _model_with(_record(1, "Alpha"), _record(2, "Beta"), _record(3, "alpha beta"))
     assert all(
         model.data(model.index(r, 0), Qt.ItemDataRole.BackgroundRole) is None for r in range(3)
@@ -197,8 +203,8 @@ def test_model_query_highlights_matching_rows_only():
     model.set_query("ALPHA")
     assert model.data(model.index(0, 0), Qt.ItemDataRole.BackgroundRole) == MATCH_COLOR
     assert model.data(model.index(1, 0), Qt.ItemDataRole.BackgroundRole) is None
-    # "alpha beta" 整格不等于查询词：精确匹配下不高亮（与 next_match 语义一致）
-    assert model.data(model.index(2, 0), Qt.ItemDataRole.BackgroundRole) is None
+    # 'alpha' 是 'alpha beta' 的子串：部分匹配下同样高亮（原精确匹配语义下不高亮）
+    assert model.data(model.index(2, 0), Qt.ItemDataRole.BackgroundRole) == MATCH_COLOR
     model.set_query("")  # 清空查询词清除高亮
     assert model.data(model.index(0, 0), Qt.ItemDataRole.BackgroundRole) is None
 
