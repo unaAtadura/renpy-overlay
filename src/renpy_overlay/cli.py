@@ -70,8 +70,8 @@ EPILOG = """\
               双击锁定截图窗后单击即截取该区域并发 vision 模型识别翻译
               （始终走 API 不查缓存；成功显示在正文窗并存入 screenshot.db）
   截图配置    config.json 的 screenshot_compress_percent（发送 API 前等比压缩
-              百分比，默认 10）/ screenshot_model（识图模型，空则回退 model，
-              需 vision 多模态模型）
+              百分比，默认 10）/ model_vision（视觉识图模型，与文本模型独立，
+              空则自动发现首个可用模型，需 vision 多模态能力）
   听歌识曲    标题/正文窗文字处右键弹快捷菜单：录制 recording_duration（默认 8）
               秒系统音频交 Shazam 识别；标题窗显示录制倒计时（建议关闭游戏音效
               提升识别率）/录制失败/识曲中/成功/失败，成功时正文窗显示歌名与

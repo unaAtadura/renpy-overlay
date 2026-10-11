@@ -431,23 +431,14 @@ class AIChatWindow(QWidget):
     # ---- API 请求参数 -----------------------------------------------------------
 
     def _vision_api_options(self) -> dict:
-        """OCR 请求参数：与截图翻译同源（vision 模型退避 + 备选链路）。"""
-        from .. import config  # 局部导入：config 反向依赖本包（hotkeys），避免包初始化期循环
-
+        """OCR 请求参数：与截图翻译同源（视觉链路基址/模型/密钥独立配置）。"""
         return {
-            "base_url": self._config.api_base_url,
+            "base_url": self._config.api_base_url_vision or self._config.api_base_url,
             "timeout": self._config.api_timeout,
-            "model": config.resolve_screenshot_model(
-                self._config.screenshot_model, self._config.model
-            ),
-            "api_key": self._config.api_key,
+            "model": self._config.model_vision,
+            "api_key": self._config.api_key_vision,
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
-            "base_url_stanby": self._config.api_base_url_stanby,
-            "api_key_stanby": self._config.api_key_stanby,
-            "model_stanby": config.resolve_screenshot_model(
-                self._config.screenshot_model_stanby, self._config.model_stanby
-            ),
         }
 
     def _text_api_options(self) -> dict:
@@ -460,7 +451,4 @@ class AIChatWindow(QWidget):
             "api_key": self._config.api_key,
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
-            "base_url_stanby": self._config.api_base_url_stanby,
-            "api_key_stanby": self._config.api_key_stanby,
-            "model_stanby": self._config.model_stanby,
         }

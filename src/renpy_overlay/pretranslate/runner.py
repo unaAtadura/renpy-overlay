@@ -65,9 +65,6 @@ class PrebuildTask:
             "api_key": cfg.api_key,
             "enable_thinking": cfg.enable_thinking,
             "reasoning_effort": cfg.reasoning_effort,
-            "base_url_stanby": cfg.api_base_url_stanby,
-            "api_key_stanby": cfg.api_key_stanby,
-            "model_stanby": cfg.model_stanby,
         }
 
     # ---- 对外入口 -----------------------------------------------------------
