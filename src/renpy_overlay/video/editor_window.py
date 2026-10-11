@@ -437,6 +437,26 @@ class VideoEditorWindow(QWidget):
         """注入截图窗口句柄提供者（帧放大窗压低层级的参照来源）。"""
         self._locked_hwnd_provider = provider
 
+    def _close_frame_viewer(self) -> None:
+        """关闭并弃用当前帧放大窗（幂等；容错 C++ 对象已被异步销毁）。
+
+        closeEvent 内的 deleteLater 是异步销毁：销毁执行后 PyQt 包装对象
+        失效，但本窗口的 Python 属性仍残留失效引用——对已删除对象调
+        close() 会 RuntimeError 崩溃（实测 logs/renpy_overlay_20261011_
+        193239.log）。先置空引用再容错关闭。
+        """
+        old, self._frame_viewer = self._frame_viewer, None
+        if old is None:
+            return
+        try:
+            old.close()
+        except RuntimeError:
+            logger.debug("旧帧放大窗 C++ 对象已销毁，跳过关闭")
+
+    def _on_frame_viewer_destroyed(self) -> None:
+        """帧放大窗 C++ 对象销毁（deleteLater 异步执行）后同步清引用。"""
+        self._frame_viewer = None
+
     def _open_frame_viewer(self) -> None:
         """暂停时单击播放区：放大当前帧（播放中单击忽略，需求）。"""
         if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -449,11 +469,12 @@ class VideoEditorWindow(QWidget):
             from .frame_viewer import FrameViewerWindow
 
             factory = FrameViewerWindow
-        if self._frame_viewer is not None:
-            self._frame_viewer.close()  # 关闭旧实例（closeEvent 已 deleteLater）
+        self._close_frame_viewer()  # 关闭旧实例（容错已销毁引用）
         viewer = factory(frame, lower_than=self._locked_hwnd_provider)
         # 必须持有引用：顶层窗口所有权归 Python，局部变量出栈后即被销毁
         self._frame_viewer = viewer
+        # C++ 对象销毁（deleteLater 异步执行）时同步清引用，避免残留失效包装
+        viewer.destroyed.connect(self._on_frame_viewer_destroyed)
         viewer.show_frame()
         logger.info("已打开帧放大窗（帧号 %d）", ms_to_frame(self._player.position(), self._fps))
 
