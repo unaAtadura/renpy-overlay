@@ -74,15 +74,43 @@ def default_video_dir(game_dir) -> Path:
     return anchor / CACHE_DIR_NAME / "video"
 
 
-def default_geometry() -> tuple[int, int, int, int]:
-    """主屏几何 ``(x, y, width, height)``（gdigrab 虚拟桌面坐标）。"""
+def physical_geometry(
+    x: int, y: int, width: int, height: int, device_pixel_ratio: float
+) -> tuple[int, int, int, int]:
+    """Qt 逻辑像素几何 → gdigrab 物理像素几何（纯函数，离线测试用）。
+
+    进程为 Per-Monitor DPI Aware（win32api 的 DPI awareness 设置），Qt 的
+    ``QScreen.geometry()`` 返回逻辑像素；而 gdigrab 按桌面物理像素抓屏——
+    直接把逻辑宽高当 ``-offset/-video_size`` 会只录到屏幕左上一块（DPR≠1
+    的屏幕上实测）。物理 = 逻辑 × devicePixelRatio（与
+    ``stream_window._virtual_screen_rect`` 同一口径）；DPR 非法（None/≤0）
+    按 1.0 处理，宽高下限钳 1。
+    """
+    dpr = device_pixel_ratio if device_pixel_ratio and device_pixel_ratio > 0 else 1.0
+    return (
+        round(x * dpr),
+        round(y * dpr),
+        max(1, round(width * dpr)),
+        max(1, round(height * dpr)),
+    )
+
+
+def default_geometry(screen=None) -> tuple[int, int, int, int]:
+    """主屏几何（gdigrab 虚拟桌面物理像素坐标）。
+
+    Per-Monitor DPI Aware 进程里 ``QScreen.geometry()`` 是 Qt 逻辑像素，
+    须经 devicePixelRatio 换算为物理像素（gdigrab 只认物理）；``screen``
+    仅供离线测试注入鸭子接口（geometry()/devicePixelRatio()）。
+    """
     from PyQt6.QtGui import QGuiApplication
 
-    screen = QGuiApplication.primaryScreen()
-    if screen is None:  # pragma: no cover - 无显示环境
+    screen = screen or QGuiApplication.primaryScreen()
+    if screen is None:  # pragma: no cover - 无显示环境兜底
         return (0, 0, 1920, 1080)
     geo = screen.geometry()
-    return (geo.x(), geo.y(), geo.width(), geo.height())
+    return physical_geometry(
+        geo.x(), geo.y(), geo.width(), geo.height(), screen.devicePixelRatio()
+    )
 
 
 class VideoRecorder(QObject):

@@ -9,14 +9,16 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QRect
 
 from renpy_overlay.video.recorder import (
     MENU_LABEL_IDLE,
     RECORD_START_TEXT,
     RECORD_STOP_TEXT,
     VideoRecorder,
+    default_geometry,
     menu_label,
+    physical_geometry,
     progress_text,
 )
 
@@ -330,6 +332,51 @@ def test_start_ignored_while_recording(tmp_path):
     assert harness.recorder.start() is True
     assert harness.recorder.start() is False
     assert len(harness.processes) == 1
+
+
+# ---------------------------------------------------------------- 录制几何（DPI）
+
+
+class _StubScreen:
+    """QScreen 鸭子接口 stub：geometry() 返回 Qt 逻辑像素，DPR 可指定。"""
+
+    def __init__(self, rect: QRect, dpr: float):
+        self._rect = rect
+        self._dpr = dpr
+
+    def geometry(self) -> QRect:
+        return self._rect
+
+    def devicePixelRatio(self) -> float:  # noqa: N802 - Qt 约定
+        return self._dpr
+
+
+def test_physical_geometry_scales_by_dpr():
+    """逻辑像素 → 物理像素（gdigrab 只认物理）：物理 = 逻辑 × DPR。
+
+    DPR≠1 时直接用 Qt 逻辑宽高当 -video_size 会只录到屏幕左上一块
+    （实测缺陷：录出 1560x1040 而非全屏）。
+    """
+    assert physical_geometry(-960, 0, 1440, 900, 2.0) == (-1920, 0, 2880, 1800)
+    assert physical_geometry(0, 0, 1560, 1040, 1.5) == (0, 0, 2340, 1560)  # 四舍五入
+    assert physical_geometry(0, 0, 1920, 1080, 1.0) == (0, 0, 1920, 1080)  # DPR=1 恒等
+
+
+def test_physical_geometry_invalid_dpr_falls_back_to_identity():
+    assert physical_geometry(0, 0, 1920, 1080, 0) == (0, 0, 1920, 1080)  # 非法回退 1.0
+    assert physical_geometry(0, 0, 1920, 1080, None) == (0, 0, 1920, 1080)
+    assert physical_geometry(0, 0, 0, 0, 2.0) == (0, 0, 1, 1)  # 宽高下限钳 1
+
+
+def test_default_geometry_multiplies_device_pixel_ratio():
+    """default_geometry 须把 Qt 逻辑几何换算为物理像素（多屏负偏移一并缩放）。"""
+    stub = _StubScreen(QRect(-1560, 0, 1560, 1040), 2.0)
+    assert default_geometry(screen=stub) == (-3120, 0, 3120, 2080)
+
+
+def test_default_geometry_identity_at_dpr_one():
+    stub = _StubScreen(QRect(0, 0, 1920, 1080), 1.0)
+    assert default_geometry(screen=stub) == (0, 0, 1920, 1080)
 
 
 # ---------------------------------------------------------------- 停止逻辑健壮性
