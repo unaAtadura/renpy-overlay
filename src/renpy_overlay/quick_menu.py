@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QMenu
 
 from .screenshot.frame_overlay import FrameOverlayLayer
@@ -30,6 +30,8 @@ logger = logging.getLogger("renpy_overlay.quick_menu")
 MAX_WINDOWS = 8
 #: 级联创建时后一个窗口相对前一个的偏移（像素），避免完全重叠
 CASCADE_STEP = 30
+#: 录制中菜单项计时的刷新间隔（毫秒）：菜单打开期间按秒走动
+RECORD_LABEL_REFRESH_MS = 1000
 
 
 class QuickMenu:
@@ -127,7 +129,26 @@ class QuickMenu:
         asr_history_action = view_history_menu.addAction("语音识别历史")
         menu.addSeparator()
         quit_action = menu.addAction("退出")
-        chosen = menu.exec(global_pos)
+        # 录制中菜单项计时实时刷新：QMenu.exec 的模态事件循环仍会派发
+        # QTimer 事件，按秒更新「录制视频 mm:ss」（不依赖重新打开菜单）；
+        # QTimer 无父（QuickMenu 非 QObject），局部引用在 exec 阻塞期间存活，
+        # exec 返回后停止
+        refresh_timer = None
+        if self._recorder is not None and self._recorder.recording:
+            refresh_timer = QTimer()
+            refresh_timer.setInterval(RECORD_LABEL_REFRESH_MS)
+
+            def _refresh_record_label() -> None:
+                if self._recorder is not None:
+                    record_action.setText(self._recorder.menu_label())
+
+            refresh_timer.timeout.connect(_refresh_record_label)
+            refresh_timer.start()
+        try:
+            chosen = menu.exec(global_pos)
+        finally:
+            if refresh_timer is not None:
+                refresh_timer.stop()
         if chosen is create_action:
             self.create_window()
         elif chosen is destroy_action:

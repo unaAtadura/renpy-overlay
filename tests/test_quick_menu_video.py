@@ -21,6 +21,9 @@ class _StubAction:
     def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt 约定
         pass
 
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt 约定
+        self.text = text
+
 
 class _StubMenu:
     """QMenu stub：记录条目序列；exec 经 pick 回调从当前菜单自取动作。"""
@@ -55,11 +58,45 @@ class _StubMenu:
         return self.pick(self) if self.pick else None
 
 
-class _StubRecorder:
-    """VideoRecorder 鸭子接口 stub：只暴露菜单文案。"""
+class _StubSignal:
+    """信号 stub：记录连接的回调，可手动触发。"""
 
-    def __init__(self, label: str) -> None:
+    def __init__(self):
+        self.handlers = []
+
+    def connect(self, handler):
+        self.handlers.append(handler)
+
+    def emit(self, *args):
+        for handler in list(self.handlers):
+            handler(*args)
+
+
+class _StubTimer:
+    """QTimer stub：记录 interval/start/stop，timeout 可手动触发。"""
+
+    def __init__(self, parent=None) -> None:
+        self.timeout = _StubSignal()
+        self.interval = None
+        self.started = False
+        self.stopped = False
+
+    def setInterval(self, ms) -> None:  # noqa: N802 - Qt 约定
+        self.interval = ms
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+class _StubRecorder:
+    """VideoRecorder 鸭子接口 stub：菜单文案 + 录制状态。"""
+
+    def __init__(self, label: str, recording: bool = False) -> None:
         self._label = label
+        self.recording = recording
 
     def menu_label(self) -> str:
         return self._label
@@ -83,16 +120,25 @@ def _open(monkeypatch, *, recorder=None, pick=None, **callbacks):
 
     ``pick`` 在 exec 时以当前菜单实例调用，返回要选中的动作
     （跨实例的对象身份在 QuickMenu 内以 ``is`` 比较，必须同源）。
+    QTimer 同步替换为 stub（实例收集在主菜单 stub 的 ``timers`` 列表）。
     """
     holder: list[_StubMenu] = []
+    timers: list[_StubTimer] = []
 
     class _CapturingMenu(_StubMenu):
         def __init__(self):
             super().__init__()
             self.pick = pick
+            self.timers = timers
             holder.append(self)
 
+    class _CapturingTimer(_StubTimer):
+        def __init__(self, parent=None):
+            super().__init__()
+            timers.append(self)
+
     monkeypatch.setattr(quick_menu, "QMenu", _CapturingMenu)
+    monkeypatch.setattr(quick_menu, "QTimer", _CapturingTimer)
 
     def _capture():
         calls: list = []
@@ -185,3 +231,47 @@ def test_missing_callbacks_are_ignored(monkeypatch):
     monkeypatch.setattr(quick_menu, "QMenu", _PlainMenu)
     menu_obj = QuickMenu(on_capture_click=lambda w: None, on_open_history=lambda: None)
     menu_obj.show_context_menu(QPoint(0, 0))  # 无回调选中语音识别历史：不应抛异常
+
+
+# ---------------------------------------------------------------- 录制计时实时刷新
+
+
+class _LiveRecorder:
+    """录制中的 recorder stub：菜单文案随内部秒数变化（验证实时刷新）。"""
+
+    recording = True
+
+    def __init__(self) -> None:
+        self.seconds = 60
+
+    def menu_label(self) -> str:
+        return f"录制视频 {self.seconds // 60:02d}:{self.seconds % 60:02d}"
+
+
+def test_record_label_refresh_timer_while_recording(monkeypatch):
+    """录制中菜单打开期间：QTimer 按秒刷新「录制视频 mm:ss」文案
+    （不依赖重新打开菜单）。"""
+    recorder = _LiveRecorder()
+    menu, _calls = _open(monkeypatch, recorder=recorder)
+    assert len(menu.timers) == 1, "录制中应创建刷新定时器"
+    timer = menu.timers[0]
+    assert timer.started is True and timer.interval == 1000
+    record_action = menu.items[3][1]  # 分隔线之后第一项：录制视频
+    assert record_action.text == "录制视频 01:00"
+    recorder.seconds = 75  # 时间流逝
+    timer.timeout.emit()  # 定时器触发：文案实时更新
+    assert record_action.text == "录制视频 01:15", "菜单打开期间计时应实时走动"
+
+
+def test_refresh_timer_stopped_after_menu_closed(monkeypatch):
+    """菜单关闭（exec 返回）后停止刷新定时器。"""
+    menu, _calls = _open(monkeypatch, recorder=_LiveRecorder())
+    timer = menu.timers[0]
+    assert timer.started is True
+    assert timer.stopped is True, "exec 返回后应停止刷新定时器"
+
+
+def test_no_refresh_timer_when_not_recording(monkeypatch):
+    """未录制时菜单项静态「录制视频」，不创建/启动刷新定时器。"""
+    menu, _calls = _open(monkeypatch, recorder=_StubRecorder("录制视频"))
+    assert menu.timers == []
