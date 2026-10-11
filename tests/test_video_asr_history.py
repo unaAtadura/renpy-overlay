@@ -12,11 +12,14 @@ from PyQt6.QtCore import QCoreApplication, Qt
 
 from renpy_overlay.video.asr_history_window import (
     HEADERS,
+    MATCH_COLOR,
     TEXT_COLUMN,
     _AsrTableModel,
     _index_after_delete,
     duration_cell_text,
     format_duration,
+    next_match,
+    normalize,
 )
 
 
@@ -139,3 +142,54 @@ def test_playing_row_switch_clears_previous():
     model.set_remaining(18)
     assert model.data(model.index(1, 1)) == "00:18"
     assert model.playing_row == 1
+
+
+# ---------------------------------------------------------------- 查找（参考翻译历史）
+
+
+def test_normalize_strips_and_casefolds():
+    assert normalize(None) == ""
+    assert normalize("  Hello World ") == "hello world"
+
+
+def test_next_match_partial_text_match_any_column():
+    """部分文字匹配：任一数据列包含查询词即命中（时长/文本两列参与）。"""
+    rows = [("01:30", "你好世界"), ("02:00", "Goodbye"), ("00:45", "再见")]
+    assert next_match(rows, "世界", -1, True) == 0  # 文本列子串
+    assert next_match(rows, "01:3", -1, True) == 0  # 时长列子串
+    assert next_match(rows, "goodbye", -1, True) == 1  # 不区分大小写
+    assert next_match(rows, "不存在的词", -1, True) == -1
+
+
+def test_next_match_cycle_and_direction():
+    rows = [("01:00", "A"), ("02:00", "B"), ("03:00", "AB")]
+    # forward：从当前行下一行开始循环
+    assert next_match(rows, "a", 0, True) == 2
+    assert next_match(rows, "a", 2, True) == 0  # 循环回绕
+    # backward：从当前行上一行开始循环
+    assert next_match(rows, "a", 2, False) == 0
+    assert next_match(rows, "a", 0, False) == 2  # 循环回绕
+    # start=-1：next 从第 0 行、prev 从最后一行开始
+    assert next_match(rows, "a", -1, True) == 0
+    assert next_match(rows, "a", -1, False) == 2
+
+
+def test_next_match_empty_query_or_rows():
+    assert next_match([], "a", -1, True) == -1  # 空表
+    assert next_match([("01:00", "A")], "", -1, True) == -1  # 空查询
+    assert next_match([("01:00", "A")], "  ", -1, True) == -1  # 空白查询
+
+
+def test_model_query_highlights_matching_rows():
+    model = _AsrTableModel(None)
+    model.set_records([(1, 65, "你好世界"), (2, 30, "Goodbye")])
+    model.set_query("世界")
+    assert model.data(model.index(0, TEXT_COLUMN), Qt.ItemDataRole.BackgroundRole) == MATCH_COLOR
+    assert model.data(model.index(1, TEXT_COLUMN), Qt.ItemDataRole.BackgroundRole) is None
+    # 时长列也参与匹配：查询子串命中时长文本
+    model.set_query("00:3")
+    assert model.data(model.index(1, 1), Qt.ItemDataRole.BackgroundRole) == MATCH_COLOR
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.BackgroundRole) is None
+    # 清空查询：高亮消失
+    model.set_query("")
+    assert model.data(model.index(1, 1), Qt.ItemDataRole.BackgroundRole) is None

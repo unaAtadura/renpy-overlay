@@ -1,20 +1,24 @@
 """语音识别历史窗口：三列浏览 ``asr.db``（播放/时长倒计时/语音文本）。
 
-布局与交互（需求给定 future_视频录制.txt，参考翻译/识曲历史窗口）：顶部
-「删除」按钮；下部 QTableView 三列表格 —— 第一列为播放/停止按钮（逐行
-setIndexWidget），第二列显示音频时长（播放中每秒倒计时剩余时长，停止或
-播放结束后恢复时长），第三列为语音文本。
+布局与交互（需求给定 future_视频录制.txt，参考翻译/识曲历史窗口）：上部
+「查找」行（标签 + 输入框 + 上一个/下一个/删除按钮）；下部 QTableView
+三列表格 —— 第一列为播放/停止按钮（逐行 setIndexWidget），第二列显示
+音频时长（播放中每秒倒计时剩余时长，停止或播放结束后恢复时长），第三列
+为语音文本。
 
-行为约定（需求）：
+行为约定（需求 + 查找参考翻译历史窗口）：
 
+- 查找：部分文字匹配（任一数据列归一化后**包含**查询词即命中）、不区分
+  大小写，上一个/下一个循环跳转到匹配行并整行高亮（时长与语音文本两列
+  参与匹配，播放按钮列除外）；无匹配与空库只记日志，不做界面提示；
 - 删除：删除当前选中行并同步删除数据库记录，随后重建表格并原位回选；
   删除正在播放的行先停止播放；
 - 复制：选中条目 Ctrl+C 直接复制该行语音文本（不复制时长或音频本身）；
 - 播放互斥：同时只播放一条音频，点击其他播放按钮先停止前一条再播放新的；
 - 本窗口只读浏览已入库记录；窗口关闭 = 隐藏（单例复用，由宿主持有）。
 
-离线测试约定：不构造真实 QWidget —— 换算/显示纯函数与表格模型直接单测
-（模型仅依赖 QCoreApplication），播放适配器经鸭子接口注入 stub。
+离线测试约定：不构造真实 QWidget —— 换算/显示/查找纯函数与表格模型直接
+单测（模型仅依赖 QCoreApplication），播放适配器经鸭子接口注入 stub。
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
+    QLineEdit,
     QPushButton,
     QTableView,
     QVBoxLayout,
@@ -62,6 +68,34 @@ def format_duration(seconds: int) -> str:
     """时长显示 ``mm:ss``（纯函数）：负值钳零。"""
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def normalize(text) -> str:
+    """查找与比较用的归一化：None → 空串，去除首尾空白并转小写。"""
+    return str(text or "").strip().casefold()
+
+
+def next_match(
+    row_texts: list[tuple[str, str]], query: str, start: int, forward: bool
+) -> int:
+    """查找下一个匹配行索引（纯函数，便于离线单测；与翻译历史同口径）。
+
+    部分文字匹配：任一数据列归一化后**包含**查询词即命中（不区分大小写，
+    时长与语音文本两列参与，播放按钮列除外）；从 ``start`` 行起沿
+    ``forward`` 方向循环扫描（next 从下一行、prev 从上一行开始）；
+    ``start`` 为 -1（无当前行）时 next 从第 0 行、prev 从最后一行开始；
+    找不到或查询词为空返回 -1。
+    """
+    count = len(row_texts)
+    needle = normalize(query)
+    if count == 0 or not needle:
+        return -1
+    base = start if start >= 0 else (-1 if forward else count)
+    for offset in range(1, count + 1):
+        index = (base + (offset if forward else -offset)) % count
+        if any(needle in normalize(cell) for cell in row_texts[index]):
+            return index
+    return -1
 
 
 def duration_cell_text(duration: int, playing_row: int | None, row: int, remaining: int) -> str:
@@ -96,6 +130,7 @@ class _AsrTableModel(QAbstractTableModel):
         self._rows: list[tuple[int, int, str]] = []
         self._playing_row: int | None = None
         self._remaining = 0
+        self._query = ""  # 归一化后的查找词（"" = 无高亮）
 
     # ---- Qt 标准模型接口 ---------------------------------------------------
 
@@ -117,9 +152,20 @@ class _AsrTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self._rows):
             return None
+        asr_id, duration, text = self._rows[index.row()]
+        if role == Qt.ItemDataRole.BackgroundRole:
+            if not self._query:
+                return None
+            # 部分文字匹配（任一数据列包含查询词）：注意 in 对生成器是相等
+            # 成员测试（识曲历史的整格精确匹配语义），部分匹配必须 any(子串)
+            if any(
+                self._query in normalize(cell)
+                for cell in (format_duration(duration), text)
+            ):
+                return MATCH_COLOR
+            return None
         if role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             return None
-        asr_id, duration, text = self._rows[index.row()]
         if index.column() == 1:
             return duration_cell_text(duration, self._playing_row, index.row(), self._remaining)
         if index.column() == TEXT_COLUMN:
@@ -151,6 +197,21 @@ class _AsrTableModel(QAbstractTableModel):
         row = self._playing_row
         if row is not None and 0 <= row < len(self._rows):
             self.dataChanged.emit(self.index(row, 1), self.index(row, 1))
+
+    def set_query(self, query: str) -> None:
+        """更新查找词并刷新整表高亮（BackgroundRole，参考翻译历史窗口）。"""
+        normalized = normalize(query)
+        if normalized == self._query:
+            return
+        self._query = normalized
+        if self._rows:
+            top_left = self.index(0, 0)
+            bottom_right = self.index(len(self._rows) - 1, len(HEADERS) - 1)
+            self.dataChanged.emit(top_left, bottom_right, [Qt.ItemDataRole.BackgroundRole])
+
+    def row_texts(self) -> list[tuple[str, str]]:
+        """全部行的数据列展示文本（时长/语音文本，供查找纯函数消费）。"""
+        return [(format_duration(row[1]), row[2]) for row in self._rows]
 
     @property
     def playing_row(self) -> int | None:
@@ -250,12 +311,21 @@ class AsrHistoryWindow(QWidget):
         self._playing_row = -1  # 当前播放行（-1 = 无）
         self._remaining = 0
 
-        # 顶部：删除按钮（需求支持逐条删除；不做查找——需求未要求）
+        # 上部：查找行（参考翻译历史窗口：部分文字匹配、不区分大小写）
+        self._search_edit = QLineEdit()
+        self._prev_btn = QPushButton("上一个")
+        self._next_btn = QPushButton("下一个")
         self._delete_btn = QPushButton("删除")
         self._delete_btn.setEnabled(False)  # 无选中行时不可用
+        self._search_edit.returnPressed.connect(lambda: self._find(forward=True))
+        self._prev_btn.clicked.connect(lambda: self._find(forward=False))
+        self._next_btn.clicked.connect(lambda: self._find(forward=True))
         self._delete_btn.clicked.connect(self._delete_selected)
         top_row = QHBoxLayout()
-        top_row.addStretch(1)
+        top_row.addWidget(QLabel("查找"))
+        top_row.addWidget(self._search_edit, stretch=1)
+        top_row.addWidget(self._prev_btn)
+        top_row.addWidget(self._next_btn)
         top_row.addWidget(self._delete_btn)
 
         # 下部：三列表格（整行选择：删除/复制都以行为单位）
@@ -309,6 +379,7 @@ class AsrHistoryWindow(QWidget):
         self._model.set_records(records)
         self._delete_btn.setEnabled(False)  # 重建后无选中行
         self._rebuild_play_buttons()
+        self._model.set_query(self._search_edit.text())  # 重建后保留查找高亮
         if playing_id is not None and self._playing_row == -1:
             logger.debug("刷新丢弃播放状态（asr_id=%s 已不在列表）", playing_id)
         if not records:
@@ -316,6 +387,20 @@ class AsrHistoryWindow(QWidget):
                 "语音识别历史为空（数据库 %s）",
                 self._store.path if self._store is not None else "<无>",
             )
+
+    # ---- 查找 ---------------------------------------------------------------
+
+    def _find(self, forward: bool) -> None:
+        """上一个/下一个：循环跳转到匹配行并整行高亮（部分匹配、不区分大小写）。"""
+        query = self._search_edit.text()
+        index = next_match(
+            self._model.row_texts(), query, self._table.currentIndex().row(), forward
+        )
+        self._model.set_query(query)
+        if index == -1:
+            logger.info("语音识别历史查找无匹配（query=%r）", query)
+            return
+        self._select_row(index)
 
     # ---- 播放（单条互斥：切播放先停前一条） ---------------------------------------
 
