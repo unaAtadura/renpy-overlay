@@ -80,14 +80,51 @@ def test_resolve_asr_options_falls_back_to_main_chain():
     assert asr.resolve_asr_options(cfg) == ("http://asr:9999", "asr-model", "sk-asr")
 
 
-def test_audio_content_embeds_base64():
+def test_audio_content_embeds_base64_as_data_url():
+    """data 用 Data URL 而非纯 base64（防回归：DashScope compatible-mode
+    把 data 当音频 URL 解析，纯 base64 会被判 URL 无效 HTTP 400，实测见
+    logs/renpy_overlay_20261011_163432.log）。"""
     content = asr.audio_content(_WAV)
     assert content["type"] == "input_audio"
     assert content["input_audio"]["format"] == "wav"
-    assert base64.b64decode(content["input_audio"]["data"]) == _WAV
+    data = content["input_audio"]["data"]
+    prefix = "data:audio/wav;base64,"
+    assert data.startswith(prefix)
+    assert base64.b64decode(data[len(prefix):]) == _WAV
+
+
+def test_is_dedicated_asr_model():
+    """模型名含 asr（不区分大小写）即为专用转写模型。"""
+    assert asr.is_dedicated_asr_model("qwen3-asr-flash") is True
+    assert asr.is_dedicated_asr_model("Qwen-Audio-3.1-ASR-Flash") is True
+    assert asr.is_dedicated_asr_model("qwen2.5-omni") is False
+    assert asr.is_dedicated_asr_model("") is False
+    assert asr.is_dedicated_asr_model(None) is False
+
+
+def test_recognize_audio_dedicated_asr_payload(stub_server):
+    """专用 ASR 模型（如 qwen3-asr-flash）按官方形态发送：单条 user 消息
+    仅含 input_audio——text 指令段与思考方言字段会被判 does not support
+    this input（HTTP 400，实测 logs/renpy_overlay_20261011_165601.log）。"""
+    base, received = stub_server
+    result = asr.recognize_audio(
+        _WAV, base_url=base, timeout=5, model="qwen3-asr-flash", api_key="sk-1"
+    )
+    assert result == "识别出的语音文本"
+    body = received[0]["body"]
+    assert body["model"] == "qwen3-asr-flash"
+    assert body["stream"] is False
+    content = body["messages"][0]["content"]
+    assert len(content) == 1, "专用 ASR 不接受 text 指令段"
+    assert content[0]["type"] == "input_audio"
+    assert "temperature" not in body
+    assert "enable_thinking" not in body
+    assert "chat_template_kwargs" not in body
+    assert "reasoning_effort" not in body
 
 
 def test_recognize_audio_success_sends_input_audio(stub_server):
+    """通用全模态模型（名字不含 asr）：保留指令文本段与思考方言字段。"""
     base, received = stub_server
     result = asr.recognize_audio(_WAV, base_url=base, timeout=5, model="omni", api_key="sk-1")
     assert result == "识别出的语音文本"
@@ -99,7 +136,9 @@ def test_recognize_audio_success_sends_input_audio(stub_server):
     assert body["stream"] is False
     content = body["messages"][0]["content"]
     assert content[0]["type"] == "input_audio"
-    assert base64.b64decode(content[0]["input_audio"]["data"]) == _WAV
+    audio_data = content[0]["input_audio"]["data"]
+    assert audio_data.startswith("data:audio/wav;base64,")
+    assert base64.b64decode(audio_data.split(",", 1)[1]) == _WAV
     assert content[0]["input_audio"]["format"] == "wav"
     assert "逐字转写" in content[1]["text"]
     # 思考模式方言：默认关闭时附 reasoning_effort

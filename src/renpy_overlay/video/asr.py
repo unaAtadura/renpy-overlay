@@ -57,12 +57,33 @@ def resolve_asr_options(app_config) -> tuple[str, str, str]:
     )
 
 
+def is_dedicated_asr_model(model: str) -> bool:
+    """是否专用语音识别模型（纯函数，离线测试用）：模型名含 asr 不区分大小写。
+
+    专用 ASR 模型（如 qwen3-asr-flash / qwen-audio-3.x-asr-flash）只接受
+    单条 user 消息且 content 仅含 input_audio 段——text 指令段与思考方言
+    字段会被判 "The dedicated task `asr` does not support this input"
+    （HTTP 400，实测 logs/renpy_overlay_20261011_165601.log）；通用全模态
+    模型（qwen-omni 系）则按标准多模态形态发送指令文本。
+    """
+    return "asr" in (model or "").lower()
+
+
 def audio_content(wav_bytes: bytes, audio_format: str = "wav") -> dict:
-    """构造 ``input_audio`` 消息段（纯函数）：wav 字节 → base64 内嵌。"""
+    """构造 ``input_audio`` 消息段（纯函数）：wav 字节 → Data URL 内嵌。
+
+    ``data`` 必须用 Data URL（``data:audio/<fmt>;base64,<b64>``）而非纯
+    base64：DashScope compatible-mode（qwen3-asr-flash 等）把 data 当音频
+    URL 解析，纯 base64 会被判 "The provided URL does not appear to be
+    valid"（HTTP 400，实测 logs/renpy_overlay_20261011_163432.log）；
+    Data URL 形式是官方文档给出的本地文件标准传法，OpenAI 兼容后端普遍
+    接受。
+    """
+    encoded = base64.b64encode(wav_bytes).decode("ascii")
     return {
         "type": "input_audio",
         "input_audio": {
-            "data": base64.b64encode(wav_bytes).decode("ascii"),
+            "data": f"data:audio/{audio_format};base64,{encoded}",
             "format": audio_format,
         },
     }
@@ -87,27 +108,34 @@ def recognize_audio(
     """
     if not wav_bytes:
         raise ValueError("没有可识别的音频数据")
+    # 专用 ASR 模型按官方形态发送：单条 user 消息仅含 input_audio（无指令
+    # 文本段、无思考方言字段）；通用全模态模型保持标准多模态形态。
+    dedicated = is_dedicated_asr_model(model)
+    content: list[dict] = [audio_content(wav_bytes)]
+    if not dedicated:
+        content.append({"type": "text", "text": instruction})
     payload = {
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    audio_content(wav_bytes),
-                    {"type": "text", "text": instruction},
-                ],
+                "content": content,
             }
         ],
-        "temperature": 0,
         "stream": False,
-        "enable_thinking": bool(enable_thinking),
-        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
     }
-    if not enable_thinking and reasoning_effort:
-        payload["reasoning_effort"] = reasoning_effort
+    if not dedicated:
+        payload["temperature"] = 0
+        payload["enable_thinking"] = bool(enable_thinking)
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+        if not enable_thinking and reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
     if model:
         payload["model"] = model
     logger.info(
-        "发起语音识别请求（model=%s，音频 %d 字节）", model or "<未指定>", len(wav_bytes)
+        "发起语音识别请求（model=%s，音频 %d 字节，%s）",
+        model or "<未指定>",
+        len(wav_bytes),
+        "专用 ASR 形态" if dedicated else "通用多模态形态",
     )
     data = _request_json(
         _api_url(base_url, "/chat/completions"), payload, timeout, api_key
