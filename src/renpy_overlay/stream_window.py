@@ -80,6 +80,16 @@ from .translation_cache import (  # noqa: F401 (choice_translation_text re-expor
     hash_original,
 )
 from .translation_history_window import TranslationHistoryWindow
+from .video import (
+    AsrHistoryWindow,
+    VideoRecorder,
+    open_asr_store,
+)
+from .video import (
+    asr as video_asr,
+)
+from .video.editor_window import ASR_FAIL_TEXT, ASR_SUCCESS_TEXT
+from .video.ffmpeg import extract_wav, find_ffmpeg
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -852,6 +862,8 @@ class StreamOverlayWindow:
         self._song_store = open_song_store(game_dir or None)
         # AI 对话：用户消息与回复成对落库（chat.db，与 screenshot.db 同目录）
         self._chat_store = open_chat_store(game_dir or None)
+        # 语音识别：成功识别的音频片段与文本落库（asr.db，与其它库同目录）
+        self._asr_store = open_asr_store(game_dir or None)
         # AI 对话（OCR/发送）与翻译/识曲共用「同时只允许一个 API 调用」互斥：
         # 对话侧经 _acquire/_release_chat_slot 占用，三个既有入口同样检查它
         self._chat_busy = False
@@ -865,6 +877,9 @@ class StreamOverlayWindow:
             on_open_chat_history=self._open_chat_history,
             on_open_translation_history=self._open_translation_history,
             on_quit=self.request_close,
+            on_record_video=self._toggle_video_record,
+            on_open_video_editor=self._open_video_editor,
+            on_open_asr_history=self._open_asr_history,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
         # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
@@ -893,8 +908,18 @@ class StreamOverlayWindow:
             escape_hotkey=self._config.hotkey_mouse_escape,
         )
         self._quick_menu.attach_mouse_lock(self._mouse_lock)
+        # 视频录制：ffmpeg gdigrab + 环回录音双流（自备 ffmpeg，缺失时降级提示）；
+        # 菜单「录制视频」开关式入口，提示走标题窗唯一出口
+        self._video_recorder = VideoRecorder(
+            notify=self._update_title,
+            game_dir=game_dir,
+        )
+        self._quick_menu.attach_recorder(self._video_recorder)
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
+        self._video_editor_window = None  # 视频编辑窗口单例（惰性创建）
+        self._asr_history_window = None  # 语音识别历史窗口单例（惰性创建）
+        self._video_ffmpeg: str | None = None  # ffmpeg 路径惰性探测缓存
         self._chat_history_window: ChatHistoryWindow | None = None
         self._translation_history_window: TranslationHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
@@ -1014,9 +1039,13 @@ class StreamOverlayWindow:
         if self._chat_store is not None:
             self._chat_store.close()
             self._chat_store = None
+        if self._asr_store is not None:
+            self._asr_store.close()
+            self._asr_store = None
         self._hotkey_mode.shutdown()
         self._remote_screenshot.shutdown()  # 遥控截图 A/B 随退出销毁（幂等）
         self._mouse_lock.shutdown()  # 必须先于退出解除 ClipCursor，否则鼠标被永久限制
+        self._video_recorder.shutdown()  # 录制中则同步停止并完成合并收尾
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -1097,6 +1126,10 @@ class StreamOverlayWindow:
                     self._handle_song_done(payload)
                 elif kind == "song_fail":
                     self._handle_song_fail(payload)
+                elif kind == "asr_done":
+                    self._handle_asr_done(payload)
+                elif kind == "asr_fail":
+                    self._handle_asr_fail(payload)
                 elif kind == "cmd":
                     self._handle_command(payload)
                 elif kind == "injected":
@@ -1914,6 +1947,43 @@ class StreamOverlayWindow:
         self._history_window.activateWindow()
         logger.info("已打开截图历史窗口")
 
+    def _open_video_editor(self) -> None:
+        """打开视频编辑窗口（单例复用；QtMultimedia 缺失时降级提示）。"""
+        if self._video_editor_window is None:
+            try:
+                from .video.editor_window import VideoEditorWindow
+                from .video.recorder import default_video_dir
+            except ImportError as exc:
+                logger.warning("Qt Multimedia 不可用，视频编辑无法打开：%s", exc)
+                self.hint("视频编辑不可用：缺少 QtMultimedia 组件")
+                return
+            window = VideoEditorWindow(
+                video_dir=default_video_dir(self._game_dir or None),
+                on_asr_request=self._request_video_asr,
+            )
+            # 帧放大窗压低层级的参照：截图窗口池中双击锁定窗口的句柄
+            window.set_locked_hwnd_provider(
+                lambda: [w.hwnd for w in self._quick_menu.locked_windows()]
+            )
+            self._video_editor_window = window
+        self._video_editor_window.show()
+        self._video_editor_window.raise_()
+        self._video_editor_window.activateWindow()
+        logger.info("已打开视频编辑窗口")
+
+    def _open_asr_history(self) -> None:
+        """打开语音识别历史窗口（单例复用，每次刷新数据）。"""
+        if self._asr_store is None:
+            self.hint("语音识别历史不可用：未定位到游戏目录或数据库初始化失败。")
+            return
+        if self._asr_history_window is None:
+            self._asr_history_window = AsrHistoryWindow(self._asr_store)
+        self._asr_history_window.refresh()
+        self._asr_history_window.show()
+        self._asr_history_window.raise_()
+        self._asr_history_window.activateWindow()
+        logger.info("已打开语音识别历史窗口")
+
     def _open_song_history(self) -> None:
         """打开识曲历史窗口（单例复用，每次刷新数据）。"""
         if self._song_store is None:
@@ -2264,6 +2334,126 @@ class StreamOverlayWindow:
         self._update_title("翻译失败")
 
     # -- 听歌识曲（右键菜单触发；与翻译/截图翻译共用互斥；双击打断）
+
+    def _toggle_video_record(self) -> None:
+        """录制视频开关（主线程）：状态由 VideoRecorder 自持（开始/停止/提示）。
+
+        录制不经 API、不占翻译/识曲互斥；ffmpeg 缺失等不可录制情形由
+        控制器内部降级并提示（标题窗唯一出口）。
+        """
+        if self._closed:
+            return
+        self._video_recorder.toggle()
+
+    # -- 视频编辑语音识别（右键菜单触发；与翻译/识曲/对话共用互斥） --
+
+    def _request_video_asr(self, start_s: float, end_s: float) -> None:
+        """语音识别入口（主线程）：互斥检查 → 后台线程截取音轨并请求。
+
+        与翻译/识曲/对话共用「同时仅一个 API 请求」的互斥原则（需求）：
+        存在任意在途请求时静默忽略本次点击。片段由 ffmpeg 截取音轨转
+        wav（终点早于起点已在编辑窗口整理），识别成功经 asr_done 队列
+        事件回主线程落库与上屏。
+        """
+        if self._closed:
+            return
+        if self._translating or self._recognizing or self._chat_busy:
+            logger.info("已有请求在途（翻译/识曲/对话），忽略本次语音识别")
+            return
+        video_path = (
+            self._video_editor_window.current_video_path()
+            if self._video_editor_window is not None
+            else None
+        )
+        if not video_path:
+            if self._video_editor_window is not None:
+                self._video_editor_window.set_status(ASR_FAIL_TEXT)
+            return
+        ffmpeg = self._video_ffmpeg or find_ffmpeg()
+        self._video_ffmpeg = ffmpeg
+        if not ffmpeg:
+            logger.warning("未找到 ffmpeg.exe，语音识别不可用")
+            if self._video_editor_window is not None:
+                self._video_editor_window.set_status(ASR_FAIL_TEXT)
+            return
+        self._acquire_chat_slot()
+        self._translation_seq += 1
+        seq = self._translation_seq
+        duration = max(1, int(round(abs(end_s - start_s))))
+        thread = threading.Thread(
+            target=self._asr_worker,
+            args=(seq, ffmpeg, video_path, start_s, end_s, duration),
+            name=f"video-asr-{seq}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _asr_worker(
+        self,
+        seq: int,
+        ffmpeg: str,
+        video_path: str,
+        start_s: float,
+        end_s: float,
+        duration: int,
+    ) -> None:
+        """后台线程：截取音频轨转 wav → ASR 请求 → 结果只经队列回主线程。"""
+        try:
+            wav = extract_wav(ffmpeg, video_path=video_path, start_s=start_s, end_s=end_s)
+            if wav is None:
+                self._queue.put(("asr_fail", {"seq": seq, "stage": "extract"}))
+                return
+            base_url, model, api_key = video_asr.resolve_asr_options(self._config)
+            text = video_asr.recognize_audio(
+                wav,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+                timeout=self._config.api_timeout,
+                enable_thinking=self._config.enable_thinking,
+                reasoning_effort=self._config.reasoning_effort,
+            )
+            self._queue.put(
+                ("asr_done", {"seq": seq, "text": text, "audio": wav, "duration": duration})
+            )
+        except translator.TranslationError as exc:
+            logger.warning("语音识别失败：%s", exc)
+            self._queue.put(
+                ("asr_fail", {"seq": seq, "stage": "recognize", "error": str(exc)})
+            )
+        except Exception as exc:  # 兑底：截取/请求之外的异常统一收敛为识别失败
+            logger.exception("语音识别过程发生错误")
+            self._queue.put(
+                ("asr_fail", {"seq": seq, "stage": "recognize", "error": str(exc)})
+            )
+
+    def _handle_asr_done(self, payload: dict) -> None:
+        """识别成功（主线程）：释放互斥 → 落库 → 上屏 → 编辑窗状态与历史刷新。"""
+        self._release_chat_slot()
+        if self._closed:
+            return
+        text = str(payload["text"])
+        if self._asr_store is not None:
+            self._asr_store.insert(payload["audio"], text, int(payload["duration"]))
+            if self._asr_history_window is not None:
+                self._asr_history_window.refresh()
+        if self._video_editor_window is not None:
+            self._video_editor_window.set_status(ASR_SUCCESS_TEXT)
+        self._display_text(text + "\n")  # 需求：识别结果上屏到流式输出窗口
+        logger.info("语音识别成功（%d 字），已入库并上屏", len(text))
+
+    def _handle_asr_fail(self, payload: dict) -> None:
+        """识别失败（主线程）：释放互斥 + 编辑窗状态提示。"""
+        self._release_chat_slot()
+        logger.warning(
+            "语音识别失败（stage=%s，error=%s）",
+            payload.get("stage"),
+            payload.get("error"),
+        )
+        if self._closed:
+            return
+        if self._video_editor_window is not None:
+            self._video_editor_window.set_status(ASR_FAIL_TEXT)
 
     def request_song_recognition(self) -> None:
         """听歌识曲入口（主线程）：互斥检查 → 标题倒计时 → 后台录制+识别。
