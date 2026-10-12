@@ -50,6 +50,11 @@ EXCLUDES = [
     # 无引用链的标准库（被第三方库或钩子连带收集，运行链不使用）
     "unittest", "pydoc", "pydoc_data", "doctest", "tarfile", "xmlrpc",
     "tty", "socketserver",
+    # dashscope 主链软依赖：导入实验验证（屏蔽后
+    # ``from dashscope.audio.asr import Recognition`` 导入链完好），
+    # 仅 streaming / agent / cli 等可选子模块使用；
+    # cryptography / aiohttp / requests 则是主链硬依赖，不可排除
+    "rich", "pygments",
 ]
 
 a = Analysis(  # noqa: F821 - PyInstaller 注入
@@ -89,10 +94,11 @@ def _norm(name: str) -> str:
 a.datas = [entry for entry in a.datas if not _norm(entry[0]).endswith(".qm")]
 
 # Tcl 时区数据（tzdata ~600 个文件）：仅 Tcl clock 命令的时区库，
-# tkinter 目录/文件选择对话框用不到
+# tkinter 目录/文件选择对话框用不到。（前导加 / 统一为绝对形态，
+# 避免清单首段无斜杠时前缀匹配漏网）
 a.datas = [
     entry for entry in a.datas
-    if "/_tcl_data/tzdata/" not in _norm(entry[0])
+    if "/_tcl_data/tzdata/" not in "/" + _norm(entry[0])
 ]
 
 # 二进制剔除名单（basename）：
