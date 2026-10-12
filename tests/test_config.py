@@ -31,6 +31,9 @@ def test_missing_file_creates_defaults(tmp_path):
         "api_base_url_asr": "",
         "model_asr": "",
         "api_key_asr": "",
+        "api_base_url_asr_rt": "",
+        "model_asr_rt": "",
+        "api_key_asr_rt": "",
         "enable_thinking": False,
         "reasoning_effort": "none",
         "api_timeout": 30.0,
@@ -82,6 +85,9 @@ def test_default_file_key_order_matches_target(tmp_path):
         "api_base_url_asr",
         "model_asr",
         "api_key_asr",
+        "api_base_url_asr_rt",
+        "model_asr_rt",
+        "api_key_asr_rt",
         "enable_thinking",
         "reasoning_effort",
         "api_timeout",
@@ -300,6 +306,71 @@ def test_api_key_asr_loaded_and_fallback(tmp_path):
     for bad in (123, None, ["k"]):
         target.write_text(json.dumps({"api_key_asr": bad}), encoding="utf-8")
         assert config.load_config(target).api_key_asr == "", f"{bad!r}"
+
+
+# ---------------------------------------------------- 实时语音识别（ASR-RT）三键
+
+
+def test_api_base_url_asr_rt_loaded_and_fallback(tmp_path):
+    """实时识别基址：合法值生效；缺键/类型不符回退空串（不回退其它链路）。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"api_base_url_asr_rt": "https://dashscope.example/compatible-mode/v1"}),
+        encoding="utf-8",
+    )
+    assert (
+        config.load_config(target).api_base_url_asr_rt
+        == "https://dashscope.example/compatible-mode/v1"
+    )
+    target.write_text("{}", encoding="utf-8")
+    assert config.load_config(target).api_base_url_asr_rt == ""
+    for bad in (123, None, ["url"]):
+        target.write_text(json.dumps({"api_base_url_asr_rt": bad}), encoding="utf-8")
+        assert config.load_config(target).api_base_url_asr_rt == "", f"{bad!r}"
+
+
+def test_model_asr_rt_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"model_asr_rt": "qwen3-asr-flash-realtime"}), encoding="utf-8")
+    assert config.load_config(target).model_asr_rt == "qwen3-asr-flash-realtime"
+    target.write_text("{}", encoding="utf-8")
+    assert config.load_config(target).model_asr_rt == ""
+    for bad in (123, None, ["m"]):
+        target.write_text(json.dumps({"model_asr_rt": bad}), encoding="utf-8")
+        assert config.load_config(target).model_asr_rt == "", f"{bad!r}"
+
+
+def test_api_key_asr_rt_loaded_and_fallback(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_key_asr_rt": "sk-asr-rt"}), encoding="utf-8")
+    assert config.load_config(target).api_key_asr_rt == "sk-asr-rt"
+    target.write_text("{}", encoding="utf-8")
+    assert config.load_config(target).api_key_asr_rt == ""
+    for bad in (123, None, ["k"]):
+        target.write_text(json.dumps({"api_key_asr_rt": bad}), encoding="utf-8")
+        assert config.load_config(target).api_key_asr_rt == "", f"{bad!r}"
+
+
+def test_asr_rt_empty_does_not_inherit_other_chains(tmp_path):
+    """三键不回退（需求确认）：配置了主链路/asr 三键时 rt 键仍为空。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url": "https://main.example",
+                "model": "main-model",
+                "api_key": "sk-main",
+                "api_base_url_asr": "https://asr.example",
+                "model_asr": "asr-model",
+                "api_key_asr": "sk-asr",
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url_asr_rt == ""
+    assert loaded.model_asr_rt == ""
+    assert loaded.api_key_asr_rt == ""
 
 
 # ---------------------------------------------------------------- 听歌识曲
