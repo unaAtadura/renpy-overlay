@@ -123,6 +123,20 @@ class FrameOverlayLayer:
         for window in self._windows:
             window.hide()
 
+    def set_frame_visible(self, index: int, visible: bool) -> None:
+        """单帧显示/隐藏（遥控器自动化装填期的提示框压制）：不影响其它帧。
+
+        索引越界（覆盖层尚未按当前快照建满）时静默忽略；压制意图由
+        QuickMenu 的压制集合持有，下次 show_frames 时重新应用。
+        """
+        index = int(index)
+        if not 0 <= index < len(self._windows):
+            return
+        if visible:
+            self._windows[index].show()
+        else:
+            self._windows[index].hide()
+
     def restore(self) -> None:
         """截屏后恢复显示（几何与颜色保持 hide 前状态，仅重新 show）。"""
         for window in self._windows:

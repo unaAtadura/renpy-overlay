@@ -15,6 +15,7 @@
 - :mod:`mouse_lock` —— 锁鼠标区域控制器（ClipCursor 限制 + 逃脱热键）
 - :mod:`remote_screenshot_window` —— 遥控截图窗口 A/B（圆形触发/瞄准小圆窗，PyQt6）
 - :mod:`remote_screenshot` —— 遥控截图控制器（快捷键模式生命周期 + 装填状态机）
+- :mod:`remote_automation` —— 遥控器自动化（周期截图 + 感知哈希变化检测 + 缓存命中）
 - :mod:`history_window` —— 截图历史浏览窗口（缩略图条带 + 原图 + 译文）
 - :mod:`chat_history_window` —— 对话历史浏览窗口（两列表格：查找/删除/复制）
 - :mod:`viewer_window`  —— 原图全尺寸查看弹窗（拖拽移动，单击关闭）
@@ -42,6 +43,7 @@ from .processing import (
     make_thumbnail,
     scale_to_percent,
 )
+from .remote_automation import RemoteAutomationController
 from .remote_screenshot import RemoteScreenshotController
 from .store import ScreenshotStore, open_store
 from .viewer_window import ImageViewerWindow
@@ -58,6 +60,7 @@ __all__ = [
     "MouseLockController",
     "MouseLockIndicatorWindow",
     "MouseLockRegionWindow",
+    "RemoteAutomationController",
     "RemoteScreenshotController",
     "ScreenshotHistoryWindow",
     "ScreenshotStore",

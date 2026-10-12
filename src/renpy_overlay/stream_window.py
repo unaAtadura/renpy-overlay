@@ -51,6 +51,7 @@ from .screenshot import (
     ChatHistoryWindow,
     HotkeyMode,
     MouseLockController,
+    RemoteAutomationController,
     RemoteScreenshotController,
     ScreenshotHistoryWindow,
     capture_region,
@@ -901,6 +902,22 @@ class StreamOverlayWindow:
             trigger=self.request_screenshot_translation,
         )
         self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
+        # 遥控器自动化：周期截图 + 感知哈希变化检测 + 缓存命中（装填状态复用
+        # 遥控截图控制器）；提交走视觉链路但不隐藏窗口、不落 screenshot.db
+        self._remote_automation = RemoteAutomationController(
+            interval=self._config.remote_screenshot_interval,
+            cache_size=self._config.remote_cache_size_count,
+            has_windows=lambda: self._remote_screenshot.windows_created,
+            is_busy=self._is_translation_busy,
+            display=self._display_remote_auto_text,
+            submit=self._submit_remote_auto_translation,
+            notify=self._update_title,
+            suppress_frame=self._quick_menu.set_frame_suppressed,
+            get_windows_hidden=lambda: self._remote_screenshot.user_hidden,
+            set_windows_hidden=self._remote_screenshot.set_user_hidden,
+        )
+        self._remote_screenshot.attach_automation(self._remote_automation)
+        self._quick_menu.attach_remote_automation(self._remote_automation)
         # 锁鼠标区域：ClipCursor 限制 + 逃脱全局热键（保底退出）；窗口由
         # 控制器自持，不进截图窗口池，与布局锁定三组接口互不影响
         self._mouse_lock = MouseLockController(
@@ -1120,6 +1137,8 @@ class StreamOverlayWindow:
                     self._handle_screenshot_done(payload)
                 elif kind == "screenshot_fail":
                     self._handle_screenshot_fail(payload)
+                elif kind == "remote_auto_done":
+                    self._handle_remote_auto_done(payload)
                 elif kind == "song_recognizing":
                     self._handle_song_recognizing(payload)
                 elif kind == "song_done":
@@ -2332,6 +2351,137 @@ class StreamOverlayWindow:
         self._translating = False
         logger.warning("截图翻译失败：%s", item.get("error"))
         self._update_title("翻译失败")
+
+    # -- 遥控器自动化（右键菜单开关；提交走视觉链路但不隐藏窗口、不落库）
+
+    def _is_translation_busy(self) -> bool:
+        """自动化互斥查询（主线程）：存在任意在途翻译/识曲/对话即忙碌。"""
+        return self._translating or self._recognizing or self._chat_busy
+
+    def _display_remote_auto_text(self, text: str) -> None:
+        """自动化缓存命中直接上屏（主线程，控制器回调；不发 API）。"""
+        self._display_text(text + "\n")
+        self._update_title("翻译完成")
+
+    def _submit_remote_auto_translation(
+        self, window, image, signature: tuple[int, ...]
+    ) -> bool:
+        """自动化截图翻译提交（主线程，控制器回调）。
+
+        与手动截图翻译共用 ``_translating`` 互斥槽（同时只允许一个在途），
+        但不隐藏任何窗口（需求：防爆闪），不写 screenshot.db（需求）；
+        受理返回 True，宿主忙碌被拒返回 False（控制器保持变化状态等待恢复）。
+        """
+        if self._closed:
+            return False
+        if self._is_translation_busy():
+            logger.info("自动化截图翻译提交时发现在途请求，拒绝（控制器稍后重试）")
+            return False
+        self._translating = True
+        self._translation_seq += 1
+        seq = self._translation_seq
+        stop = threading.Event()
+        self._current_stop = stop
+        self._update_title("截图翻译中，翻译速度会更慢...")
+        api_options = {  # 视觉链路基址/模型/密钥独立于文本链路（与手动同源）
+            "base_url": self._config.api_base_url_vision or self._config.api_base_url,
+            "timeout": self._config.api_timeout,
+            "model": self._config.model_vision,
+            "api_key": self._config.api_key_vision,
+            "enable_thinking": self._config.enable_thinking,
+            "reasoning_effort": self._config.reasoning_effort,
+        }
+        thread = threading.Thread(
+            target=self._remote_auto_worker,
+            args=(seq, image, signature, stop, api_options),
+            name=f"remote-auto-translate-{seq}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _remote_auto_worker(
+        self,
+        seq: int,
+        image,
+        signature: tuple[int, ...],
+        stop: threading.Event,
+        api_options: dict,
+    ) -> None:
+        """后台线程：自动化截图的视觉链路（宽高比约束副本 → 压缩 → 识图翻译）。
+
+        与手动 worker 的区别：不生成缩略图/原图、不落库；中止时也回传
+        （携带 aborted 标记），保证控制器的在途标记一定被清除——否则自动
+        化会永久停在「在途」态不再比较变化。
+        """
+        aborted = False
+        text = None
+        error = None
+        try:
+            ratio_image = constrain_aspect_ratio(image)
+            api_image = scale_to_percent(
+                ratio_image, self._config.screenshot_compress_percent
+            )
+            jpeg_base64 = encode_jpeg_base64(api_image)
+            if stop.is_set():
+                aborted = True
+            else:
+                # 带结果校验（与手动同源）：偶发「只识别不翻译」时强化指令重试一次
+                text = translate_image_verified(
+                    jpeg_base64, abort_check=stop.is_set, **api_options
+                )
+                if stop.is_set():
+                    aborted = True
+        except Exception as exc:  # 网络/协议/图像错误统一收敛为失败结果
+            if stop.is_set():
+                aborted = True
+            else:
+                error = str(exc)
+                logger.debug("自动化截图翻译失败（seq=%d）：%s", seq, exc)
+        self._queue.put(
+            (
+                "remote_auto_done",
+                {
+                    "seq": seq,
+                    "signature": signature,
+                    "text": text,
+                    "aborted": aborted,
+                    "error": error,
+                },
+            )
+        )
+
+    def _handle_remote_auto_done(self, item: dict) -> None:
+        """主线程：自动化翻译结果收尾（显示 + 缓存回填；不写 screenshot.db）。
+
+        seq 过期/中止的结果也要回传控制器清除在途标记（否则自动化停在
+        「在途」态不再比较变化）；中止/失败不回填缓存。
+        """
+        seq = item.get("seq")
+        current = seq == self._translation_seq
+        if current:
+            self._translating = False
+        else:
+            logger.info(
+                "自动化截图翻译结果已过期（seq=%s，当前=%s），仅回传控制器",
+                seq,
+                self._translation_seq,
+            )
+        aborted = bool(item.get("aborted"))
+        text = str(item.get("text") or "").strip()
+        if not aborted and current and text:
+            self._display_text(text + "\n")
+            self._update_title("翻译完成")
+            logger.info(
+                "自动化截图翻译完成（seq=%d，译文 %d 字），已显示在正文窗", seq, len(text)
+            )
+        elif not aborted and current:
+            logger.warning("自动化截图翻译失败：%s", item.get("error") or "返回空文本")
+            self._update_title("翻译失败")
+        # 在途回执无条件回传（成功才回填缓存；中止/失败传 None 不污染缓存）
+        self._remote_automation.on_translation_result(
+            item.get("signature"), text if not aborted and text else None
+        )
 
     # -- 听歌识曲（右键菜单触发；与翻译/截图翻译共用互斥；双击打断）
 
