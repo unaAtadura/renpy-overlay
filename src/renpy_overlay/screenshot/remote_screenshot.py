@@ -279,6 +279,20 @@ class RemoteScreenshotController:
         if self._window_b is not None:
             self._window_b.show()
 
+    def managed_windows(self) -> list[object]:
+        """A/B 窗口对象清单（已创建者，A 先 B 后；托盘显隐快照与恢复用）。
+
+        返回真实窗口对象（鸭子协议 isVisible/hide/show），调用方逐窗
+        处理显隐——尊重/修改 user_hidden 的语义不经由此处（托盘快照以
+        isVisible 实测为准，user_hidden 的 A/B 本就不可见、不会被恢复）。
+        未生成时返回空列表。
+        """
+        return [
+            window
+            for window in (self._window_a, self._window_b)
+            if window is not None
+        ]
+
     def reassert_topmost(self) -> None:
         """把 A/B 重新压回最顶层（对抗独占全屏被激活时的覆盖）。"""
         from .. import win32api  # 局部导入：仅 Windows 存在

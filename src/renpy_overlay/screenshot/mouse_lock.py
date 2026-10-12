@@ -235,6 +235,20 @@ class MouseLockController(QAbstractNativeEventFilter):
         """
         self._teardown()
 
+    def managed_windows(self) -> list:
+        """锁鼠标功能当前持有的窗口（存在者；托盘显隐快照与恢复用）。
+
+        提示窗在前、范围窗在后，均为真实窗口对象（鸭子协议
+        isVisible/hide/show）。托盘隐藏只动窗口视觉：ClipCursor 限制、
+        逃脱热键与低级钩子均不受影响（锁定态下范围窗本就隐藏、提示窗
+        可见；恢复后与隐藏前完全一致）。
+        """
+        return [
+            window
+            for window in (self._indicator_window, self._region_window)
+            if window is not None
+        ]
+
     def _teardown(self) -> None:
         """彻底关闭公共清理：停定时器、解除限制、销毁两窗、注销热键。"""
         self._enabled = False

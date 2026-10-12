@@ -35,6 +35,7 @@ from ..song_recognition import SongHistoryWindow
 from ..song_recognition.store import open_store as open_song_store
 from ..translation_cache import TranslationCache, choice_translation_text
 from ..translation_history_window import TranslationHistoryWindow
+from ..tray_icon import ManagedItem, TrayIconController
 from ..video import (
     AsrRtController,
     VideoRecorder,
@@ -275,6 +276,12 @@ class StreamOverlayCore:
         self._record_timer = QTimer()
         self._record_timer.setInterval(RECORD_TICK_INTERVAL_MS)
         self._record_timer.timeout.connect(self._record_tick)
+        # 系统托盘（需求 future_托盘图标.txt）：全部悬浮窗一键隐藏/恢复的第二
+        # 入口；退出复用 request_close（与快捷菜单同一函数引用，单一退出路径）；
+        # 托盘不可用/构造失败时降级为无（hidden 恒 False），不影响主程序
+        self._tray = TrayIconController(
+            items_provider=self._tray_managed_items, on_quit=self.request_close
+        )
         self._update_title("正在启动…")
 
     # ------------------------------------------------------------ 对外接口
@@ -338,6 +345,7 @@ class StreamOverlayCore:
         if self._closed:
             return
         self._closed = True
+        self._tray.shutdown()  # 先移除托盘图标，避免退出过程中用户再点托盘
         self._translation_seq += 1  # 在途翻译的结果作废
         if self._translating:
             self._abort_translation("窗口关闭")
@@ -421,6 +429,57 @@ class StreamOverlayCore:
             self._app.quit()
         except Exception:  # pragma: no cover
             pass
+
+    # ------------------------------------------------------------ 托盘显隐
+
+    def _tray_managed_items(self) -> list[ManagedItem]:
+        """托盘受管窗口清单（每次现取；凡隐藏前可见的窗口全部参与快照）。
+
+        条目三态：流式双窗合一条目（必须走 ``_set_visible`` 维护
+        ``_visible`` 标志，否则截图翻译的 was_visible 判定与跟随循环状态
+        失真）、框选提示窗组（恢复序列含自动化压制帧重放）、其余真实窗口
+        逐个直连 QWidget 原语。单例窗口未创建（None）时跳过。
+        """
+        item = ManagedItem
+        items = [
+            item(
+                lambda: self._visible,
+                lambda: self._set_visible(False),
+                lambda: self._set_visible(True),
+            )
+        ]
+        items.extend(
+            item(w.isVisible, w.hide, w.show)
+            for w in self._quick_menu.screenshot_windows()
+        )
+        items.append(
+            item(
+                self._quick_menu.frame_overlay_shown,
+                self._quick_menu.hide_frame_overlay,
+                self._quick_menu.show_frame_overlay,
+            )
+        )
+        items.extend(
+            item(w.isVisible, w.hide, w.show)
+            for w in self._remote_screenshot.managed_windows()
+        )
+        items.extend(
+            item(w.isVisible, w.hide, w.show)
+            for w in self._mouse_lock.managed_windows()
+        )
+        for window in (
+            self._chat_window,
+            self._history_window,
+            self._song_history_window,
+            self._chat_history_window,
+            self._translation_history_window,
+            self._asr_history_window,
+            self._video_editor_window,
+            self._prebuild_dialog,
+        ):
+            if window is not None:
+                items.append(item(window.isVisible, window.hide, window.show))
+        return items
 
     # ------------------------------------------------------------ 队列消费
 

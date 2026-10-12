@@ -2,6 +2,7 @@
 
 宿主依赖（经 ``self`` 访问，由 :class:`StreamOverlayCore.__init__` 初始化）：
 ``_closed`` / ``_screenshot_suppress`` / ``_context_menu_open`` /
+``_tray`` /
 ``skip_injection`` / ``_target_hwnd`` / ``target_pid`` / ``_locked`` /
 ``_dragging`` / ``width`` / ``height`` / ``_title_h`` / ``_title_gap`` /
 ``dock`` / ``_user_offset`` / ``_visible`` / ``_body_hwnd`` /
@@ -52,6 +53,11 @@ class WindowFollowMixin:
             # 右键菜单打开期间（无论锁定/解锁）：解锁态的周期定位也带
             # move_window(HWND_TOPMOST)，会把流式窗重新提到菜单之上遮住菜单
             return
+        if self._tray is not None and self._tray.hidden:
+            # 托盘「隐藏窗口」期间：不定位不重显示，防解锁态每 tick 的
+            # _set_visible(True) 把流式窗拉回；锁定态置顶重申同被短路
+            # （窗口全隐时无意义），托盘恢复后周期自然接续
+            return
         if self.skip_injection:
             self._follow_once_skip_injection()
             return
@@ -99,6 +105,10 @@ class WindowFollowMixin:
         锁定/拖动时不移动（与常规模式一致）；置顶由每次定位的
         ``move_window(topmost=True)`` 建立，锁定态的周期重申沿用常规路径。
         """
+        if self._tray is not None and self._tray.hidden:
+            # 托盘「隐藏窗口」期间同常规路径短路（防御显式化：当前仅经
+            # _follow_once 进入，未来直接调用路径同样受守卫）
+            return
         if self._locked or self._dragging:
             if self._locked and not self._dragging:
                 self._reassert_topmost()

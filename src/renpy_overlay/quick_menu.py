@@ -455,6 +455,31 @@ class QuickMenu:
         """
         return [window for window in self._windows if window.is_locked]
 
+    # ---- 框选提示窗口组的托盘显隐接口 ---------------------------------------
+
+    def frame_overlay_shown(self) -> bool:
+        """框选提示窗口组当前是否有可见窗口（托盘显隐快照用）。"""
+        return self._frame_overlay is not None and self._frame_overlay.is_showing()
+
+    def hide_frame_overlay(self) -> None:
+        """整组隐藏框选提示窗口（托盘「隐藏窗口」用；无覆盖层时 no-op）。"""
+        self._hide_frame_overlay()
+
+    def show_frame_overlay(self) -> None:
+        """整组恢复框选提示窗口（托盘「显示窗口」用；无覆盖层时 no-op）。
+
+        与 :meth:`show_all` 锁定期分支同一恢复序列：restore 后把自动化
+        压制中的帧立即压回隐藏（抓屏时序不得复活被压制的提示框）。
+        """
+        if self._frame_overlay is not None:
+            self._frame_overlay.restore()
+            for index in self._suppressed_frames:
+                self._frame_overlay.set_frame_visible(index, False)
+
+    def screenshot_windows(self) -> list[ScreenshotWindow]:
+        """截图窗口池快照（栈序副本；托盘显隐清单用，外部不得增删）。"""
+        return list(self._windows)
+
     # ---- 内部 ---------------------------------------------------------------
 
     @staticmethod

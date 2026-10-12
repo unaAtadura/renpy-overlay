@@ -137,6 +137,10 @@ class FrameOverlayLayer:
         else:
             self._windows[index].hide()
 
+    def is_showing(self) -> bool:
+        """是否有任一提示窗口处于显示状态（托盘显隐快照用）。"""
+        return any(window.isVisible() for window in self._windows)
+
     def restore(self) -> None:
         """截屏后恢复显示（几何与颜色保持 hide 前状态，仅重新 show）。"""
         for window in self._windows:

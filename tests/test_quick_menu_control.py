@@ -66,17 +66,25 @@ class _FakeOverlay:
         self.hidden = 0
         self.restored = 0
         self.destroyed = False
+        self.showing = False  # 整组显示状态（is_showing 快照源）
         self.frame_visibility: list[tuple[int, bool]] = []  # 单帧压制记录
 
     def show_frames(self, frames) -> None:
         self.frames = list(frames)
         self.shown += 1
+        self.showing = True
 
     def hide_overlay(self) -> None:
         self.hidden += 1
+        self.showing = False
 
     def restore(self) -> None:
         self.restored += 1
+        self.showing = True
+
+    def is_showing(self) -> bool:
+        """与真实 FrameOverlayLayer 同签名：任一提示窗口是否可见。"""
+        return self.showing
 
     def set_frame_visible(self, index: int, visible: bool) -> None:
         """单帧显示/隐藏（自动化装填期压制），与真实 FrameOverlayLayer 同签名。"""
@@ -361,6 +369,44 @@ def test_unlock_layout_clears_suppressed_frames():
     menu.set_frame_suppressed(menu._windows[0], True)
     menu.unlock_layout()  # 解锁即快照失效：压制集合一并清除
     assert menu._suppressed_frames == set()
+
+
+# ---- 托盘显隐接口（需求 future_托盘图标.txt：框选提示窗组与窗口池清单） -----------
+
+
+def test_tray_frame_overlay_interfaces_noop_without_overlay():
+    # 未锁定过布局（无覆盖层）：三方法 no-op 不抛异常
+    menu = _menu_with()
+    assert menu.frame_overlay_shown() is False
+    menu.hide_frame_overlay()
+    menu.show_frame_overlay()
+    assert menu.frame_overlay_shown() is False
+
+
+def test_tray_frame_overlay_restore_replays_suppressed_frames():
+    # 托盘「显示窗口」恢复提示窗组：restore 后压制帧立即压回隐藏
+    # （抓屏时序不得复活被压制的提示框，与 show_all 锁定期分支同序列）
+    menu = _menu_with(True, True)
+    menu.lock_layout()
+    overlay = menu._frame_overlay
+    assert menu.frame_overlay_shown() is True
+    menu.set_frame_suppressed(menu._windows[0], True)
+    overlay.frame_visibility.clear()
+    menu.hide_frame_overlay()
+    assert overlay.hidden == 1
+    assert menu.frame_overlay_shown() is False
+    menu.show_frame_overlay()
+    assert overlay.restored == 1
+    assert overlay.frame_visibility == [(0, False)]  # 压制帧重放压回
+    assert menu.frame_overlay_shown() is True
+
+
+def test_tray_screenshot_windows_returns_snapshot_copy():
+    menu = _menu_with(True, False)
+    snapshot = menu.screenshot_windows()
+    assert snapshot == menu._windows
+    snapshot.clear()  # 外部修改副本不影响窗口池
+    assert menu.window_count == 2
 
 
 # ---- 遥控器自动化：菜单项顺序与分发（假 QMenu，不构造真实窗口） --------------------
