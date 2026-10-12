@@ -293,3 +293,115 @@ def test_shutdown_destroys_windows_idempotent():
     assert a.calls == ["show", "close", "deleteLater"]
     controller.shutdown()  # 幂等
     assert a.calls == ["show", "close", "deleteLater"]
+
+
+# ---- 遥控器自动化集成：转发 / 接管 / 用户级显隐 --------------------------------
+
+
+class _StubAutomation:
+    """自动化控制器替身：记录转发事件，enabled 可测切换。"""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.armed_events: list[object] = []
+        self.clicks: list[object] = []
+        self.mode_events: list[bool] = []
+        self.shutdowns = 0
+
+    def on_armed_changed(self, window) -> None:
+        self.armed_events.append(window)
+
+    def on_trigger_clicked(self, window) -> None:
+        self.clicks.append(window)
+
+    def on_hotkey_mode_changed(self, enabled: bool) -> None:
+        self.mode_events.append(enabled)
+
+    def shutdown(self) -> None:
+        self.shutdowns += 1
+
+
+def test_trigger_forwarded_to_enabled_automation():
+    """自动化开启：B 装填变化与 A 单击都转发给自动化控制器（不调宿主 trigger）。"""
+    factory = _Factory()
+    locked_window = _StubWindow((100, 100, 300, 200), border=QColor(255, 50, 50))
+    triggered: list[object] = []
+    controller, _ = _make_controller(
+        factory=factory, locked=[locked_window], trigger=triggered.append
+    )
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    automation = _StubAutomation()
+    controller.attach_automation(automation)
+    automation.enabled = True
+    b.move(150, 150)
+    b.on_event()  # 装填 → on_armed_changed 转发
+    assert automation.armed_events == [locked_window]
+    a.on_event()  # A 单击 → 自动化接管
+    assert automation.clicks == [locked_window]
+    assert triggered == []
+
+
+def test_trigger_stays_manual_when_automation_disabled():
+    """自动化关闭：保留遥控截图原有单击功能（走宿主入口）。"""
+    factory = _Factory()
+    locked_window = _StubWindow((100, 100, 300, 200), border=QColor(255, 50, 50))
+    triggered: list[object] = []
+    controller, _ = _make_controller(
+        factory=factory, locked=[locked_window], trigger=triggered.append
+    )
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    automation = _StubAutomation()
+    controller.attach_automation(automation)  # enabled=False
+    b.move(150, 150)
+    b.on_event()
+    a.on_event()
+    assert triggered == [locked_window]
+    assert automation.clicks == []
+
+
+def test_mode_off_forwards_to_automation():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    automation = _StubAutomation()
+    controller.attach_automation(automation)
+    controller.on_hotkey_mode_changed(False)
+    assert automation.mode_events == [False]  # 复位通知（决议 A3）
+
+
+def test_shutdown_cascades_to_automation():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    automation = _StubAutomation()
+    controller.attach_automation(automation)
+    controller.shutdown()
+    assert automation.shutdowns == 1
+
+
+def test_windows_created_reflects_lifecycle():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    assert not controller.windows_created
+    controller.on_hotkey_mode_changed(True)
+    assert controller.windows_created
+    controller.on_hotkey_mode_changed(False)
+    assert not controller.windows_created
+
+
+def test_user_hidden_hides_and_show_windows_respects():
+    """「隐藏遥控器」后手动抓屏的 show_windows 不得把 A/B 放出来（用户态优先）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    controller.set_user_hidden(True)
+    assert controller.user_hidden
+    assert a.calls[-1] == "hide" and b.calls[-1] == "hide"
+    controller.show_windows()  # 模拟手动抓屏后的恢复
+    assert a.calls[-1] == "hide" and b.calls[-1] == "hide"  # 尊重用户隐藏态
+    controller.set_user_hidden(False)
+    assert not controller.user_hidden
+    assert a.calls[-1] == "show" and b.calls[-1] == "show"

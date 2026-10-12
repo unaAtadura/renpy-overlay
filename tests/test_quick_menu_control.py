@@ -9,9 +9,12 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRect
+from types import SimpleNamespace
+
+from PyQt6.QtCore import QPoint, QRect
 from PyQt6.QtGui import QColor
 
+from renpy_overlay import quick_menu as quick_menu_module
 from renpy_overlay import win32api
 from renpy_overlay.quick_menu import QuickMenu
 from renpy_overlay.screenshot.frame_overlay import hint_geometry
@@ -63,6 +66,7 @@ class _FakeOverlay:
         self.hidden = 0
         self.restored = 0
         self.destroyed = False
+        self.frame_visibility: list[tuple[int, bool]] = []  # 单帧压制记录
 
     def show_frames(self, frames) -> None:
         self.frames = list(frames)
@@ -73,6 +77,10 @@ class _FakeOverlay:
 
     def restore(self) -> None:
         self.restored += 1
+
+    def set_frame_visible(self, index: int, visible: bool) -> None:
+        """单帧显示/隐藏（自动化装填期压制），与真实 FrameOverlayLayer 同签名。"""
+        self.frame_visibility.append((int(index), visible))
 
     def destroy(self) -> None:
         self.destroyed = True
@@ -321,3 +329,167 @@ def test_needs_reshow_after_flags_change():
     # 原本隐藏：保持隐藏，不主动显示
     assert needs_reshow_after_flags_change(False, False) is False
     assert needs_reshow_after_flags_change(False, True) is False
+
+
+# ---- 遥控器自动化：提示框单帧压制（future_截图翻译功能补充_遥控截图自动化） ----
+
+
+def test_set_frame_suppressed_and_survives_capture_cycle():
+    """装填期压制：抓屏的 hide_all/show_all 批量恢复不得复活被压制帧。"""
+    menu = _menu_with(True, True)
+    menu.lock_layout()
+    overlay = menu._frame_overlay
+    overlay.frame_visibility.clear()
+    menu.set_frame_suppressed(menu._windows[0], True)  # B 进入装填区域
+    assert overlay.frame_visibility == [(0, False)]
+    menu.hide_all()  # 抓屏前批量隐藏
+    menu.show_all()  # 抓屏后恢复：被压制帧立即压回隐藏
+    assert overlay.frame_visibility == [(0, False), (0, False)]
+    menu.set_frame_suppressed(menu._windows[0], False)  # B 离开：恢复提示框
+    assert overlay.frame_visibility[-1] == (0, True)
+
+
+def test_set_frame_suppressed_unknown_window_ignored():
+    menu = _menu_with(True)
+    menu.set_frame_suppressed(object(), True)  # 不在窗口池内：静默忽略
+    assert menu._suppressed_frames == set()
+
+
+def test_unlock_layout_clears_suppressed_frames():
+    menu = _menu_with(True)
+    menu.lock_layout()
+    menu.set_frame_suppressed(menu._windows[0], True)
+    menu.unlock_layout()  # 解锁即快照失效：压制集合一并清除
+    assert menu._suppressed_frames == set()
+
+
+# ---- 遥控器自动化：菜单项顺序与分发（假 QMenu，不构造真实窗口） --------------------
+
+
+class _FakeMenuAction:
+    """QAction 替身：仅携带文案与禁用态。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.enabled = True
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802 - Qt 约定
+        self.enabled = enabled
+
+
+class _FakeMenu:
+    """QMenu 替身：记录构建顺序，exec 返回预置文案对应的当次选中项。"""
+
+    def __init__(self) -> None:
+        self.items: list[object] = []
+        self.choose_text: str | None = None  # exec 返回该文案对应的 action（当次构建）
+
+    def windowFlags(self) -> int:
+        return 0
+
+    def setWindowFlags(self, flags) -> None:  # noqa: ANN001 - 测试替身
+        pass
+
+    def addAction(self, text: str) -> _FakeMenuAction:
+        action = _FakeMenuAction(text)
+        self.items.append(action)
+        return action
+
+    def addSeparator(self) -> str:
+        self.items.append("separator")
+        return "separator"
+
+    def addMenu(self, title: str) -> _FakeMenu:
+        sub = _FakeMenu()
+        self.items.append(sub)
+        return sub
+
+    def exec(self, pos) -> object | None:  # noqa: N802, ANN001 - Qt 约定
+        # show_context_menu 每次调用都重建 action，按文案取本次构建的最后一项
+        matches = [
+            item
+            for item in self.items
+            if isinstance(item, _FakeMenuAction) and item.text == self.choose_text
+        ]
+        return matches[-1] if matches else None
+
+
+def _menu_labels(fake_menu: _FakeMenu) -> list[str]:
+    """菜单构建序列 → 标签列表（分隔线/子菜单用占位名）。"""
+    return [
+        item.text if isinstance(item, _FakeMenuAction) else str(item)
+        for item in fake_menu.items
+    ]
+
+
+def _automation_stub(calls: list[str]) -> SimpleNamespace:
+    """自动化控制器替身：状态可切换，点击动作记录到 calls。"""
+    return SimpleNamespace(
+        enabled=False,
+        remote_hidden=False,
+        toggle_automation=lambda: calls.append("automation"),
+        toggle_remote_hidden=lambda: calls.append("hidden"),
+    )
+
+
+def test_menu_places_remote_automation_items_between_lock_and_separator(monkeypatch):
+    """布局顺序（需求）：锁鼠标区域之下、分隔线之上插入两项。"""
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    menu.attach_mouse_lock(SimpleNamespace(enabled=False, toggle=lambda: None))
+    menu.attach_remote_automation(_automation_stub([]))
+    menu.show_context_menu(QPoint(0, 0))
+    labels = _menu_labels(fake_menu)
+    assert "遥控器自动化: 关" in labels
+    assert "隐藏遥控器" in labels
+    assert (
+        labels.index("锁鼠标区域: 关")
+        < labels.index("遥控器自动化: 关")
+        < labels.index("隐藏遥控器")
+        < labels.index("separator")
+        < labels.index("录制视频")
+    )
+
+
+def test_menu_remote_automation_labels_follow_state(monkeypatch):
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    stub = _automation_stub([])
+    menu.attach_remote_automation(stub)
+    menu.show_context_menu(QPoint(0, 0))
+    assert "遥控器自动化: 关" in _menu_labels(fake_menu)
+    assert "隐藏遥控器" in _menu_labels(fake_menu)
+    stub.enabled = True
+    stub.remote_hidden = True
+    fake_menu.items.clear()
+    menu.show_context_menu(QPoint(0, 0))
+    labels = _menu_labels(fake_menu)
+    assert "遥控器自动化: 开" in labels
+    assert "显示遥控器" in labels
+
+
+def test_menu_dispatch_toggles_automation_and_hidden(monkeypatch):
+    calls: list[str] = []
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    stub = _automation_stub(calls)
+    menu.attach_remote_automation(stub)
+    fake_menu.choose_text = "遥控器自动化: 关"
+    menu.show_context_menu(QPoint(0, 0))
+    fake_menu.choose_text = "隐藏遥控器"
+    menu.show_context_menu(QPoint(0, 0))
+    assert calls == ["automation", "hidden"]
+
+
+def test_menu_without_remote_automation_has_no_items(monkeypatch):
+    """未注入自动化控制器（宿主未组装）：菜单不出现两项，构建不报错。"""
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    menu.show_context_menu(QPoint(0, 0))
+    labels = _menu_labels(fake_menu)
+    assert "遥控器自动化: 关" not in labels
+    assert "隐藏遥控器" not in labels
