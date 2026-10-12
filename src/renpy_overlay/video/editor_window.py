@@ -596,7 +596,7 @@ class VideoEditorWindow(QWidget):
 
     def asr_range_seconds(self) -> tuple[float, float] | None:
         """读取起止点片段（秒）；终点早于起点自动交换，间隔为 0 返回 None。"""
-        from .ffmpeg import normalize_range
+        from .av_media import normalize_range
 
         max_frame = max_frame_for(self._player.duration(), self._fps)
         start = parse_frame_text(self._start_edit.text(), max_frame)

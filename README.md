@@ -212,8 +212,9 @@ Ren'Py 游戏进程内本来就加载了完整的 CPython 运行库（`python27.
 - **视频录制**：快捷菜单「录制视频」开关式录制全屏（含系统音频），保存为
   `renpy_overlay_cache/video/yyyyMMdd-hhmmss.mp4`（目录不存在自动创建）；
   录制中菜单项显示「录制视频 mm:ss」，再次点击结束录制；开始/每 10 分钟/
-  结束提示走标题窗（与听歌识曲同一出口）。视频流由用户自备的 `ffmpeg.exe`
-  （放在程序目录或 PATH，缺失时提示降级、不影响其它功能）经 gdigrab 抓屏，
+  结束提示走标题窗（与听歌识曲同一出口）。视频流由内置 PyAV（进程内
+  FFmpeg 库，pip 依赖自带动态库，无需自备 ffmpeg.exe）经 gdigrab 抓屏 +
+  libx264 编码到 mkv 中间容器（PyAV 不可用时提示降级、不影响其它功能），
   音频流复用听歌识曲的系统音频环回三重回退（无录音库时降级仅视频），停止时
   合并为带 aac 音轨的 mp4。录制不经 API、不占翻译/识曲互斥；
 - **视频编辑**：快捷菜单「视频编辑」—— 视频播放器窗口，布局自上而下：路径
@@ -596,8 +597,9 @@ renpygameread/
 │  │  ├─ asr_store.py          # asr.db 存取（非实时识别成功结果落库，实时不入库）
 │  │  ├─ asr_history_window.py # 语音识别历史窗口（查找/音量条/三列表格）
 │  │  ├─ audio_capture.py      # 录音环回（复用识曲三重回退，录制视频用）
-│  │  ├─ ffmpeg.py             # ffmpeg.exe 探测与音轨截取（用户自备）
-│  │  ├─ recorder.py           # 视频录制控制器（gdigrab + 环回录音，mp4 合并）
+│  │  ├─ av_media.py           # PyAV 封装：音轨截取 wav / 双流合并（进程内）
+│  │  ├─ screen_capture.py     # gdigrab 抓屏 + libx264 编码线程（录制视频用）
+│  │  ├─ recorder.py           # 视频录制控制器（录屏 + 环回录音双流合并）
 │  │  └─ editor_window.py      # 视频编辑播放器窗口（帧放大/起止点/语音识别入口）
 │  └─ payload/                 # 注入到游戏进程内执行的源码（py2/py3 兼容）
 │     └─ agent.py              # Hook 安装、上报线程、心跳、shutdown

@@ -1,7 +1,9 @@
 """录制控制器（VideoRecorder）的离线验证：双流编排、停止顺序与降级。
 
-遵循项目离线测试约定：不构造真实窗口，QProcess 与录音线程经 stub 注入，
-仅用 QCoreApplication 兜底 QTimer；合并经 merge_fn 注入，不触真实 ffmpeg。
+遵循项目离线测试约定：不构造真实窗口，录屏编码与录音线程经 stub 注入，
+仅用 QCoreApplication 兜底 QTimer/信号；合并经 merge_fn 注入，不触真实
+PyAV 封装。完成回调（_on_capture_done）由测试手动驱动，模拟跨线程信号
+到达主线程。
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from renpy_overlay.video.recorder import (
     MENU_LABEL_IDLE,
     RECORD_START_TEXT,
     RECORD_STOP_TEXT,
+    RECORD_UNAVAILABLE_TEXT,
     VideoRecorder,
     default_geometry,
     menu_label,
@@ -25,73 +28,32 @@ from renpy_overlay.video.recorder import (
 
 @pytest.fixture(scope="module", autouse=True)
 def _qt_core_app():
-    """QTimer 是 QObject：无显示环境下用 QCoreApplication 兜底。"""
+    """QTimer/signal 是 QObject 成员：无显示环境下用 QCoreApplication 兜底。"""
     app = QCoreApplication.instance()
     if app is None:
         app = QCoreApplication([])
     yield app
 
 
-class _Signal:
-    """QProcess 信号的轻量 stub（connect/emit 语义）。"""
-
-    def __init__(self):
-        self._handlers = []
-
-    def connect(self, handler):
-        self._handlers.append(handler)
-
-    def emit(self, *args):
-        for handler in list(self._handlers):
-            handler(*args)
-
-
-class _StubProcess:
-    """QProcess 鸭子接口 stub：start 釆用与真实 QProcess 相同的两参签名。"""
-
-    def __init__(self):
-        self.finished = _Signal()
-        self.errorOccurred = _Signal()
-        self.started_program: str | None = None
-        self.started_arguments: list = []
-        self.written: list[bytes] = []
-        self.terminated = False
-        self.killed = False
-        self.wait_result = True
-
-    def start(self, program, arguments=None):
-        # 形状对齐真实 QProcess.start(program: str, arguments: Iterable[str])：
-        # 传单列表在 PyQt6 下会 TypeError（实测崩溃，见 test_start_uses_two_argument_form）
-        assert isinstance(program, str), "program 必须是字符串（PyQt6 两参形式）"
-        assert arguments is not None, "arguments 必须显式传入（不接受单列表）"
-        self.started_program = program
-        self.started_arguments = list(arguments)
-        self.started_args = [program, *self.started_arguments]  # 兼容既有断言
-
-    def write(self, data) -> None:
-        """对齐 QProcess.write：记录写入 stdin 的字节（ffmpeg 'q' 退出命令）。"""
-        self.written.append(bytes(data))
-
-    def terminate(self):
-        self.terminated = True
-
-    def kill(self):
-        self.killed = True
-
-    def waitForFinished(self, ms):
-        return self.wait_result
-
-
 class _Harness:
     """构造一台完全注入 stub 的录制控制器，收集全部交互痕迹。"""
 
-    def __init__(self, tmp_path, *, audio_available=True, merge_result=True):
+    def __init__(
+        self,
+        tmp_path,
+        *,
+        audio_available=True,
+        merge_result=True,
+        capture_result=True,
+        available=True,
+    ):
         self.notifies: list[str] = []
-        self.processes: list[_StubProcess] = []
+        self.capture_calls: list = []
         self.audio_calls: list = []
         self.merge_calls: list = []
         self.now = {"mono": 1000.0}
         self._merge_result = merge_result
+        self._capture_result = capture_result
         harness = self
 
         def _audio_recorder(path, stop_event):
@@ -104,23 +66,26 @@ class _Harness:
             notify=self.notifies.append,
             game_dir=tmp_path,
             geometry_fn=lambda: (0, 0, 800, 600),
-            process_factory=self._make_process,
+            capture_fn=self._capture,
             audio_recorder=_audio_recorder,
             audio_available=audio_available,
-            ffmpeg_path="C:/tools/ffmpeg.exe",
+            available_fn=lambda: available,
             merge_fn=self._merge,
             clock_fn=lambda: datetime(2026, 10, 11, 10, 10, 10),
             monotonic_fn=lambda: self.now["mono"],
         )
 
-    def _make_process(self):
-        process = _StubProcess()
-        self.processes.append(process)
-        return process
+    def _capture(self, out_path, stop_event, **kwargs):
+        self.capture_calls.append((out_path, stop_event, kwargs))
+        return self._capture_result
 
-    def _merge(self, ffmpeg, *, video_path, audio_path, out_path):
-        self.merge_calls.append((ffmpeg, video_path, audio_path, out_path))
+    def _merge(self, *, video_path, audio_path, out_path):
+        self.merge_calls.append((video_path, audio_path, out_path))
         return self._merge_result
+
+    def finish_capture(self, ok: bool = True) -> None:
+        """模拟录屏线程完成信号到达主线程（真实路径为 queued signal）。"""
+        self.recorder._on_capture_done(ok)
 
 
 def test_menu_label_idle():
@@ -144,96 +109,60 @@ def test_start_starts_dual_streams_and_notifies(tmp_path):
     assert harness.recorder.recording is True
     video_dir = tmp_path / "renpy_overlay_cache" / "video"
     assert video_dir.is_dir(), "应自动创建 video 目录"
-    assert len(harness.processes) == 1
-    args = harness.processes[0].started_args
-    assert args[0] == "C:/tools/ffmpeg.exe"
-    assert "-f" in args and args[args.index("-f") + 1] == "gdigrab"
-    assert args[args.index("-video_size") + 1] == "800x600"
-    assert args[-1] == str(video_dir / "20261011-101010.tmp.mkv")  # 双流：mkv 中间容器
+    assert len(harness.capture_calls) == 1
+    out_path, stop_event, kwargs = harness.capture_calls[0]
+    assert out_path == video_dir / "20261011-101010.tmp.mkv"  # 双流：mkv 中间容器
+    assert not stop_event.is_set(), "启动时停止事件不应置位"
+    assert kwargs == {
+        "offset_x": 0,
+        "offset_y": 0,
+        "width": 800,
+        "height": 600,
+        "fps": 30,
+    }
     assert len(harness.audio_calls) == 1  # 录音线程已拉起
     assert harness.audio_calls[0] == video_dir / "20261011-101010.tmp.wav"
     assert harness.notifies[0] == RECORD_START_TEXT
 
 
-def test_start_uses_two_argument_start_form(tmp_path):
-    """防回归：QProcess.start 必须是 start(program, arguments) 两参形式。
-
-    PyQt6 移除了 PyQt5 的 start(command) 单参数重载：传单个列表会 TypeError
-    （Qt 主线程菜单分发链中未捕获 → 进程崩溃，实测见
-    logs/renpy_overlay_20261011_154701.log）。stub 的 start 签名与真实
-    QProcess 对齐，program/arguments 必须分开传入。
-    """
-    harness = _Harness(tmp_path)
-    assert harness.recorder.start() is True
-    process = harness.processes[0]
-    assert isinstance(process.started_program, str)
-    assert isinstance(process.started_arguments, list)
-    assert process.started_program == "C:/tools/ffmpeg.exe"
-    assert process.started_arguments[0] == "-f"
-    assert process.started_arguments[-1] == str(
-        tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
-    )
-
-
-def test_real_qprocess_start_smoke():
-    """真实 QProcess.start(program, arguments) 冒烟：钉住 API 形状不回归。
-
-    QProcess 是 QObject 非窗口，QCoreApplication 环境即可实例化（离线约定
-    允许）；启动 Python 自身执行 -c pass，不弹窗口、不依赖 ffmpeg——若有
-    人改回单列表形式，本测试会立即以同样的 TypeError 失败。
-    """
-    import sys
-
-    from PyQt6.QtCore import QProcess
-
-    process = QProcess()
-    process.start(sys.executable, ["-c", "pass"])
-    try:
-        assert process.waitForFinished(10_000), "进程未在 10s 内退出"
-        assert process.exitStatus() == QProcess.ExitStatus.NormalExit
-        assert process.exitCode() == 0
-    finally:
-        process.kill()
-        process.waitForFinished(1000)
-
-
-def test_start_without_ffmpeg_degrades_with_notice(tmp_path):
-    harness = _Harness(tmp_path)
-    harness.recorder._ffmpeg_path = None
-    harness.recorder._find_fn = lambda: None
+def test_start_unavailable_degrades_with_notice(tmp_path):
+    """PyAV 不可用：提示降级并返回 False（不拉起任何线程）。"""
+    harness = _Harness(tmp_path, available=False)
     assert harness.recorder.start() is False
-    assert harness.processes == []
-    assert harness.notifies == ["视频录制不可用：未找到 ffmpeg.exe"]
+    assert harness.capture_calls == []
+    assert harness.audio_calls == []
+    assert harness.notifies == [RECORD_UNAVAILABLE_TEXT]
 
 
 def test_start_video_only_without_recorder_schemes(tmp_path):
     harness = _Harness(tmp_path, audio_available=False)
     assert harness.recorder.start() is True
-    args = harness.processes[0].started_args
-    assert args[-1] == str(
+    out_path, _, _ = harness.capture_calls[0]
+    assert out_path == (
         tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
     ), "仅视频降级：同样录到 mkv 中间容器（停止时 remux 为 mp4）"
     assert harness.audio_calls == []
     assert harness.notifies[0] == RECORD_START_TEXT  # 三段提示文案不变
 
 
-def test_stop_order_terminate_then_finish(tmp_path):
+def test_stop_sets_stop_event_then_finishes(tmp_path):
+    """停止：置位编码线程停止事件（协作式）；完成信号到达后才收尾。"""
     harness = _Harness(tmp_path)
     harness.recorder.start()
-    process = harness.processes[0]
+    _, stop_event, _ = harness.capture_calls[0]
     harness.recorder.stop()
-    assert process.terminated is True, "停止应优雅结束 ffmpeg"
-    assert process.written == [b"q"], "应向 stdin 写 ffmpeg 交互退出命令（terminate 对无窗口进程无效）"
-    assert harness.recorder.recording is True, "finished 到达前仍处于录制态"
+    assert stop_event.is_set(), "停止应置位录屏线程停止事件"
+    assert harness.recorder.recording is True, "完成信号到达前仍处于录制态"
     assert RECORD_STOP_TEXT not in harness.notifies
-    process.finished.emit(0, 0)  # ffmpeg finalize 完成
+    harness.finish_capture(True)  # 录屏线程正常结束
     assert harness.recorder.recording is False
     assert harness.notifies[-1] == RECORD_STOP_TEXT
     assert len(harness.merge_calls) == 1
-    ffmpeg, video, audio, out = harness.merge_calls[0]
-    assert video == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
-    assert audio == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.wav"
-    assert out == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"
+    video, audio, out = harness.merge_calls[0]
+    video_dir = tmp_path / "renpy_overlay_cache" / "video"
+    assert video == video_dir / "20261011-101010.tmp.mkv"
+    assert audio == video_dir / "20261011-101010.tmp.wav"
+    assert out == video_dir / "20261011-101010.mp4"
     assert "视频+系统音频" not in harness.notifies
 
 
@@ -241,8 +170,9 @@ def test_stop_joins_audio_thread_and_cleans_tmp(tmp_path):
     harness = _Harness(tmp_path)
     harness.recorder.start()
     harness.recorder.stop()
-    harness.processes[0].finished.emit(0, 0)
+    harness.finish_capture(True)
     assert harness.recorder._audio_thread is None, "录音线程应已 join 并清引用"
+    assert harness.recorder._capture_thread is None, "录屏线程引用应已清空"
 
 
 def test_merge_failure_falls_back_to_intermediate_mkv(tmp_path):
@@ -251,31 +181,33 @@ def test_merge_failure_falls_back_to_intermediate_mkv(tmp_path):
     harness.recorder.start()
     final = tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"
     tmp_video = final.with_name("20261011-101010.tmp.mkv")
-    tmp_video.write_bytes(b"fake-mkv")  # 模拟 ffmpeg 已写出的中间容器
+    tmp_video.write_bytes(b"fake-mkv")  # 模拟录屏线程已写出的中间容器
     harness.recorder.stop()
-    harness.processes[0].finished.emit(0, 0)
+    harness.finish_capture(True)
     fallback = final.with_suffix(".mkv")
     assert fallback.is_file(), "封装失败应保留 mkv 中间容器为最终产物"
     assert not tmp_video.exists(), "临时视频应已改名"
     assert not final.exists(), "封装失败时 mp4 最终名不应存在"
 
 
-def test_process_error_aborts_recording(tmp_path):
-    """FailedToStart 等进程错误：按中止收尾，不合并、提示结束。"""
-    harness = _Harness(tmp_path)
+def test_capture_failure_aborts_recording(tmp_path):
+    """编码失败（record_screen 返回 False）：按中止收尾，不合并、提示结束。"""
+    harness = _Harness(tmp_path, capture_result=False)
     harness.recorder.start()
-    harness.processes[0].errorOccurred.emit(1)
+    harness.recorder.stop()
+    harness.finish_capture(False)
     assert harness.recorder.recording is False
     assert harness.merge_calls == []
     assert harness.notifies[-1] == RECORD_STOP_TEXT
 
 
-def test_unexpected_exit_finishes_recording(tmp_path):
-    """ffmpeg 自行退出（未请求停止）：结束录制并提示。"""
+def test_unexpected_capture_finish_aborts_recording(tmp_path):
+    """未请求停止即结束（编码线程意外退出）：按中止收尾，不保留产物。"""
     harness = _Harness(tmp_path)
     harness.recorder.start()
-    harness.processes[0].finished.emit(1, 1)  # CrashExit
+    harness.finish_capture(True)  # 未 stop() 直接结束
     assert harness.recorder.recording is False
+    assert harness.merge_calls == []
     assert harness.notifies[-1] == RECORD_STOP_TEXT
 
 
@@ -301,37 +233,40 @@ def test_toggle_switches_start_and_stop(tmp_path):
     harness = _Harness(tmp_path)
     harness.recorder.toggle()
     assert harness.recorder.recording is True
-    harness.recorder.toggle()  # 进入停止流程（等 finished）
-    harness.processes[0].finished.emit(0, 0)
+    harness.recorder.toggle()  # 进入停止流程（等完成信号）
+    harness.finish_capture(True)
     assert harness.recorder.recording is False
     harness.recorder.toggle()  # 可再次开始
     assert harness.recorder.recording is True
 
 
 def test_shutdown_stops_and_finishes(tmp_path):
+    """宿主退出：置停止事件并同步等待编码线程后收尾（不抛异常）。"""
     harness = _Harness(tmp_path)
     harness.recorder.start()
+    _, stop_event, _ = harness.capture_calls[0]
     harness.recorder.shutdown()
-    assert harness.processes[0].terminated is True
-    assert harness.processes[0].killed is False  # waitForFinished 成功无需 kill
+    assert stop_event.is_set(), "shutdown 应置位录屏线程停止事件"
     assert harness.recorder.recording is False
     assert len(harness.merge_calls) == 1  # shutdown 同步完成合并收尾
 
 
-def test_shutdown_kills_when_wait_times_out(tmp_path):
+def test_late_capture_done_after_shutdown_is_ignored(tmp_path):
+    """shutdown 同步收尾后迟到的完成信号：幂等守卫拦截，不重复收尾。"""
     harness = _Harness(tmp_path)
     harness.recorder.start()
-    harness.processes[0].wait_result = False
     harness.recorder.shutdown()
-    assert harness.processes[0].killed is True
-    assert harness.recorder.recording is False
+    assert len(harness.merge_calls) == 1
+    harness.finish_capture(True)  # queued 信号迟到
+    assert len(harness.merge_calls) == 1, "迟到信号不应重复封装/清理"
+    assert harness.notifies.count(RECORD_STOP_TEXT) == 1
 
 
 def test_start_ignored_while_recording(tmp_path):
     harness = _Harness(tmp_path)
     assert harness.recorder.start() is True
     assert harness.recorder.start() is False
-    assert len(harness.processes) == 1
+    assert len(harness.capture_calls) == 1
 
 
 # ---------------------------------------------------------------- 录制几何（DPI）
@@ -354,7 +289,7 @@ class _StubScreen:
 def test_physical_geometry_scales_by_dpr():
     """逻辑像素 → 物理像素（gdigrab 只认物理）：物理 = 逻辑 × DPR。
 
-    DPR≠1 时直接用 Qt 逻辑宽高当 -video_size 会只录到屏幕左上一块
+    DPR≠1 时直接用 Qt 逻辑宽高当抓屏区域会只录到屏幕左上一块
     （实测缺陷：录出 1560x1040 而非全屏）。
     """
     assert physical_geometry(-960, 0, 1440, 900, 2.0) == (-1920, 0, 2880, 1800)
@@ -382,55 +317,19 @@ def test_default_geometry_identity_at_dpr_one():
 # ---------------------------------------------------------------- 停止逻辑健壮性
 
 
-def test_stop_arms_grace_timeout_and_finish_cancels_it(tmp_path):
-    """停止时启动优雅退出超时兑底；正常收尾后撤销强杀兑底。"""
-    harness = _Harness(tmp_path)
-    harness.recorder.start()
-    harness.recorder.stop()
-    assert harness.recorder._stop_grace_timer.isActive(), "停止后应武装超时强杀兑底"
-    harness.processes[0].finished.emit(0, 0)
-    assert not harness.recorder._stop_grace_timer.isActive(), "正常收尾后应撤销超时兑底"
-    assert harness.processes[0].killed is False
-
-
-def test_stop_grace_timeout_kills_and_finishes(tmp_path):
-    """terminate + stdin 'q' 均未生效（ffmpeg 无窗口收不到 WM_CLOSE）时：
-    超时强杀兑底，mkv 中间容器保证产物仍可被封装为最终 mp4。"""
-    harness = _Harness(tmp_path)
-    harness.recorder.start()
-    harness.recorder.stop()
-    harness.recorder._on_stop_grace_timeout()  # 直接驱动超时回调（离线无事件循环）
-    assert harness.processes[0].killed is True, "超时后应强杀录制进程"
-    assert harness.recorder.recording is True, "强杀后等 finished 信号进入收尾"
-    harness.processes[0].finished.emit(0, 0)
-    assert harness.recorder.recording is False
-    assert len(harness.merge_calls) == 1, "强杀后仍应封装 mkv 中间容器为最终 mp4"
-    assert harness.notifies[-1] == RECORD_STOP_TEXT
-
-
-def test_stop_grace_timeout_ignored_after_normal_finish(tmp_path):
-    """正常收尾后超时回调不再生效（幂等守卫）：不重复封装/不触碰新进程。"""
-    harness = _Harness(tmp_path)
-    harness.recorder.start()
-    harness.recorder.stop()
-    harness.processes[0].finished.emit(0, 0)  # 正常收尾
-    assert len(harness.merge_calls) == 1
-    harness.recorder._on_stop_grace_timeout()  # 迟到的超时回调
-    assert len(harness.merge_calls) == 1, "收尾后迟到的超时兑底不应重复封装"
-
-
 def test_stop_repeated_clicks_are_idempotent(tmp_path):
-    """录制中重复点击菜单（stop 多次）与重复 finished 回调：收尾仅执行一次。"""
+    """录制中重复点击菜单（stop 多次）与重复完成回调：收尾仅执行一次。"""
     harness = _Harness(tmp_path)
     harness.recorder.start()
     harness.recorder.stop()
     harness.recorder.stop()  # 重复点击：被 _stopping 守卫拦截
     harness.recorder.toggle()  # toggle 亦走 stop 分支：同样被拦截
-    process = harness.processes[0]
-    assert process.written == [b"q"], "重复点击不应重复写入退出命令"
-    assert harness.recorder.recording is True  # 仍在等 finished
-    process.finished.emit(0, 0)
-    process.finished.emit(0, 0)  # 重复 finished 回调：幂等守卫拦截
+    assert len(harness.capture_calls) == 1
+    _, stop_event, _ = harness.capture_calls[0]
+    assert stop_event.is_set(), "首次停止已置位事件（重复点击不重复触发收尾）"
+    assert harness.recorder.recording is True  # 仍在等完成信号
+    harness.finish_capture(True)
+    harness.finish_capture(True)  # 重复完成回调：幂等守卫拦截
     assert harness.recorder.recording is False
     assert len(harness.merge_calls) == 1, "收尾流程不应重入（不重复封装/清理）"
     assert harness.notifies.count(RECORD_STOP_TEXT) == 1
@@ -442,9 +341,9 @@ def test_video_only_stop_remuxes_without_audio(tmp_path):
     harness = _Harness(tmp_path, audio_available=False)
     harness.recorder.start()
     harness.recorder.stop()
-    harness.processes[0].finished.emit(0, 0)
+    harness.finish_capture(True)
     assert len(harness.merge_calls) == 1
-    _ffmpeg, video, audio, out = harness.merge_calls[0]
+    video, audio, out = harness.merge_calls[0]
     assert video == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.tmp.mkv"
     assert audio is None, "仅视频降级应退化为单流 remux（无音频输入）"
     assert out == tmp_path / "renpy_overlay_cache" / "video" / "20261011-101010.mp4"

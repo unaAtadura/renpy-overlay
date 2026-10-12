@@ -91,8 +91,8 @@ from .video import (
 from .video import (
     asr as video_asr,
 )
+from .video.av_media import av_available, extract_wav
 from .video.editor_window import ASR_FAIL_TEXT, ASR_SUCCESS_TEXT
-from .video.ffmpeg import extract_wav, find_ffmpeg
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -1083,7 +1083,7 @@ class StreamOverlayWindow:
         self._song_history_window: SongHistoryWindow | None = None
         self._video_editor_window = None  # 视频编辑窗口单例（惰性创建）
         self._asr_history_window = None  # 语音识别历史窗口单例（惰性创建）
-        self._video_ffmpeg: str | None = None  # ffmpeg 路径惰性探测缓存
+        self._video_av_ready: bool | None = None  # PyAV 可用性惰性探测缓存
         self._chat_history_window: ChatHistoryWindow | None = None
         self._translation_history_window: TranslationHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
@@ -2671,7 +2671,7 @@ class StreamOverlayWindow:
         """语音识别入口（主线程）：互斥检查 → 后台线程截取音轨并请求。
 
         与翻译/识曲/对话共用「同时仅一个 API 请求」的互斥原则（需求）：
-        存在任意在途请求时静默忽略本次点击。片段由 ffmpeg 截取音轨转
+        存在任意在途请求时静默忽略本次点击。片段由 PyAV 截取音轨转
         wav（终点早于起点已在编辑窗口整理），识别成功经 asr_done 队列
         事件回主线程落库与上屏。
         """
@@ -2689,10 +2689,10 @@ class StreamOverlayWindow:
             if self._video_editor_window is not None:
                 self._video_editor_window.set_status(ASR_FAIL_TEXT)
             return
-        ffmpeg = self._video_ffmpeg or find_ffmpeg()
-        self._video_ffmpeg = ffmpeg
-        if not ffmpeg:
-            logger.warning("未找到 ffmpeg.exe，语音识别不可用")
+        av_ready = av_available() if self._video_av_ready is None else self._video_av_ready
+        self._video_av_ready = av_ready
+        if not av_ready:
+            logger.warning("视频组件不可用，语音识别不可用")
             if self._video_editor_window is not None:
                 self._video_editor_window.set_status(ASR_FAIL_TEXT)
             return
@@ -2702,7 +2702,7 @@ class StreamOverlayWindow:
         duration = max(1, int(round(abs(end_s - start_s))))
         thread = threading.Thread(
             target=self._asr_worker,
-            args=(seq, ffmpeg, video_path, start_s, end_s, duration),
+            args=(seq, video_path, start_s, end_s, duration),
             name=f"video-asr-{seq}",
             daemon=True,
         )
@@ -2711,7 +2711,6 @@ class StreamOverlayWindow:
     def _asr_worker(
         self,
         seq: int,
-        ffmpeg: str,
         video_path: str,
         start_s: float,
         end_s: float,
@@ -2719,7 +2718,7 @@ class StreamOverlayWindow:
     ) -> None:
         """后台线程：截取音频轨转 wav → ASR 请求 → 结果只经队列回主线程。"""
         try:
-            wav = extract_wav(ffmpeg, video_path=video_path, start_s=start_s, end_s=end_s)
+            wav = extract_wav(video_path=video_path, start_s=start_s, end_s=end_s)
             if wav is None:
                 self._queue.put(("asr_fail", {"seq": seq, "stage": "extract"}))
                 return

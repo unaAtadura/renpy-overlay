@@ -1,4 +1,4 @@
-"""全屏录制控制器：ffmpeg gdigrab 视频 + 环回录音双流，停止时合并。
+"""全屏录制控制器：PyAV gdigrab 录屏 + 环回录音双流，停止时合并。
 
 需求（.raw_plans/future_视频录制.txt）：右键菜单「录制视频」开关式录制，
 全屏保存为 ``renpy_overlay_cache/video/yyyyMMdd-hhmmss.mp4``（自动建目录）；
@@ -6,21 +6,23 @@
 
 双流方案（见 :mod:`.audio_capture` 模块说明）：
 
-- 视频流：QProcess 驱动用户自备的 ffmpeg.exe（gdigrab 抓主屏），统一录到
-  **mkv 中间容器**（无 moov 依赖、簇式容错封装：即使进程被强杀，已写数据
-  仍可被 ffmpeg 读取）；音频流：``record_loopback`` 后台线程持续环回录音到
-  临时 wav；停止时 ffmpeg 封装为最终 mp4（双流：视频 copy + aac + -shortest；
-  仅视频降级：单流 remux），并清理临时文件。
+- 视频流：PyAV gdigrab 抓主屏 + libx264 编码（:mod:`.screen_capture`，
+  不再依赖用户自备的 ffmpeg.exe），统一录到 **mkv 中间容器**（无 moov
+  依赖、簇式容错封装：即使异常未 finalize，已写数据仍可被 remux）；
+  音频流：``record_loopback`` 后台线程持续环回录音到临时 wav；停止时经
+  :func:`.av_media.merge_streams` 封装为最终 mp4（双流：视频 copy + aac
+  + 时长对齐；仅视频降级：单流 remux），并清理临时文件。
 
-线程与进程约束：
+线程与信号约束：
 
-- 本控制器在 Qt 主线程使用（QProcess 信号与 QTimer 的归属线程要求）；
-- ffmpeg 是无窗口控制台进程，QProcess.terminate() 投递的 WM_CLOSE 没有接收
-  者、单独使用无效（实测录制无法结束）——停止采用三层策略：terminate →
-  stdin 写 'q'（ffmpeg 交互退出命令，正常 finalize）→ 超时强杀兜底（mkv
-  中间容器保证强杀后产物仍可封装）；进程异常退出同样收尾；
-- 停止顺序固定：优雅退出 → stop_event 停录音并 join（等 wav 头写完）→
-  封装 → 清理临时文件 → 提示结束；
+- 本控制器在 Qt 主线程使用（信号与 QTimer 的归属线程要求）；录屏编码
+  在 daemon 线程执行，结束经 ``pyqtSignal`` queued 回主线程收尾；
+- 停止为协作式：置位 stop_event 后编码线程在 ≤1 帧间隔内退出并正常
+  finalize mkv（原 ffmpeg 进程的 terminate / stdin 'q' / 强杀三层策略
+  随进程消失而移除）；编码失败或未请求停止即退出按中止收尾（不保留
+  产物，对应原 QProcess errorOccurred / CrashExit 语义）；
+- 停止顺序固定：置停止事件 → 编码线程结束信号 → stop_event 停录音并
+  join（等 wav 头写完）→ 封装 → 清理临时文件 → 提示结束；
 - 录制状态判定与重复点击幂等：_stopping/_recording 双标志防重入，不重复
   触发封装/清理。
 """
@@ -33,11 +35,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QTimer
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from ..translation_store import CACHE_DIR_NAME
 from .audio_capture import RECORD_AVAILABLE, record_loopback
-from .ffmpeg import DEFAULT_RECORD_FPS, find_ffmpeg, merge_streams, video_record_args
+from .av_media import DEFAULT_RECORD_FPS, merge_streams
+from .screen_capture import CAPTURE_AVAILABLE, record_screen
 
 logger = logging.getLogger("renpy_overlay.video.recorder")
 
@@ -45,11 +48,12 @@ logger = logging.getLogger("renpy_overlay.video.recorder")
 PROGRESS_INTERVAL_MS = 10 * 60 * 1000
 #: 每次周期提示的间隔（分钟，与 PROGRESS_INTERVAL_MS 对齐）
 PROGRESS_STEP_MINUTES = 10
-#: 优雅退出等待超时（毫秒）：terminate + stdin 'q' 均未生效时强杀录制进程
-STOP_GRACE_TIMEOUT_MS = 10_000
 
 RECORD_START_TEXT = "开始录制视频，保存在renpy_overlay_cache/video"
 RECORD_STOP_TEXT = "录制结束，保存在renpy_overlay_cache/video"
+
+#: 降级提示（PyAV 缺失等不可录制情形；原文案提及的 ffmpeg.exe 已不适用）
+RECORD_UNAVAILABLE_TEXT = "视频录制不可用：视频组件初始化失败"
 
 #: 菜单项文案（需求：录制中显示「录制视频 mm:ss」，结束后恢复「录制视频」）
 MENU_LABEL_IDLE = "录制视频"
@@ -81,10 +85,9 @@ def physical_geometry(
 
     进程为 Per-Monitor DPI Aware（win32api 的 DPI awareness 设置），Qt 的
     ``QScreen.geometry()`` 返回逻辑像素；而 gdigrab 按桌面物理像素抓屏——
-    直接把逻辑宽高当 ``-offset/-video_size`` 会只录到屏幕左上一块（DPR≠1
-    的屏幕上实测）。物理 = 逻辑 × devicePixelRatio（与
-    ``stream_window._virtual_screen_rect`` 同一口径）；DPR 非法（None/≤0）
-    按 1.0 处理，宽高下限钳 1。
+    直接把逻辑宽高当抓屏区域会只录到屏幕左上一块（DPR≠1 的屏幕上实测）。
+    物理 = 逻辑 × devicePixelRatio（与 ``stream_window._virtual_screen_rect``
+    同一口径）；DPR 非法（None/≤0）按 1.0 处理，宽高下限钳 1。
     """
     dpr = device_pixel_ratio if device_pixel_ratio and device_pixel_ratio > 0 else 1.0
     return (
@@ -114,12 +117,15 @@ def default_geometry(screen=None) -> tuple[int, int, int, int]:
 
 
 class VideoRecorder(QObject):
-    """录制编排器：开始（双流）/ 停止（收视频 → 停录音 → 合并）状态机。
+    """录制编排器：开始（双流）/ 停止（停录屏 → 停录音 → 合并）状态机。
 
     构造注入（同 QuickMenu/MouseLockController 的宿主能力注入约定）：
     ``notify`` 为标题窗提示回调；``game_dir`` 锚定缓存目录；其余工厂/
     函数参数仅供离线测试注入 stub，默认接真实实现。
     """
+
+    #: 录屏编码线程完成（ok=正常收尾）；跨线程 emit 由 Qt queued 到主线程
+    _capture_done = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -127,11 +133,10 @@ class VideoRecorder(QObject):
         notify,
         game_dir,
         geometry_fn=default_geometry,
-        process_factory=None,
+        capture_fn=record_screen,
         audio_recorder=record_loopback,
         audio_available=RECORD_AVAILABLE,
-        ffmpeg_path: str | None = None,
-        find_fn=find_ffmpeg,
+        available_fn=CAPTURE_AVAILABLE,
         merge_fn=merge_streams,
         clock_fn=datetime.now,
         monotonic_fn=time.monotonic,
@@ -142,22 +147,22 @@ class VideoRecorder(QObject):
         self._notify = notify
         self._video_dir = default_video_dir(game_dir)
         self._geometry_fn = geometry_fn
-        self._process_factory = process_factory
+        self._capture_fn = capture_fn
         self._audio_recorder = audio_recorder
         self._audio_available = audio_available
-        self._ffmpeg_path = ffmpeg_path
-        self._find_fn = find_fn
+        self._available_fn = available_fn
         self._merge_fn = merge_fn
         self._clock_fn = clock_fn
         self._monotonic_fn = monotonic_fn
         self._fps = fps
 
         self._recording = False
-        self._stopping = False  # 停止流程进行中（防 finished/error 双触发重入）
+        self._stopping = False  # 停止流程进行中（防完成信号双触发重入）
         self._started_monotonic = 0.0
         self._progress_ticks = 0
-        self._ffmpeg: str | None = None
-        self._process = None  # QProcess / stub：视频流进程
+        self._capture_geometry: tuple[int, int, int, int] = (0, 0, 0, 0)
+        self._capture_thread: threading.Thread | None = None
+        self._capture_stop: threading.Event | None = None
         self._audio_thread: threading.Thread | None = None
         self._audio_stop = threading.Event()
         self._tmp_video: Path | None = None
@@ -168,11 +173,7 @@ class VideoRecorder(QObject):
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(PROGRESS_INTERVAL_MS)
         self._progress_timer.timeout.connect(self._on_progress_tick)
-        # 优雅退出超时兜底：terminate + stdin 'q' 均未生效时强杀（单发）
-        self._stop_grace_timer = QTimer(self)
-        self._stop_grace_timer.setSingleShot(True)
-        self._stop_grace_timer.setInterval(STOP_GRACE_TIMEOUT_MS)
-        self._stop_grace_timer.timeout.connect(self._on_stop_grace_timeout)
+        self._capture_done.connect(self._on_capture_done)
 
     # ---- 状态（快捷菜单文案 / 宿主退出清理用） ---------------------------------
 
@@ -198,19 +199,17 @@ class VideoRecorder(QObject):
             self.start()
 
     def start(self) -> bool:
-        """开始录制：拉起 ffmpeg 视频流（有录音库时同时拉起环回录音线程）。
+        """开始录制：拉起录屏编码线程（有录音库时同时拉起环回录音线程）。
 
-        ffmpeg 缺失时提示降级并返回 False；成功返回 True。
+        PyAV 缺失时提示降级并返回 False；成功返回 True。
         """
         if self._recording or self._stopping:
             logger.info("已在录制中，忽略重复开始请求")
             return False
-        ffmpeg = self._ffmpeg_path or self._find_fn()
-        if not ffmpeg:
-            logger.warning("未找到 ffmpeg.exe，视频录制不可用")
-            self._notify("视频录制不可用：未找到 ffmpeg.exe")
+        if not self._available_fn():
+            logger.warning("视频组件不可用，视频录制不可用")
+            self._notify(RECORD_UNAVAILABLE_TEXT)
             return False
-        self._ffmpeg = ffmpeg
 
         try:
             self._video_dir.mkdir(parents=True, exist_ok=True)
@@ -222,35 +221,24 @@ class VideoRecorder(QObject):
         timestamp = self._clock_fn().strftime("%Y%m%d-%H%M%S")
         self._final_path = self._video_dir / f"{timestamp}.mp4"
         self._with_audio = bool(self._audio_available)
-        # 视频流统一录到 mkv 中间容器（无 moov 依赖、簇式容错封装：进程被
-        # 强杀后已写数据仍可被 ffmpeg 读取并 remux 为最终 mp4）；停止时经
-        # 封装生成最终 mp4，封装失败回退保留 mkv 为最终产物。
+        # 视频流统一录到 mkv 中间容器（无 moov 依赖、簇式容错封装：编码
+        # 线程异常退出后已写数据仍可被 remux 为最终 mp4）；停止时经封装
+        # 生成最终 mp4，封装失败回退保留 mkv 为最终产物。
         self._tmp_video = self._video_dir / f"{timestamp}.tmp.mkv"
-        video_out = self._tmp_video
         if self._with_audio:
             self._tmp_audio = self._video_dir / f"{timestamp}.tmp.wav"
         else:
             logger.warning("无可用录音方案，本次录制降级为仅视频")
             self._tmp_audio = None
 
-        offset_x, offset_y, width, height = self._geometry_fn()
-        args = video_record_args(
-            ffmpeg,
-            offset_x=offset_x,
-            offset_y=offset_y,
-            width=width,
-            height=height,
-            out_path=video_out,
-            fps=self._fps,
+        self._capture_geometry = self._geometry_fn()
+        self._capture_stop = threading.Event()
+        self._capture_thread = threading.Thread(
+            target=self._capture_worker,
+            name="video-screen-encode",
+            daemon=True,
         )
-        process = self._process_factory() if self._process_factory else _make_qprocess()
-        process.finished.connect(self._on_process_finished)
-        process.errorOccurred.connect(self._on_process_error)
-        # PyQt6 的 QProcess.start 只接受 start(program, arguments) 两参形式
-        # （PyQt5 的 start(command) 单参数重载已移除，传单个列表会 TypeError
-        # 导致进程崩溃，实测见 logs/renpy_overlay_20261011_154701.log）
-        process.start(args[0], args[1:])
-        self._process = process
+        self._capture_thread.start()
 
         if self._with_audio:
             self._audio_stop = threading.Event()
@@ -275,71 +263,66 @@ class VideoRecorder(QObject):
         return True
 
     def stop(self) -> None:
-        """停止录制：优雅三连结束 ffmpeg，录音停止与封装在 finished 回调中
-        继续（:meth:`_finish_recording`）。
+        """停止录制：置位录屏线程停止事件（协作式，≤1 帧间隔内退出并
+        finalize mkv），收尾在完成信号回调中继续（:meth:`_on_capture_done`）。
 
-        ffmpeg 是无窗口控制台进程，terminate() 投递的 WM_CLOSE 没有接收者、
-        单独使用无效（实测录制无法结束）——补 stdin 写 'q'（ffmpeg 交互
-        退出命令，正常 finalize），并加超时强杀兜底；幂等：重复点击被
-        _stopping 守卫拦截，不重复触发收尾。
+        幂等：重复点击被 _stopping 守卫拦截，不重复触发收尾。
         """
         if not self._recording or self._stopping:
             return
         self._stopping = True
         self._progress_timer.stop()
-        self._process.terminate()
-        try:
-            self._process.write(b"q")  # ffmpeg 交互命令：正常收尾退出
-        except Exception:  # pragma: no cover - 进程已退出等竞态
-            logger.debug("写入 stdin 退出命令失败", exc_info=True)
-        self._stop_grace_timer.start()
-
-    def _on_stop_grace_timeout(self) -> None:
-        """优雅退出超时（terminate + stdin 'q' 均未生效）：强杀兜底。
-
-        中间容器为 mkv（无 moov 依赖、簇式容错封装），强杀产物仍可被
-        ffmpeg 读取并封装为最终 mp4，不会丢失已录制内容。
-        """
-        if not self._stopping:
-            return
-        logger.warning("优雅退出超时（%dms），强杀录制进程", STOP_GRACE_TIMEOUT_MS)
-        try:
-            self._process.kill()
-        except Exception:  # pragma: no cover - 进程已退出等竞态
-            logger.debug("强杀录制进程失败（进程可能已退出）", exc_info=True)
+        self._capture_stop.set()
 
     def shutdown(self) -> None:
-        """宿主退出清理：录制中则同步终止并完成收尾（不抛异常）。"""
+        """宿主退出清理：录制中则置停止事件并同步等待编码线程收尾（不抛异常）。"""
         if not self._recording:
             return
         self._progress_timer.stop()
-        try:
-            try:
-                self._process.write(b"q")  # 先尝试 ffmpeg 交互退出（正常收尾）
-            except Exception:  # pragma: no cover - 进程已退出等竞态
-                logger.debug("写入 stdin 退出命令失败", exc_info=True)
-            self._process.terminate()
-            if not self._process.waitForFinished(5000):
-                self._process.kill()
-                self._process.waitForFinished(1000)
-        except Exception:  # pragma: no cover - 进程已退出等竞态
-            logger.debug("停止录制进程时出现竞态", exc_info=True)
+        self._capture_stop.set()
+        thread = self._capture_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+            if thread.is_alive():  # pragma: no cover - 编码异常挂死兜底
+                logger.error(
+                    "录屏线程未在 5s 内退出，放弃等待（mkv 已写数据仍可被 remux）"
+                )
+        self._capture_thread = None
         self._finish_recording(aborted=False)
 
-    # ---- 内部：进程回调与收尾 ---------------------------------------------------
+    # ---- 内部：编码线程与收尾 ---------------------------------------------------
 
-    def _on_process_finished(self, *args) -> None:
-        """ffmpeg 退出（正常停止或自行退出）：进入收尾流程。"""
+    def _capture_worker(self) -> None:
+        """录屏编码线程：record_screen 完成后经信号回主线程收尾。"""
+        offset_x, offset_y, width, height = self._capture_geometry
+        ok = self._capture_fn(
+            self._tmp_video,
+            self._capture_stop,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            width=width,
+            height=height,
+            fps=self._fps,
+        )
+        self._capture_done.emit(bool(ok))
+
+    def _on_capture_done(self, ok: bool) -> None:
+        """录屏线程结束（主线程）：按请求状态进入收尾流程。
+
+        未请求停止即结束（编码线程意外退出）或编码失败：按中止收尾，
+        不保留产物；迟到信号（shutdown 已同步收尾）被 _recording 拦截。
+        """
+        if not self._recording:
+            return  # 幂等：shutdown 同步收尾后迟到的信号不再重入
         if not self._stopping:
-            logger.warning("录制进程意外退出，提前结束本次录制")
-        self._finish_recording(aborted=not self._stopping)
-
-    def _on_process_error(self, error) -> None:
-        """QProcess 错误：FailedToStart 不会伴随 finished（无后续回调），
-        按中止处理；CrashExit 的 finished 回调由幂等保护吸收，不重入。"""
-        if self._recording and not self._stopping:
-            logger.warning("录制进程错误（error=%s），中止本次录制", error)
+            logger.warning("录屏线程意外退出（ok=%s），提前结束本次录制", ok)
             self._finish_recording(aborted=True)
+            return
+        if not ok:
+            logger.warning("录屏编码失败，按中止收尾")
+            self._finish_recording(aborted=True)
+            return
+        self._finish_recording(aborted=False)
 
     def _on_progress_tick(self) -> None:
         """每 10 分钟周期提示（需求措辞，含累计分钟数）。"""
@@ -356,7 +339,6 @@ class VideoRecorder(QObject):
         self._stopping = False
         self._recording = False
         self._progress_timer.stop()
-        self._stop_grace_timer.stop()  # 正常收尾后撤销强杀兜底（幂等守卫亦可拦）
 
         # 停录音并等待线程退出（块间检查 + join，等 wav 头写完）
         if self._audio_thread is not None:
@@ -376,7 +358,6 @@ class VideoRecorder(QObject):
             # 统一封装路径：双流 = 视频流 copy + aac 音轨；仅视频降级时
             # audio_path 为 None，退化为 mkv → mp4 单流 remux（均秒级完成）
             finalized = self._merge_fn(
-                self._ffmpeg,
                 video_path=tmp_video,
                 audio_path=tmp_audio,
                 out_path=final_path,
@@ -394,14 +375,16 @@ class VideoRecorder(QObject):
             self._notify(RECORD_STOP_TEXT)
             self._tmp_video = None
             self._tmp_audio = None
-            self._process = None
+            self._capture_thread = None
+            self._capture_stop = None
             self._final_path = None
 
     def _fallback_to_intermediate_video(self) -> None:
         """封装失败回退：mkv 中间文件改名为 .mkv 最终产物（不丢录像）。
 
-        mkv 为簇式容错容器（强杀也可读），改名后扩展名与内容匹配；正常
-        路径的最终产物仍是 .mp4（同 Stem 的 .mp4 不存在，因为封装失败）。
+        mkv 为簇式容错容器（异常未 finalize 也可读），改名后扩展名与内容
+        匹配；正常路径的最终产物仍是 .mp4（同 Stem 的 .mp4 不存在，因为
+        封装失败）。
         """
         fallback_path = (
             self._final_path.with_suffix(".mkv") if self._final_path else None
@@ -422,11 +405,3 @@ class VideoRecorder(QObject):
                 path.unlink(missing_ok=True)
             except OSError as exc:  # pragma: no cover - 文件被占用等
                 logger.warning("清理临时文件失败（%s）：%s", path, exc)
-
-
-def _make_qprocess():
-    """真实 QProcess 工厂（局部导入：非 Qt 运行环境不触发）。"""
-    from PyQt6.QtCore import QProcess
-
-    process = QProcess()
-    return process
