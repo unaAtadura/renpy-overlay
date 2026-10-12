@@ -115,7 +115,7 @@ def _layout(menu: _StubMenu) -> list:
     return result
 
 
-def _open(monkeypatch, *, recorder=None, pick=None, **callbacks):
+def _open(monkeypatch, *, recorder=None, asr_rt=None, pick=None, **callbacks):
     """弹出一次 stub 菜单，返回 (主菜单 stub, 各回调的调用记录)。
 
     ``pick`` 在 exec 时以当前菜单实例调用，返回要选中的动作
@@ -156,6 +156,8 @@ def _open(monkeypatch, *, recorder=None, pick=None, **callbacks):
     )
     if recorder is not None:
         menu_obj.attach_recorder(recorder)
+    if asr_rt is not None:
+        menu_obj.attach_asr_rt(asr_rt)
     menu_obj.show_context_menu(QPoint(0, 0))
     return holder[0], {
         "record": record_calls,
@@ -165,9 +167,11 @@ def _open(monkeypatch, *, recorder=None, pick=None, **callbacks):
 
 
 #: 选中动作的取法（exec 时从当前菜单实例自取，保证对象身份一致）
-#: 条目序（无快捷键模式/锁鼠标时）：0 创建 1 销毁 2 分隔线 3 录制 4 编辑 …
+#: 条目序（无快捷键模式/锁鼠标时）：0 创建 1 销毁 2 分隔线 3 录制 4 编辑
+#: 5 实时语音识别（未注入控制器时不占位）…
 PICK_RECORD = lambda m: m.items[3][1]  # noqa: E731 - 分隔线之后第一项：录制视频
 PICK_EDITOR = lambda m: m.items[4][1]  # noqa: E731 - 紧随其后：视频编辑
+PICK_ASR_RT = lambda m: m.items[5][1]  # noqa: E731 - 紧随其后：实时语音识别
 PICK_ASR = lambda m: m.items[-3][1].items[-1][1]  # noqa: E731 - 查看历史末项
 
 
@@ -205,6 +209,47 @@ def test_menu_layout_and_order(monkeypatch):
 def test_recording_label_shown_while_recording(monkeypatch):
     menu, _calls = _open(monkeypatch, recorder=_StubRecorder("录制视频 01:23"))
     assert "录制视频 01:23" in _layout(menu), "录制中菜单应显示 mm:ss 文案"
+
+
+# ---------------------------------------------------------------- 实时语音识别
+
+
+class _StubAsrRt:
+    """实时语音识别控制器 stub：enabled 状态 + toggle 调用记录。"""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+        self.toggles = 0
+
+    def toggle(self) -> None:
+        self.toggles += 1
+
+
+def test_asr_rt_entry_layout_when_attached(monkeypatch):
+    """注入控制器后：实时语音识别位于视频编辑之下、分隔线与听歌识曲之上
+    （需求布局：视频编辑 → 实时语音识别: 关 → 分隔线 → 听歌识曲）。"""
+    menu, _calls = _open(monkeypatch, asr_rt=_StubAsrRt(enabled=False))
+    layout = _layout(menu)
+    assert layout.index("视频编辑") < layout.index("实时语音识别: 关")
+    sep_after = layout.index("---", layout.index("实时语音识别: 关"))
+    assert layout.index("实时语音识别: 关") < sep_after < layout.index("听歌识曲")
+
+
+def test_asr_rt_entry_label_follows_state(monkeypatch):
+    """菜单文案随控制器 enabled 切换（默认关，开启后显示「开」）。"""
+    menu, _calls = _open(monkeypatch, asr_rt=_StubAsrRt(enabled=True))
+    assert "实时语音识别: 开" in _layout(menu)
+
+
+def test_asr_rt_toggle_dispatch(monkeypatch):
+    """选中实时语音识别项分发 toggle；未注入控制器时点击不崩溃。"""
+    controller = _StubAsrRt()
+    _menu, _calls = _open(monkeypatch, asr_rt=controller, pick=PICK_ASR_RT)
+    assert controller.toggles == 1
+    # 未注入控制器：条目不占位，条目 5 是分隔线，选中它不匹配任何动作，
+    # 不应崩溃也不触发任何回调
+    _menu, _calls = _open(monkeypatch, pick=lambda m: m.items[5][1])
+    assert _calls["asr"] == []
 
 
 def test_record_video_callback_dispatch(monkeypatch):

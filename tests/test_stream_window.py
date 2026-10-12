@@ -23,9 +23,13 @@ from renpy_overlay.stream_window import (
     body_scroll_target,
     body_wheel_target,
     choice_translation_text,
+    compose_live_text,
     compute_geometry,
+    has_sentence_end,
     pair_layout,
     pair_offset_from_body,
+    plan_stream_replace,
+    strip_asr_line_breaks,
 )
 
 GAME = (100, 200, 1300, 900)  # 1200 x 700
@@ -321,3 +325,109 @@ def test_skip_injection_drag_offset_roundtrip():
     total = compute_geometry(virtual, (880, 230), "top-center", offset)
     _, body_rect = pair_layout(total, 26, 4)
     assert body_rect[:2] == drop_xy  # 松手后不再跳回屏幕顶部
+
+
+# ---- 实时语音识别：尾部锚点与显示全文组合（future_视频录制补充_实时asr） ----
+
+
+def test_scroll_target_tail_anchor_follows_bottom():
+    """tail 锚点跟随态滚到内容底部（倒数第2字符可见）；start 锚点行为不变。"""
+    assert body_scroll_target(True, 100.0, 500.0, "tail") == 500.0
+    assert body_scroll_target(True, 100.0, 500.0, "start") == 0.0
+    # 回看中（follow=False）与锚点无关：停在用户翻到的位置
+    assert body_scroll_target(False, 300.0, 500.0, "tail") == 300.0
+    assert body_scroll_target(False, 300.0, 500.0, "start") == 300.0
+
+
+def test_scroll_target_tail_anchor_clamps_out_of_range():
+    assert body_scroll_target(False, -20.0, 500.0, "tail") == 0.0
+    assert body_scroll_target(False, 900.0, 500.0, "tail") == 500.0
+
+
+def test_wheel_tail_anchor_pauses_upward_and_restores_at_bottom():
+    """tail 锚点镜像语义：上翻回看暂停跟随，下翻滚回底部恢复跟随。"""
+    target, follow = body_wheel_target(500.0, 1.0, 20.0, 500.0, "tail")
+    assert target == 440.0 and follow is False
+    target, follow = body_wheel_target(40.0, -1.0, 20.0, 500.0, "tail")
+    assert target == 100.0 and follow is False  # 未到底不恢复
+    target, follow = body_wheel_target(460.0, -1.0, 20.0, 500.0, "tail")
+    assert target == 500.0 and follow is True  # 滚回底部恢复跟随
+
+
+def test_wheel_start_anchor_keeps_legacy_semantics():
+    """start 锚点保持既有行为（默认参数回归保护）。"""
+    target, follow = body_wheel_target(0.0, -1.0, 20.0, 500.0)
+    assert target == 60.0 and follow is False
+    target, follow = body_wheel_target(60.0, 1.0, 20.0, 500.0)
+    assert target == 0.0 and follow is True
+
+
+def test_has_sentence_end():
+    for ch in "。．.？！?!":
+        assert has_sentence_end(f"句子{ch}") is True, ch
+    assert has_sentence_end("句子，") is False
+    assert has_sentence_end("") is False
+    assert has_sentence_end("多字文本") is False
+
+
+def test_strip_asr_line_breaks():
+    """句末符号后的换行符删除（需求原文）；非句末处换行一并删除（P1 决议）。"""
+    assert strip_asr_line_breaks("你好。\n") == "你好。"
+    assert strip_asr_line_breaks("你好。\r\n下一句") == "你好。下一句"
+    assert strip_asr_line_breaks("带\n内嵌\n换行") == "带内嵌换行"
+    assert strip_asr_line_breaks("无换行") == "无换行"
+
+
+def test_compose_live_text_appends_newline_per_final():
+    assert compose_live_text(["你好。", "再见。"], "") == "你好。\n再见。\n"
+
+
+def test_compose_live_text_current_without_sentence_end():
+    assert compose_live_text([], "正在识别的半句") == "正在识别的半句"
+
+
+def test_compose_live_text_current_with_sentence_end_breaks_line():
+    """当前句以句末符号结尾时主动换行（需求：主动换行）。"""
+    assert compose_live_text([], "你好。") == "你好。\n"
+    assert compose_live_text([], "真的吗？") == "真的吗？\n"
+
+
+def test_compose_live_text_strips_newlines_from_asr_text():
+    """返回文本自带的换行先删除，再由组合规则统一控制换行（无双换行）。"""
+    assert compose_live_text(["第一句。\n"], "第二句。\n") == "第一句。\n第二句。\n"
+    assert compose_live_text([], "") == ""
+
+
+def test_compose_live_text_skips_empty_finals():
+    assert compose_live_text(["", "只有一句。", ""], "") == "只有一句。\n"
+
+
+# ---- 实时语音识别：流式替换计划（增加、修正） ------------------------------
+
+
+def test_plan_stream_replace_pure_append():
+    """new 以 old 为前缀：无撤销，待显示文本为新增尾部。"""
+    assert plan_stream_replace("你好", 2, "你好世界") == (0, "世界")
+    # 部分已打字（typed=1）：待显示从打字点起
+    assert plan_stream_replace("你好", 1, "你好世界") == (0, "好世界")
+
+
+def test_plan_stream_replace_correction_beyond_typed():
+    """分叉点在未打字区：已打字字形全部保留。"""
+    assert plan_stream_replace("abc", 2, "abd!") == (0, "d!")
+
+
+def test_plan_stream_replace_correction_within_typed():
+    """分叉点在已打字区：撤销分叉后的已打字部分并重喂。"""
+    assert plan_stream_replace("abcdef", 6, "abXef") == (4, "Xef")
+    assert plan_stream_replace("abcdef", 3, "abXef") == (1, "Xef")
+
+
+def test_plan_stream_replace_shrink():
+    """内容变短（修正后更短）：撤销超出公共前缀的全部已打字部分。"""
+    assert plan_stream_replace("abcdef", 6, "ab") == (4, "")
+    assert plan_stream_replace("abcdef", 6, "") == (6, "")
+
+
+def test_plan_stream_replace_identical_text_is_noop():
+    assert plan_stream_replace("相同", 2, "相同") == (0, "")
