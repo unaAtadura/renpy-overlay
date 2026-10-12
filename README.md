@@ -565,7 +565,12 @@ renpygameread/
 │  ├─ folder_dialog.py         # IFileOpenDialog 文件夹选择对话框（COM/ctypes，跳过注入用）
 │  ├─ injector.py              # 注入 / 卸载 / 状态查询编排
 │  ├─ ipc.py                   # NDJSON over TCP 服务端 + 协议编解码
-│  ├─ stream_window.py         # 悬浮窗（PyQt6 全透明双窗口：标题+正文、打字机、拖动/锁定/翻译）
+│  ├─ stream_window.py         # 悬浮窗门面（组装 stream/ 子包 Mixin + 兼容 re-export）
+│  ├─ stream/                  # 悬浮窗原子模块包（PyQt6 全透明双窗口、打字机、拖动/锁定/翻译）
+│  │  ├─ constants.py visual.py icons.py geometry.py  # 常量/视觉参数/图标/停靠几何纯函数
+│  │  ├─ scroll_logic.py text_logic.py               # 滚动蒙版与实时文本纯函数
+│  │  ├─ windows.py           # 透明双窗口渲染层（标题窗/正文窗）
+│  │  └─ host_core/follow/interaction 等 9 个 Mixin  # 装配核心与各功能链路（经 self 共享状态）
 │  ├─ quick_menu.py            # 右键快捷菜单管理器（截图窗口池 + 后续新功能菜单扩展点）
 │  ├─ screenshot/              # 截图翻译功能包（各窗口相互独立、原子级文件）
 │  │  ├─ capture.py            # Pillow 屏幕截图（物理像素，支持多显示器负坐标）
