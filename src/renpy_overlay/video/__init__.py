@@ -12,10 +12,23 @@
   停止时合并为带 aac 音轨的 mp4（:mod:`.recorder`）；
 - ASR 走 OpenAI 兼容 ``chat/completions`` + ``input_audio``（:mod:`.asr`），
   与翻译/识曲/对话共用「同时仅一个 API 请求」互斥（互斥在宿主实现）；
+- 实时语音识别（ASR-RT，:mod:`.asr_rt`）：DashScope 实时流式识别（开关式
+  后台功能，AsrRtController 自持状态），开启时经宿主互斥槽阻塞其余 API
+  请求；识别结果实时上屏、不入 asr.db（需求：防止数据库过度膨胀）；
 - 识别成功结果落 ``renpy_overlay_cache/asr.db``（:mod:`.asr_store`）。
 """
 
 from .asr_history_window import AsrHistoryWindow
+from .asr_rt import (
+    ASR_RT_OFF_HINT,
+    ASR_RT_OFF_TEXT,
+    ASR_RT_ON_HINT,
+    ASR_RT_ON_TEXT,
+    AsrRtController,
+    OpenAICompatRealtimeASR,
+    openai_base_url_to_ws_url,
+    resolve_asr_rt_options,
+)
 from .asr_store import AsrStore
 from .asr_store import open_store as open_asr_store
 from .audio_capture import RECORD_AVAILABLE
@@ -23,10 +36,18 @@ from .ffmpeg import find_ffmpeg
 from .recorder import VideoRecorder
 
 __all__ = [
+    "ASR_RT_OFF_HINT",
+    "ASR_RT_OFF_TEXT",
+    "ASR_RT_ON_HINT",
+    "ASR_RT_ON_TEXT",
     "AsrHistoryWindow",
+    "AsrRtController",
     "AsrStore",
+    "OpenAICompatRealtimeASR",
     "RECORD_AVAILABLE",
     "VideoRecorder",
     "find_ffmpeg",
     "open_asr_store",
+    "openai_base_url_to_ws_url",
+    "resolve_asr_rt_options",
 ]
