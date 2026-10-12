@@ -56,6 +56,8 @@ def test_missing_file_creates_defaults(tmp_path):
         "hotkey_window_8": "8",
         "hotkey_mouse_escape": "alt+o",
         "remote_screenshot_enable": True,
+        "remote_screenshot_interval": 0.5,
+        "remote_cache_size_count": 50,
         "remote_screenshot_diameterA": 100,
         "remote_screenshot_diameterB": 100,
     }
@@ -105,6 +107,8 @@ def test_default_file_key_order_matches_target(tmp_path):
         "hotkey_window_8",
         "hotkey_mouse_escape",
         "remote_screenshot_enable",
+        "remote_screenshot_interval",
+        "remote_cache_size_count",
         "remote_screenshot_diameterA",
         "remote_screenshot_diameterB",
     ]
@@ -142,6 +146,8 @@ def test_remote_screenshot_defaults_loaded(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
     assert loaded.remote_screenshot_enable is True
+    assert loaded.remote_screenshot_interval == 0.5
+    assert loaded.remote_cache_size_count == 50
     assert loaded.remote_screenshot_diameter_a == 100
     assert loaded.remote_screenshot_diameter_b == 100
 
@@ -152,6 +158,8 @@ def test_remote_screenshot_values_loaded(tmp_path):
         json.dumps(
             {
                 "remote_screenshot_enable": False,
+                "remote_screenshot_interval": 1.5,
+                "remote_cache_size_count": 20,
                 "remote_screenshot_diameterA": 150,
                 "remote_screenshot_diameterB": 80,
             }
@@ -160,6 +168,8 @@ def test_remote_screenshot_values_loaded(tmp_path):
     )
     loaded = config.load_config(target)
     assert loaded.remote_screenshot_enable is False
+    assert loaded.remote_screenshot_interval == 1.5
+    assert loaded.remote_cache_size_count == 20
     assert loaded.remote_screenshot_diameter_a == 150
     assert loaded.remote_screenshot_diameter_b == 80
 
@@ -189,6 +199,30 @@ def test_remote_screenshot_small_diameter_falls_back(tmp_path):
         encoding="utf-8",
     )
     assert config.load_config(target).remote_screenshot_diameter_a == 100
+
+
+def test_remote_automation_invalid_values_fall_back(tmp_path):
+    """自动化两新键：类型不对或低于下限都回退默认（间隔≥0.1s，条数≥1）。"""
+    target = tmp_path / "config.json"
+    for bad_interval, bad_count in (
+        ("fast", 0),  # 类型错 / 低于下限
+        (0.01, -5),  # 均低于下限
+        (True, False),  # bool 是 int 子类，不算合法数字
+    ):
+        target.write_text(
+            json.dumps(
+                {
+                    "remote_screenshot_interval": bad_interval,
+                    "remote_cache_size_count": bad_count,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = config.load_config(target)
+        assert loaded.remote_screenshot_interval == 0.5, (
+            f"interval={bad_interval!r} 应回退默认"
+        )
+        assert loaded.remote_cache_size_count == 50, f"count={bad_count!r} 应回退默认"
 
 
 def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
