@@ -1,14 +1,17 @@
 """AI 对话窗口：常规窗口向 AI 提问辅助深入学习外语（需求 .raw_plans/future_AI对话.txt）。
 
 布局（需求给定）：上下两部分 —— 上部一行「"保留发送消息"标签 + 复选框 +
-下拉列表 + OCR 按钮 + 发送按钮」，下部为无滚动条的文本输入框；色彩方案与
-查看截图历史窗口一致（同一套默认控件外观）。
+下拉列表 + 捕获按钮 + OCR 按钮 + 发送按钮」，下部为无滚动条的文本输入框；
+色彩方案与查看截图历史窗口一致（同一套默认控件外观）。
 
 行为约定：
 
 - 复选框：默认勾选，勾选时发送后不清空输入框，取消勾选时发送成功后清空；
   每次打开窗口（宿主调用 :meth:`refresh`）都恢复默认勾选，并按当前双击锁定
   的截图窗口重建下拉列表（色块 + 颜色名区分窗口）；
+- 捕获按钮（补充需求 future_视频录制补充_实时asr）：把流式输出窗口当前
+  内容填充到输入框并置光标于末尾（配合实时识别结束后把识别文本带进对话
+  窗翻译外文）；无 API 参与、不占互斥、不改标题提示，内容为空时忽略点击；
 - OCR 按钮：仅当存在双击锁定的截图窗口时生效，识别选中颜色窗口的区域原文，
   成功后填充到输入框并置光标于末尾；不上屏正文窗，但遵守与发送相同的
   "同时只允许一个 API 调用"互斥原则，冲突时忽略点击且不更新提示；
@@ -120,6 +123,17 @@ def color_swatch_pixmap(color: QColor, size: int = SWATCH_SIZE) -> QPixmap:
     return pixmap
 
 
+def capture_source_text(provider) -> str:
+    """解析「捕获」内容来源（纯函数，便于离线单测）。
+
+    ``provider`` 为宿主注入的流式窗当前内容提供者：缺失（None）或返回
+    空白时返回空串（调用方据此忽略本次点击、不改动输入框）；否则返回
+    提供者给出的全文。
+    """
+    text = str(provider() or "") if callable(provider) else ""
+    return text if text.strip() else ""
+
+
 def logical_size_for_dpr(width: int, height: int, dpr: float) -> tuple[int, int]:
     """物理像素尺寸 → 常规窗口的 Qt 逻辑尺寸（纯函数，便于离线单测）。
 
@@ -171,6 +185,7 @@ class AIChatWindow(QWidget):
         api_release,
         capture_locked,
         game_rect_provider=None,
+        capture_stream_text=None,
     ) -> None:
         super().__init__()
         self._store = store
@@ -182,6 +197,9 @@ class AIChatWindow(QWidget):
         self._api_acquire = api_acquire  # 宿主互斥：占用（占用后方可在后台调 API）
         self._api_release = api_release  # 宿主互斥：释放
         self._capture_locked = capture_locked  # 宿主抓屏：隐藏窗口取锁定窗口干净画面
+        # 流式输出窗口当前内容提供者（补充需求：「捕获」按钮的内容来源；
+        # 无 API 参与、不占互斥，None 时点击降级为忽略）
+        self._capture_stream_text = capture_stream_text
         # 游戏窗口 rect 提供者（物理像素 ltrb；None/不可用时尺寸不钳制）
         self._game_rect_provider = game_rect_provider
         self._seq = 0  # 请求世代号：过期结果不入界面（互斥下理论不重叠，兜底）
@@ -196,6 +214,9 @@ class AIChatWindow(QWidget):
         self._keep_checkbox.setToolTip("勾选时发送消息后不清空输入框")
         self._combo = QComboBox()
         self._combo.setToolTip("双击锁定的截图窗口（按边框颜色区分）")
+        self._capture_button = QPushButton("捕获")
+        self._capture_button.setToolTip("把流式输出窗口当前内容填充到输入框")
+        self._capture_button.clicked.connect(self._on_capture_stream)
         self._ocr_button = QPushButton("OCR")
         self._ocr_button.setToolTip("识别选中颜色窗口的区域原文并填充到输入框")
         self._ocr_button.clicked.connect(self._on_ocr)
@@ -206,6 +227,7 @@ class AIChatWindow(QWidget):
         top.addWidget(self._keep_label)
         top.addWidget(self._keep_checkbox)
         top.addWidget(self._combo, stretch=1)
+        top.addWidget(self._capture_button)
         top.addWidget(self._ocr_button)
         top.addWidget(self._send_button)
 
@@ -260,6 +282,28 @@ class AIChatWindow(QWidget):
             self._combo.addItem(QIcon(color_swatch_pixmap(color)), color_label(color), window)
         if not windows:
             logger.info("当前没有双击锁定的截图窗口，OCR 入口不生效")
+
+    # ---- 捕获（流式输出窗口当前内容 → 输入框） ------------------------------
+
+    def _on_capture_stream(self) -> None:
+        """捕获点击（主线程）：流式窗当前全文填充到输入框并置光标末尾。
+
+        无 API 参与、不占互斥、不改标题提示；回调缺失或内容为空白时忽略
+        本次点击、不改动输入框（与 OCR 无锁定窗口时忽略点击同风格）。
+        """
+        provider = self._capture_stream_text
+        text = capture_source_text(provider)
+        if not text:
+            logger.info("流式输出窗口当前无内容，忽略本次捕获点击")
+            return
+        self._input.setPlainText(text)
+        cursor = self._input.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._input.setTextCursor(cursor)
+        self.raise_()
+        self.activateWindow()
+        self._input.setFocus()
+        logger.info("已捕获流式输出窗口内容（%d 字）到对话输入框", len(text))
 
     # ---- OCR（识别选中窗口区域的原文） ----------------------------------------
 

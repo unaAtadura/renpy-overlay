@@ -19,6 +19,7 @@ from renpy_overlay.screenshot.chat_window import (
     TITLE_SEND_FAILED,
     TITLE_SEND_OK,
     TITLE_SENDING,
+    capture_source_text,
     chat_physical_size,
     color_label,
     logical_size_for_dpr,
@@ -91,3 +92,19 @@ def test_chat_physical_size_tiny_game_window_hits_floor():
 def test_chat_physical_size_without_game_rect_keeps_config():
     # 未定位到游戏窗口：不钳制（与流式窗未定位时不显示、对话窗保持可用的取舍一致）
     assert chat_physical_size((1760, 200), None) == (1760, 200)
+
+
+# ---------------------------------------------------------------- 捕获（补充需求）
+
+
+def test_capture_source_text_returns_provider_content():
+    """提供者返回非空白内容：原样返回全文（实时识别文本也可捕获）。"""
+    assert capture_source_text(lambda: "识别到的文本。\n") == "识别到的文本。\n"
+
+
+def test_capture_source_text_blank_or_missing_is_empty():
+    """回调缺失/返回 None/空白内容 → 空串（调用方据此忽略点击）。"""
+    assert capture_source_text(None) == ""
+    assert capture_source_text(lambda: None) == ""
+    assert capture_source_text(lambda: "") == ""
+    assert capture_source_text(lambda: "   \n ") == ""
