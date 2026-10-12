@@ -29,6 +29,7 @@ from .screenshot.remote_automation import (
     REMOTE_SHOW_TEXT,
 )
 from .screenshot.window import FRAME_COLORS, ScreenshotWindow
+from .video.asr_rt import ASR_RT_OFF_TEXT, ASR_RT_ON_TEXT
 
 logger = logging.getLogger("renpy_overlay.quick_menu")
 
@@ -78,6 +79,9 @@ class QuickMenu:
         self._mouse_lock = None  # 锁鼠标区域（宿主经 attach_mouse_lock 注入）
         # 遥控器自动化（宿主经 attach_remote_automation 注入；未注入时菜单不显示）
         self._remote_automation = None
+        # 实时语音识别（宿主经 attach_asr_rt 注入；未注入时菜单不显示；
+        # 开关文案随控制器 enabled 状态变化）
+        self._asr_rt = None
         # 自动化装填期压制的提示框帧（截图窗口池索引集合；锁定期池序冻结）
         self._suppressed_frames: set[int] = set()
         # 框选提示覆盖层（锁定期线框）：惰性创建；工厂可注入（离线测试用）
@@ -89,10 +93,12 @@ class QuickMenu:
     def show_context_menu(self, global_pos: QPoint) -> None:
         """构建并弹出右键菜单（标题窗 / 正文窗文字处右键触发）。
 
-        菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt）：
+        菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt +
+        future_视频录制补充_实时asr.txt）：
         创建/销毁/快捷键模式 → 锁鼠标区域 → 遥控器自动化与隐藏遥控器
         （future_截图翻译功能补充_遥控截图自动化）→ 分隔线 → 录制视频/
-        视频编辑 → 听歌识曲 → 对话 → 查看历史（二级菜单）→ 退出。
+        视频编辑 → 实时语音识别（开关式）→ 分隔线 → 听歌识曲 → 对话 →
+        查看历史（二级菜单）→ 退出。
 
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
         保证菜单始终完整可见（配合宿主在菜单打开期间暂停周期性置顶重申，
@@ -141,6 +147,13 @@ class QuickMenu:
             else "录制视频"
         )
         editor_action = menu.addAction("视频编辑")
+        # 实时语音识别（需求：视频编辑之下、听歌识曲之前的分隔线之上，
+        # 开关式纯后台功能；未注入控制器时不显示）
+        asr_rt_action = None
+        if self._asr_rt is not None:
+            asr_rt_action = menu.addAction(
+                ASR_RT_ON_TEXT if self._asr_rt.enabled else ASR_RT_OFF_TEXT
+            )
         menu.addSeparator()
         song_action = menu.addAction("听歌识曲")
         menu.addSeparator()
@@ -192,6 +205,8 @@ class QuickMenu:
             self._on_record_video()
         elif chosen is editor_action and callable(self._on_open_video_editor):
             self._on_open_video_editor()
+        elif asr_rt_action is not None and chosen is asr_rt_action:
+            self._asr_rt.toggle()
         elif chosen is song_action and callable(self._on_recognize_song):
             self._on_recognize_song()
         elif chosen is chat_action and callable(self._on_open_chat):
@@ -343,6 +358,14 @@ class QuickMenu:
         先存在才能由宿主组装（先建菜单、再附着控制器）。
         """
         self._recorder = recorder
+
+    def attach_asr_rt(self, asr_rt) -> None:
+        """注入实时语音识别控制器（菜单项按其 enabled 显示开/关文案）。
+
+        同 attach_hotkey_mode 的附着约定：AsrRtController 依赖宿主回调
+        （互斥槽/队列/三键提供者），由宿主组装后注入（先建菜单、再附着）。
+        """
+        self._asr_rt = asr_rt
 
     def lock_layout(self) -> None:
         """锁定截图布局：整体隐藏全部截图窗口 + 屏蔽创建/销毁入口。

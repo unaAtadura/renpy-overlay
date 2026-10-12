@@ -23,6 +23,9 @@ dependencies = [
     "soundfile>=0.12.1",
     "pyaudiowpatch>=0.2.0; sys_platform == 'win32'",
     "pyaudio>=0.2.14; sys_platform == 'win32'",
+    # 实时语音识别（video/asr_rt）：DashScope 实时流式识别 SDK（内部用 requests，
+    # 依赖缺失时开启实时识别降级提示，不影响主程序启动）
+    "dashscope>=1.23",
 ]
 
 [project.scripts]

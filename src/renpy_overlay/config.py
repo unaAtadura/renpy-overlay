@@ -44,6 +44,9 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "api_base_url_asr": "",             # 语音识别链路独立 API 基址；空 = 跟随主链路 api_base_url
       "model_asr": "",                    # 语音识别模型；空 = 跟随主链路 model（无备选模型）
       "api_key_asr": "",                  # 语音识别链路的 API Key（留空则跟随主链路 api_key）
+      "api_base_url_asr_rt": "",         # 实时语音识别独立 API 基址（不回退其它链路，留空即不可用）
+      "model_asr_rt": "",                # 实时语音识别模型（不回退其它链路，留空即不可用）
+      "api_key_asr_rt": "",              # 实时语音识别的 API Key（不回退其它链路，留空即不可用）
       "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
       "remote_screenshot_interval": 0.5,  # 遥控器自动化：周期截图间隔（秒）
       "remote_cache_size_count": 50,      # 遥控器自动化：内存循环队列缓存条数（感知签名↔译文）
@@ -102,6 +105,11 @@ DEFAULT_API_KEY_VISION = ""  # 空：不携带 Authorization 头
 DEFAULT_API_BASE_URL_ASR = ""
 DEFAULT_MODEL_ASR = ""
 DEFAULT_API_KEY_ASR = ""
+#: 实时语音识别（ASR-RT）链路：三键独立不回退（需求确认：留空即不可用），
+#: 紧跟非实时 ASR 三键便于编辑
+DEFAULT_API_BASE_URL_ASR_RT = ""
+DEFAULT_MODEL_ASR_RT = ""
+DEFAULT_API_KEY_ASR_RT = ""
 #: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
 DEFAULT_RECORDING_DURATION = 8
 #: 快捷键模式：主开关键默认 Alt+T（不含 Ctrl 以规避 Ren'Py 持续快进），窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
@@ -168,6 +176,10 @@ class AppConfig:
     api_base_url_asr: str = DEFAULT_API_BASE_URL_ASR
     model_asr: str = DEFAULT_MODEL_ASR
     api_key_asr: str = DEFAULT_API_KEY_ASR
+    # 实时语音识别（ASR-RT）：三键追加到非实时 ASR 三键之后（需求），不回退
+    api_base_url_asr_rt: str = DEFAULT_API_BASE_URL_ASR_RT
+    model_asr_rt: str = DEFAULT_MODEL_ASR_RT
+    api_key_asr_rt: str = DEFAULT_API_KEY_ASR_RT
     # 听歌识曲
     recording_duration: int = DEFAULT_RECORDING_DURATION
     # 截图翻译快捷键模式（主开关 + 8 个窗口键，均为全局热键）
@@ -216,6 +228,9 @@ def _write_defaults(target: Path) -> None:
         "api_base_url_asr": DEFAULT_API_BASE_URL_ASR,
         "model_asr": DEFAULT_MODEL_ASR,
         "api_key_asr": DEFAULT_API_KEY_ASR,
+        "api_base_url_asr_rt": DEFAULT_API_BASE_URL_ASR_RT,
+        "model_asr_rt": DEFAULT_MODEL_ASR_RT,
+        "api_key_asr_rt": DEFAULT_API_KEY_ASR_RT,
         "enable_thinking": DEFAULT_ENABLE_THINKING,
         "reasoning_effort": DEFAULT_REASONING_EFFORT,
         "api_timeout": DEFAULT_API_TIMEOUT,
@@ -463,6 +478,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         api_base_url_asr=_read_str(raw, "api_base_url_asr", DEFAULT_API_BASE_URL_ASR),
         model_asr=_read_str(raw, "model_asr", DEFAULT_MODEL_ASR),
         api_key_asr=_read_str(raw, "api_key_asr", DEFAULT_API_KEY_ASR),
+        api_base_url_asr_rt=_read_str(raw, "api_base_url_asr_rt", DEFAULT_API_BASE_URL_ASR_RT),
+        model_asr_rt=_read_str(raw, "model_asr_rt", DEFAULT_MODEL_ASR_RT),
+        api_key_asr_rt=_read_str(raw, "api_key_asr_rt", DEFAULT_API_KEY_ASR_RT),
         recording_duration=_read_positive_int(
             raw, "recording_duration", DEFAULT_RECORDING_DURATION, MIN_RECORDING_DURATION
         ),
@@ -508,6 +526,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "screenshot（compress=%d%%），"
         "vision（base_url=%s，model=%s，api_key=%s），"
         "asr（base_url=%s，model=%s，api_key=%s），"
+        "asr_rt（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
         "remote_screenshot（enable=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d）",
@@ -537,6 +556,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.api_base_url_asr or "<跟随主链路>",
         app_config.model_asr or "<跟随主链路>",
         "已设置" if app_config.api_key_asr else "未设置",
+        app_config.api_base_url_asr_rt or "<未配置>",
+        app_config.model_asr_rt or "<未配置>",
+        "已设置" if app_config.api_key_asr_rt else "未设置",
         app_config.recording_duration,
         target,
         app_config.hotkey_main,

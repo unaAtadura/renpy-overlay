@@ -10,8 +10,9 @@
    ``datas``；同时 ``renpy_overlay.payload`` 要进 ``hiddenimports``
    （``files("renpy_overlay.payload")`` 会先 import 该包再定位资源）；
 3. ``excludes`` 只做保险：运行链上真实依赖仅 psutil / pywin32(win32con、
-   win32gui、win32process) / tkinter / sqlite3 / PyQt6（流式悬浮窗），
-   其余大体积库一律排除；
+   win32gui、win32process) / tkinter / sqlite3 / PyQt6（流式悬浮窗）/
+   requests+websocket（实时识别 dashscope 链路，见 asr_rt），其余大体积库
+   一律排除；
 4. 单文件（onefile）模式：EXE 直接收全部 binaries 与 datas。若想要启动更快的
    目录版，把 EXE 的 ``a.binaries`` / ``a.datas`` 换成 ``exclude_binaries=True``，
    并追加 ``COLLECT(exe, a.binaries, a.datas, name="renpy-overlay")`` 即可。
@@ -29,14 +30,16 @@ SRC = os.path.join(ROOT, "src")
 # 保险清单：本工具运行链不依赖这些库，防止将来被间接引入而撑大体积
 # （注：numpy / aiohttp 是听歌识曲 shazamio 链路（song_recognition 包）的
 # 真实运行依赖，PIL 是截图翻译链路（screenshot 包）的真实运行依赖，
-# 均不在此列；scipy / pandas 等仍未使用）
+# requests / websocket 是实时识别 dashscope 链路（video/asr_rt）的真实
+# 运行依赖，均不在此列；scipy / pandas 等仍未使用）
 EXCLUDES = [
     # 科学计算 / 图像（PIL / numpy 已被真实运行链引入，不能排除）
     "scipy", "pandas", "matplotlib", "sympy", "cv2", "torch",
     # 其它 GUI 框架（悬浮窗用 PyQt6，内置 hook 收集；选择窗用 tkinter）
     "PyQt5", "PySide2", "PySide6", "wx",
-    # 交互式环境与网络库（翻译走标准库 urllib；aiohttp 已被 shazamio 链路引入）
-    "IPython", "jupyter", "notebook", "requests", "urllib3", "httpx",
+    # 交互式环境与网络库（翻译走标准库 urllib；aiohttp 已被 shazamio 引入；
+    # requests / urllib3 已被 dashscope 引入，不能排除）
+    "IPython", "jupyter", "notebook", "httpx",
     "lxml", "bs4",
     # 测试 / 构建工具与标准库测试包
     "pytest", "_pytest", "setuptools", "pkg_resources", "pip", "wheel",

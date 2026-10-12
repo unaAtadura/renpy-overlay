@@ -83,8 +83,10 @@ from .translation_cache import (  # noqa: F401 (choice_translation_text re-expor
 from .translation_history_window import TranslationHistoryWindow
 from .video import (
     AsrHistoryWindow,
+    AsrRtController,
     VideoRecorder,
     open_asr_store,
+    resolve_asr_rt_options,
 )
 from .video import (
     asr as video_asr,
@@ -280,17 +282,26 @@ def body_mask_bands(
     return bands
 
 
-def body_scroll_target(follow: bool, scroll_target: float, max_scroll: float) -> float:
+def body_scroll_target(
+    follow: bool, scroll_target: float, max_scroll: float, anchor: str = "start"
+) -> float:
     """计算正文窗本帧的滚动目标（内容坐标系像素）。
 
-    ``follow`` 为 True：固定显示第一行（偏移 0）—— 大段文字流式输出时不再
-    因自动滚屏被推出可视区，1-2 行短文本（本就不足一屏）观感不变；为 False
-    （滚轮回看中）：把既有目标收敛回 ``[0, max_scroll]``，防止内容清空或
-    变短后目标越界。抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
+    ``follow`` 为 False（滚轮回看中）：把既有目标收敛回 ``[0, max_scroll]``，
+    防止内容清空或变短后目标越界。``follow`` 为 True 时按锚点：
+
+    - ``"start"``（默认）：固定显示第一行（偏移 0）—— 大段文字流式输出时
+      不再因自动滚屏被推出可视区，1-2 行短文本（本就不足一屏）观感不变；
+    - ``"tail"``（实时语音识别）：跟随内容末尾（偏移 = max_scroll）——
+      倒数第 2 个字符始终可见，与语音同步显示（需求）。
+
+    抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
     """
-    if follow:
-        return 0.0
-    return min(max(scroll_target, 0.0), max_scroll)
+    if not follow:
+        return min(max(scroll_target, 0.0), max_scroll)
+    if anchor == "tail":
+        return max_scroll
+    return 0.0
 
 
 def body_wheel_target(
@@ -298,20 +309,75 @@ def body_wheel_target(
     notches: float,
     line_h: float,
     max_scroll: float,
+    anchor: str = "start",
 ) -> tuple[float, bool]:
     """由滚轮事件计算新的 ``(滚动目标, 跟随态)``。
 
-    每格滚动 ``WHEEL_LINES_PER_NOTCH`` 行：下翻（notches < 0）向底部推进
-    回看后文并暂停固定首行；上翻（notches > 0）向顶部回退，滚回顶部
-    （目标归零）即恢复"固定显示第一行"。抽成纯函数便于离线验证
-    （见 ``tests/test_stream_window.py``）。
+    每格滚动 ``WHEEL_LINES_PER_NOTCH`` 行。start 锚点：下翻（notches < 0）
+    向底部推进回看后文并暂停固定首行；上翻回退，滚回顶部（目标归零）即
+    恢复固定显示第一行。tail 锚点（实时语音识别）为镜像语义：上翻回看
+    上文并暂停尾部跟随，下翻滚回底部（目标到底）即恢复尾部跟随。
+    抽成纯函数便于离线验证（见 ``tests/test_stream_window.py``）。
     """
     target = min(
         max(scroll_target - notches * WHEEL_LINES_PER_NOTCH * line_h, 0.0),
         max_scroll,
     )
-    follow = notches > 0 and target <= 0.5
-    return target, follow
+    if anchor == "tail":
+        return target, notches < 0 and target >= max_scroll - 0.5
+    return target, notches > 0 and target <= 0.5
+
+
+#: 句末符号（实时语音识别：结尾为这些符号时主动换行；中英文句号/问号/感叹号）
+SENTENCE_END_PUNCTUATION = "。．.？！?!"
+
+
+def has_sentence_end(text: str) -> bool:
+    """文本是否以句末符号结尾（纯函数，离线测试用）。"""
+    return bool(text) and text[-1] in SENTENCE_END_PUNCTUATION
+
+
+def strip_asr_line_breaks(text: str) -> str:
+    """删除语音识别返回文本中的换行符（纯函数，离线测试用）。
+
+    需求：句末符号后已带换行符的，删除该换行符（换行由工具侧主动控制，
+    防止与主动换行叠加出双换行）；非句末处的换行符一并删除（已确认决议），
+    保证「整段连续文字」观感。
+    """
+    return text.replace("\r", "").replace("\n", "")
+
+
+def compose_live_text(finals: list[str], current: str) -> str:
+    """组合实时语音识别的显示全文（纯函数，离线测试用）。
+
+    已定稿句逐句换行；当前句原样展示、以句末符号结尾时主动补换行
+    （需求：结尾为中英文句号/问号/感叹号等句末符号时主动换行）。输入句
+    先经 :func:`strip_asr_line_breaks` 归一化。
+    """
+    parts = [s + "\n" for s in map(strip_asr_line_breaks, finals) if s]
+    cleaned = strip_asr_line_breaks(current)
+    if cleaned:
+        parts.append(cleaned)
+        if has_sentence_end(cleaned):
+            parts.append("\n")
+    return "".join(parts)
+
+
+def plan_stream_replace(old_text: str, typed_count: int, new_text: str) -> tuple[int, str]:
+    """计算正文流式替换计划（纯函数，离线测试用）。
+
+    返回 ``(撤销的已打字数, 新待显示文本)``：new 与 old 的公共前缀保留
+    已排版字形；前缀之后旧内容全部撤销（已打字部分计入撤销数，未打字
+    部分直接丢弃），待显示文本从撤销点起重喂。纯追加时撤销 0 字。
+    """
+    if new_text.startswith(old_text):
+        return 0, new_text[typed_count:]
+    limit = min(len(old_text), len(new_text))
+    common = 0
+    while common < limit and old_text[common] == new_text[common]:
+        common += 1
+    untype = max(0, typed_count - common)
+    return untype, new_text[typed_count - untype:]
 
 
 def body_drag_scroll_rate(dy: float, line_h: float) -> float:
@@ -555,7 +621,13 @@ class BodyWindow(_StreamWindowBase):
         self._line_empty = True
         self._scroll = 0.0  # 当前平滑滚动偏移（像素）
         self._scroll_target = 0.0  # 滚动目标：固定首行与滚轮回看共用的收敛点
-        self._follow = True  # True=固定显示第一行；滚轮下翻回看时暂停
+        self._follow = True  # True=固定显示第一行/跟随尾部；滚轮回看时暂停
+        # 显示锚点："start"=固定显示第一行（默认），"tail"=跟随内容末尾
+        # （实时语音识别：倒数第 2 个字符始终可见，与语音同步显示）
+        self._anchor = "start"
+        # 当前流内容全文（已打字 + 待显示）：replace_stream 的差分基准，
+        # 也是对话窗「捕获」按钮的内容来源
+        self._stream_text = ""
         # 锁定态拖拽滚动（按住正文文字上下滑动）：档位速率由垂直偏移决定
         self._drag_scroll_active = False
         self._drag_scroll_origin_y = 0.0  # 按下点纵坐标（防抖基准）
@@ -587,6 +659,58 @@ class BodyWindow(_StreamWindowBase):
     def feed_text(self, text: str) -> None:
         """向待显示队列追加流式文本。"""
         self._pending.extend(text)
+        self._stream_text += text
+
+    @property
+    def stream_text(self) -> str:
+        """当前流内容全文（已打字 + 待显示；「捕获」按钮的内容来源）。"""
+        return self._stream_text
+
+    def set_anchor(self, anchor: str) -> None:
+        """设置显示锚点并恢复跟随（宿主在实时识别开启/关闭时切换）。
+
+        ``"start"``：固定显示第一行（默认）；``"tail"``：跟随内容末尾
+        （倒数第 2 个字符始终可见）。切换即重新进入跟随态，滚动目标由
+        下帧按新锚点收敛。
+        """
+        self._anchor = "tail" if anchor == "tail" else "start"
+        self._follow = True
+
+    def replace_stream(self, text: str) -> None:
+        """以整段文本替换当前流内容（实时语音识别专用：支持增加与修正）。
+
+        依 :func:`plan_stream_replace` 差分：公共前缀的已排版字形原样保留，
+        仅撤销/重喂差异尾部——已显示部分不重播出现动画，观感为整段连续
+        文字原地增长与修正（需求：不将每次修正结果直接追加在后面）。
+        """
+        old = self._stream_text
+        typed_count = len(old) - len(self._pending)
+        untype, pending_text = plan_stream_replace(old, typed_count, text)
+        if untype:
+            self._untype_tail(old[typed_count - untype : typed_count])
+        self._pending.clear()
+        self._pending.extend(pending_text)
+        self._stream_text = text
+        self.update()
+
+    def _untype_tail(self, removed: str) -> None:
+        """逆序撤销已排版尾部（修正时调用）：换行回退行号，普通字符弹出字形。"""
+        for ch in reversed(removed):
+            if ch == "\n":
+                self._line -= 1
+            elif self._glyphs:
+                self._glyphs.pop()
+            self._refresh_line_state()
+
+    def _refresh_line_state(self) -> None:
+        """按剩余末字形重建当前行状态（_Glyph 携带行号与 x 起点，可精确还原）。"""
+        if self._glyphs and self._glyphs[-1].row == self._line:
+            last = self._glyphs[-1]
+            self._line_used = last.x - BODY_MARGIN + last.advance
+            self._line_empty = False
+        else:
+            self._line_used = 0.0
+            self._line_empty = True
 
     def clear(self) -> None:
         self._glyphs.clear()
@@ -597,6 +721,7 @@ class BodyWindow(_StreamWindowBase):
         self._scroll = 0.0
         self._scroll_target = 0.0
         self._follow = True
+        self._stream_text = ""
         self.end_drag_scroll()
         self.update()
 
@@ -650,9 +775,10 @@ class BodyWindow(_StreamWindowBase):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        # —— 滚动：跟随 = 固定显示第一行；滚轮回看时停在用户翻到的位置 ——
+        # —— 滚动：start 锚点 = 固定显示第一行；tail 锚点 = 跟随内容末尾；
+        # 滚轮回看时停在用户翻到的位置 ——
         self._scroll_target = body_scroll_target(
-            self._follow, self._scroll_target, self._max_scroll()
+            self._follow, self._scroll_target, self._max_scroll(), self._anchor
         )
         self._scroll += (self._scroll_target - self._scroll) * 0.12
         if abs(self._scroll_target - self._scroll) < 0.5:
@@ -714,7 +840,7 @@ class BodyWindow(_StreamWindowBase):
             return
         notches = delta / 120.0
         self._scroll_target, self._follow = body_wheel_target(
-            self._scroll_target, notches, self._line_h, self._max_scroll()
+            self._scroll_target, notches, self._line_h, self._max_scroll(), self._anchor
         )
         event.accept()
 
@@ -756,7 +882,11 @@ class BodyWindow(_StreamWindowBase):
             max(self._scroll_target + self._drag_scroll_rate * dt, 0.0),
             self._max_scroll(),
         )
-        if self._scroll_target <= 0.5:
+        # 拖拽滚动的跟随恢复点与锚点镜像：start 滚回顶部恢复，tail 滚回底部恢复
+        if self._anchor == "tail":
+            if self._scroll_target >= self._max_scroll() - 0.5:
+                self._follow = True
+        elif self._scroll_target <= 0.5:
             self._follow = True
 
 
@@ -932,6 +1062,23 @@ class StreamOverlayWindow:
             game_dir=game_dir,
         )
         self._quick_menu.attach_recorder(self._video_recorder)
+        # 实时语音识别：开关式后台功能（AsrRtController 自持状态）；开启占用
+        # 对话互斥槽阻塞其余 API 请求（is_busy 合并预构建在途，P5 决议），
+        # 识别事件经队列回主线程上屏，实时结果不入 asr.db（需求）
+        self._asr_rt = AsrRtController(
+            submit=lambda kind, payload: self._queue.put((kind, payload)),
+            notify=self._update_title,
+            is_busy=lambda: self._is_translation_busy() or self._prebuild_stop is not None,
+            acquire=self._acquire_chat_slot,
+            release=self._release_chat_slot,
+            options=lambda: resolve_asr_rt_options(self._config),
+            on_state=self._on_asr_rt_state,
+        )
+        self._quick_menu.attach_asr_rt(self._asr_rt)
+        # 实时识别显示状态：已定稿句列表 + 当前句全文（同参考实现，
+        # 每次事件全量重算显示文本后差分上屏）
+        self._asr_rt_finals: list[str] = []
+        self._asr_rt_current = ""
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
         self._video_editor_window = None  # 视频编辑窗口单例（惰性创建）
@@ -1063,6 +1210,7 @@ class StreamOverlayWindow:
         self._remote_screenshot.shutdown()  # 遥控截图 A/B 随退出销毁（幂等）
         self._mouse_lock.shutdown()  # 必须先于退出解除 ClipCursor，否则鼠标被永久限制
         self._video_recorder.shutdown()  # 录制中则同步停止并完成合并收尾
+        self._asr_rt.shutdown()  # 实时识别开启则静默停止并释放互斥槽
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -1149,6 +1297,12 @@ class StreamOverlayWindow:
                     self._handle_asr_done(payload)
                 elif kind == "asr_fail":
                     self._handle_asr_fail(payload)
+                elif kind == "asr_rt_delta":
+                    self._handle_asr_rt_delta(payload)
+                elif kind == "asr_rt_completed":
+                    self._handle_asr_rt_completed(payload)
+                elif kind == "asr_rt_error":
+                    self._handle_asr_rt_error(payload)
                 elif kind == "cmd":
                     self._handle_command(payload)
                 elif kind == "injected":
@@ -1186,8 +1340,9 @@ class StreamOverlayWindow:
         what = str(payload.get("what") or "")
         self._last_say = {"who": who, "what": what}
         preview = what.strip()[:20]
-        if preview:
-            # 标题提醒：这条对话就是翻译时将发送的文本（不受显示开关影响）
+        if preview and not self._asr_rt.enabled:
+            # 标题提醒：这条对话就是翻译时将发送的文本（不受显示开关影响）；
+            # 实时识别开启期间抑制预览（P3）：标题保持「实时语音识别中…」提示
             self._update_title(preview)
         if self._config.show_original_text:
             self._display_text((who + "\n" if who.strip() else "") + what + "\n")
@@ -1216,7 +1371,14 @@ class StreamOverlayWindow:
         self._auto_translate_check(immediate=True)
 
     def _display_text(self, text: str) -> None:
-        """用打字机方式整段替换正文内容（窗口只保留最新一条，不累积历史）。"""
+        """用打字机方式整段替换正文内容（窗口只保留最新一条，不累积历史）。
+
+        实时语音识别开启期间抑制改写（P3 决议）：识别文本是正文唯一写者，
+        对话原文/提示/选项/自动化缓存命中等非 API 内容不得覆盖实时识别画面。
+        """
+        if self._asr_rt.enabled:
+            logger.debug("实时语音识别开启期间抑制正文改写")
+            return
         self._stream_seq = 0
         self._body_window.begin_stream()
         self._body_window.feed_text(text)
@@ -1249,10 +1411,11 @@ class StreamOverlayWindow:
             ]
             if any(line.strip() for line in lines):
                 self._display_text("\n".join(lines) + "\n")
-        if items:
-            self._update_title("选项：" + " / ".join(items))
-        else:
-            self._update_title("出现选项")
+        if not self._asr_rt.enabled:  # 实时识别开启期间抑制标题预览（P3）
+            if items:
+                self._update_title("选项：" + " / ".join(items))
+            else:
+                self._update_title("出现选项")
         if not self._config.show_original_text:
             logger.debug(
                 "已捕获分支选项（show_original_text=false，正文区不更新）："
@@ -1276,8 +1439,9 @@ class StreamOverlayWindow:
             index = -1
         caption = str(payload.get("caption") or "").strip()
         label = f"{index}. {caption}" if index >= 0 and caption else (caption or "未知选项")
-        self._body_window.feed_text(f"→ 已选择：{label}\n")
-        self._update_title(f"已选择：{label}")
+        if not self._asr_rt.enabled:  # 实时识别开启期间抑制正文追加与标题预览（P3）
+            self._body_window.feed_text(f"→ 已选择：{label}\n")
+            self._update_title(f"已选择：{label}")
         logger.info("玩家做出选择：%s", label)
 
     def _handle_chunk(self, payload: dict) -> None:
@@ -1696,6 +1860,11 @@ class StreamOverlayWindow:
         """绑定窗口入口回调：任务在途则唤回弹窗，否则重新进入扫描流程。"""
         if self._closed or self.skip_injection:
             return
+        if self._asr_rt.enabled:
+            # P5 决议：实时识别开启期间阻塞预构建（含其标题回写），
+            # 正文窗仅显示实时识别内容
+            logger.info("实时语音识别开启期间忽略预构建请求")
+            return
         if self._prebuild_dialog is not None:
             if self._prebuild_running:
                 # 隐藏到后台后的唤回：显示当前进度，不重启任务
@@ -2090,6 +2259,7 @@ class StreamOverlayWindow:
                 api_release=self._release_chat_slot,
                 capture_locked=self._capture_locked_region,
                 game_rect_provider=self._game_window_rect,
+                capture_stream_text=lambda: self._body_window.stream_text,
             )
         self._chat_window.refresh()
         self._chat_window.show()
@@ -2604,6 +2774,55 @@ class StreamOverlayWindow:
             return
         if self._video_editor_window is not None:
             self._video_editor_window.set_status(ASR_FAIL_TEXT)
+
+    # -- 实时语音识别（右键菜单开关；占用互斥槽阻塞其余 API 请求；不入 asr.db） --
+
+    def _on_asr_rt_state(self, enabled: bool) -> None:
+        """控制器状态回调（主线程）：重置显示状态并切换正文窗锚点。
+
+        开启：清空识别显示状态与正文窗（识别文本从零开始），锚点切为尾部
+        跟随（倒数第2字符可见，需求）；关闭：恢复「固定显示第一行」既定
+        锚点（P2 决议），已上屏的识别文本保留在正文窗。
+        """
+        self._asr_rt_finals = []
+        self._asr_rt_current = ""
+        if enabled:
+            self._body_window.clear()
+            self._body_window.set_anchor("tail")
+        else:
+            self._body_window.set_anchor("start")
+        logger.debug("实时语音识别状态：%s", "开启" if enabled else "关闭")
+
+    def _handle_asr_rt_delta(self, payload: dict) -> None:
+        """实时识别中间结果（主线程）：替换当前句全文并重算上屏。"""
+        if self._closed or not self._asr_rt.enabled:
+            return
+        self._asr_rt_current = str(payload.get("text") or "")
+        self._refresh_asr_rt_display()
+
+    def _handle_asr_rt_completed(self, payload: dict) -> None:
+        """实时识别句定稿（主线程）：当前句入定稿列表，另起一句。"""
+        if self._closed or not self._asr_rt.enabled:
+            return
+        self._asr_rt_finals.append(str(payload.get("text") or ""))
+        self._asr_rt_current = ""
+        self._refresh_asr_rt_display()
+
+    def _handle_asr_rt_error(self, payload: dict) -> None:
+        """实时识别错误（主线程）：过期错误忽略；在途错误提示并回退为关。"""
+        if self._closed or not self._asr_rt.enabled:
+            # 关闭开关后服务端的迟到错误 / 停止会话的收尾事件：作废
+            logger.debug("实时语音识别错误已过期（开关已关闭），忽略")
+            return
+        message = str(payload.get("message") or "未知错误")
+        logger.warning("实时语音识别错误（code=%s）：%s", payload.get("code"), message)
+        self._update_title(f"实时语音识别错误：{message}")
+        self._asr_rt.shutdown()  # 回退为关并释放互斥（静默，不覆盖错误提示）
+
+    def _refresh_asr_rt_display(self) -> None:
+        """组合实时识别显示全文并差分上屏（主线程；实时结果不入 asr.db）。"""
+        text = compose_live_text(self._asr_rt_finals, self._asr_rt_current)
+        self._body_window.replace_stream(text)
 
     def request_song_recognition(self) -> None:
         """听歌识曲入口（主线程）：互斥检查 → 标题倒计时 → 后台录制+识别。
