@@ -22,6 +22,12 @@ from PyQt6.QtWidgets import QApplication, QMenu
 from .screenshot.frame_overlay import FrameOverlayLayer
 from .screenshot.hotkeys import HOTKEY_MODE_OFF_TEXT, HOTKEY_MODE_ON_TEXT
 from .screenshot.mouse_lock import MOUSE_LOCK_OFF_TEXT, MOUSE_LOCK_ON_TEXT
+from .screenshot.remote_automation import (
+    REMOTE_AUTO_OFF_TEXT,
+    REMOTE_AUTO_ON_TEXT,
+    REMOTE_HIDE_TEXT,
+    REMOTE_SHOW_TEXT,
+)
 from .screenshot.window import FRAME_COLORS, ScreenshotWindow
 
 logger = logging.getLogger("renpy_overlay.quick_menu")
@@ -70,6 +76,10 @@ class QuickMenu:
         self._layout_locked = False  # 布局锁定：与窗口双击锁定相互独立
         self._hotkey_mode = None  # 快捷键模式（宿主经 attach_hotkey_mode 注入）
         self._mouse_lock = None  # 锁鼠标区域（宿主经 attach_mouse_lock 注入）
+        # 遥控器自动化（宿主经 attach_remote_automation 注入；未注入时菜单不显示）
+        self._remote_automation = None
+        # 自动化装填期压制的提示框帧（截图窗口池索引集合；锁定期池序冻结）
+        self._suppressed_frames: set[int] = set()
         # 框选提示覆盖层（锁定期线框）：惰性创建；工厂可注入（离线测试用）
         self._frame_overlay = None
         self._frame_overlay_factory = frame_overlay_factory or FrameOverlayLayer
@@ -80,7 +90,9 @@ class QuickMenu:
         """构建并弹出右键菜单（标题窗 / 正文窗文字处右键触发）。
 
         菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt）：
-        创建/销毁/快捷键模式 → 听歌识曲 → 对话 → 查看历史（二级菜单）→ 退出。
+        创建/销毁/快捷键模式 → 锁鼠标区域 → 遥控器自动化与隐藏遥控器
+        （future_截图翻译功能补充_遥控截图自动化）→ 分隔线 → 录制视频/
+        视频编辑 → 听歌识曲 → 对话 → 查看历史（二级菜单）→ 退出。
 
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
         保证菜单始终完整可见（配合宿主在菜单打开期间暂停周期性置顶重申，
@@ -104,6 +116,21 @@ class QuickMenu:
         if self._mouse_lock is not None:
             mouse_lock_action = menu.addAction(
                 MOUSE_LOCK_ON_TEXT if self._mouse_lock.enabled else MOUSE_LOCK_OFF_TEXT
+            )
+        # 遥控器自动化（需求：锁定鼠标区域之下、分隔线之上两项；始终可点，
+        # 快捷键模式未开启时点击由控制器经宿主提示——用户决议不用置灰）
+        remote_automation_action = None
+        remote_hidden_action = None
+        if self._remote_automation is not None:
+            remote_automation_action = menu.addAction(
+                REMOTE_AUTO_ON_TEXT
+                if self._remote_automation.enabled
+                else REMOTE_AUTO_OFF_TEXT
+            )
+            remote_hidden_action = menu.addAction(
+                REMOTE_SHOW_TEXT
+                if self._remote_automation.remote_hidden
+                else REMOTE_HIDE_TEXT
             )
         menu.addSeparator()
         # 视频功能（需求：位于「锁定鼠标区域」与「听歌识曲」之间，含分隔线）：
@@ -157,6 +184,10 @@ class QuickMenu:
             self._hotkey_mode.toggle()
         elif mouse_lock_action is not None and chosen is mouse_lock_action:
             self._mouse_lock.toggle()
+        elif remote_automation_action is not None and chosen is remote_automation_action:
+            self._remote_automation.toggle_automation()
+        elif remote_hidden_action is not None and chosen is remote_hidden_action:
+            self._remote_automation.toggle_remote_hidden()
         elif chosen is record_action and callable(self._on_record_video):
             self._on_record_video()
         elif chosen is editor_action and callable(self._on_open_video_editor):
@@ -238,11 +269,14 @@ class QuickMenu:
         布局锁定（快捷键模式）期间窗口被刻意整体隐藏，此时只恢复框选
         提示窗口、不放出截图窗口——否则锁定期内触发一次截图翻译，本方法
         就会把窗口全部放出来；提示窗口与隐藏侧成对恢复（抓屏后立即，
-        几何保持 hide 前状态），异常路径同样恢复。
+        几何保持 hide 前状态），异常路径同样恢复；自动化装填期压制的帧
+        恢复后立即压回隐藏（抓屏时序不得复活被压制的提示框）。
         """
         if self._layout_locked:
             if self._frame_overlay is not None:
                 self._frame_overlay.restore()
+                for index in self._suppressed_frames:
+                    self._frame_overlay.set_frame_visible(index, False)
             return
         for window in self._windows:
             window.show()
@@ -293,6 +327,15 @@ class QuickMenu:
         """
         self._mouse_lock = mouse_lock
 
+    def attach_remote_automation(self, remote_automation) -> None:
+        """注入遥控器自动化控制器（菜单项按其状态显示文案与切换）。
+
+        同 attach_hotkey_mode 的附着约定：自动化控制器依赖遥控截图控制器
+        与宿主回调，由宿主组装后注入。两项始终可点：快捷键模式未开启时
+        由控制器经宿主提示（需求决议 A3，不在此处置灰）。
+        """
+        self._remote_automation = remote_automation
+
     def attach_recorder(self, recorder) -> None:
         """注入视频录制控制器（菜单项按其状态显示「录制视频 mm:ss」）。
 
@@ -327,6 +370,7 @@ class QuickMenu:
         稳定一致。
         """
         self._layout_locked = False
+        self._suppressed_frames.clear()  # 解锁即快照失效：压制集合一并清除
         self.show_all()
         self._hide_frame_overlay()
         logger.info("截图布局已解锁（窗口已恢复显示，创建/销毁入口已恢复）")
@@ -354,6 +398,26 @@ class QuickMenu:
         if self._frame_overlay is None:
             self._frame_overlay = self._frame_overlay_factory()
         self._frame_overlay.show_frames(frames)
+        for index in self._suppressed_frames:  # 自动化压制中的帧不显示
+            self._frame_overlay.set_frame_visible(index, False)
+
+    def set_frame_suppressed(self, window, suppressed: bool) -> None:
+        """自动化装填期的提示框单帧压制（B 进入/离开装填区域时由控制器调用）。
+
+        压制集合按截图窗口对象换算为池序索引（锁定期创建/销毁被屏蔽，
+        索引稳定），hide_all/show_all 的批量隐藏与恢复不复活被压制帧；
+        窗口不在池内（异常时序）静默忽略。
+        """
+        try:
+            index = self._windows.index(window)
+        except ValueError:
+            return
+        if suppressed:
+            self._suppressed_frames.add(index)
+        else:
+            self._suppressed_frames.discard(index)
+        if self._frame_overlay is not None:
+            self._frame_overlay.set_frame_visible(index, not suppressed)
 
     def _hide_frame_overlay(self) -> None:
         """清除锁定期全部线框（覆盖层隐藏，下次锁定重新快照）。"""

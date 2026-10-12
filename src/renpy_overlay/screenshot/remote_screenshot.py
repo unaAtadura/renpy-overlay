@@ -11,6 +11,11 @@
 - 窗口 A 左键单击 → B 已装填则以装填的目标截图窗口触发截图翻译（走宿主
   入口：在途互斥、既有提示、隐藏/抓屏/恢复时序全部复用）；未装填忽略。
 
+遥控器自动化（future_截图翻译功能补充_遥控截图自动化）：宿主经
+attach_automation 注入自动化控制器后，本控制器把 A 单击与 B 装填变化
+转发给它（自动化开启时接管 A 单击的首轮/重启轮语义），并管理「隐藏
+遥控器」的用户级显隐（show_windows 尊重，防手动抓屏把 A/B 放出来）。
+
 与截图窗口池的隔离（同 mouse_lock 约定）：A/B 由本控制器自持，不进
 QuickMenu 截图窗口池 —— lock_layout / unlock_layout / locked_windows /
 close_all 均不触及本功能窗口。
@@ -128,6 +133,32 @@ class RemoteScreenshotController:
         self._window_a: object | None = None
         self._window_b: object | None = None
         self._armed: object | None = None  # B 当前装填的截图窗口（None = 圆形）
+        # 遥控器自动化控制器（宿主经 attach_automation 注入；未注入时全部旁路）
+        self._automation = None
+        # 「隐藏遥控器」的用户级显隐态：抓屏恢复 show_windows 时尊重（不放出）
+        self._user_hidden = False
+
+    def attach_automation(self, automation) -> None:
+        """注入遥控器自动化控制器（A 单击接管与 B 装填变化转发；同宿主附着约定）。"""
+        self._automation = automation
+
+    @property
+    def windows_created(self) -> bool:
+        """A/B 是否已生成（自动化开启前提：快捷键模式开启中）。"""
+        return self._window_a is not None or self._window_b is not None
+
+    @property
+    def user_hidden(self) -> bool:
+        """A/B 是否被用户隐藏（「隐藏遥控器」菜单态，自动化控制器文案用）。"""
+        return self._user_hidden
+
+    def set_user_hidden(self, hidden: bool) -> None:
+        """「隐藏遥控器/显示遥控器」：用户级显隐（自动化继续运行，需求决议 A6）。"""
+        self._user_hidden = bool(hidden)
+        if self._user_hidden:
+            self.hide_windows()
+        else:
+            self.show_windows()
 
     # ---- 快捷键模式生命周期（HotkeyMode 模式开/关时通知） ---------------------
 
@@ -141,6 +172,9 @@ class RemoteScreenshotController:
                 return  # 幂等：已生成
             self._create_windows()
         else:
+            if self._automation is not None:
+                # 遥控器自动化：A/B 随模式退出销毁，自动化复位为关（用户决议 A3）
+                self._automation.on_hotkey_mode_changed(False)
             self._destroy_windows()
 
     def _create_windows(self) -> None:
@@ -196,6 +230,9 @@ class RemoteScreenshotController:
         self._armed = armed
         color = armed.border_color if armed is not None else None
         self._window_b.set_armed(color)
+        if self._automation is not None:
+            # 装填变化转发：自动化控制器据此停止/恢复周期并压制提示框
+            self._automation.on_armed_changed(armed)
         if armed is not None:
             logger.debug("遥控截图窗口 B 已装填截图窗口（边框色 %s）", color.name())
         else:
@@ -206,11 +243,16 @@ class RemoteScreenshotController:
     def on_trigger_requested(self) -> None:
         """窗口 A 左键单击：已装填 → 触发宿主截图翻译；未装填 → 忽略。
 
-        在途互斥由宿主 request_screenshot_translation 负责（同一时刻只允许
-        一个在途 API），本控制器不重复实现。
+        自动化开启时单击交给自动化控制器（首轮/重启一轮语义，用户决议 A5）；
+        关闭时保留原有单击遥控截图（走宿主入口：在途互斥、既有提示、隐藏/
+        抓屏/恢复时序全部复用）。在途互斥由宿主 request_screenshot_translation
+        负责（同一时刻只允许一个在途 API），本控制器不重复实现。
         """
         if self._armed is None:
             logger.info("遥控截图：窗口 B 未装填任何已锁定的截图区域，忽略截图翻译请求")
+            return
+        if self._automation is not None and self._automation.enabled:
+            self._automation.on_trigger_clicked(self._armed)
             return
         if callable(self._trigger):
             self._trigger(self._armed)
@@ -225,7 +267,13 @@ class RemoteScreenshotController:
             self._window_b.hide()
 
     def show_windows(self) -> None:
-        """抓屏后恢复显示 A/B（无条件恢复：不受布局锁定分支影响）；未生成时 no-op。"""
+        """抓屏后恢复显示 A/B（不受布局锁定分支影响）；未生成时 no-op。
+
+        用户已通过「隐藏遥控器」隐藏时不放出（尊重用户态，防止一次手动
+        抓屏把用户刻意隐藏的 A/B 放出来）。
+        """
+        if self._user_hidden:
+            return
         if self._window_a is not None:
             self._window_a.show()
         if self._window_b is not None:
@@ -244,5 +292,7 @@ class RemoteScreenshotController:
                 return
 
     def shutdown(self) -> None:
-        """宿主退出时调用：销毁 A/B（幂等；未生成时无操作）。"""
+        """宿主退出时调用：级联停止自动化并销毁 A/B（幂等；未生成时无操作）。"""
+        if self._automation is not None:
+            self._automation.shutdown()
         self._destroy_windows()

@@ -45,6 +45,8 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "model_asr": "",                    # 语音识别模型；空 = 跟随主链路 model（无备选模型）
       "api_key_asr": "",                  # 语音识别链路的 API Key（留空则跟随主链路 api_key）
       "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
+      "remote_screenshot_interval": 0.5,  # 遥控器自动化：周期截图间隔（秒）
+      "remote_cache_size_count": 50,      # 遥控器自动化：内存循环队列缓存条数（感知签名↔译文）
       "remote_screenshot_diameterA": 100, # 遥控截图窗口 A（触发器）直径（像素）
       "remote_screenshot_diameterB": 100, # 遥控截图窗口 B（瞄准器）直径（像素）
     }
@@ -122,6 +124,14 @@ MIN_STREAM_WINDOW_WIDTH = 240
 MIN_STREAM_WINDOW_HEIGHT = 80
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
+#: 遥控器自动化（future_截图翻译功能补充_遥控截图自动化）：周期截图间隔（秒）
+#: 与内存缓存条数，两键置于 remote_screenshot_enable 之后（需求备注）
+DEFAULT_REMOTE_SCREENSHOT_INTERVAL = 0.5
+DEFAULT_REMOTE_CACHE_SIZE_COUNT = 50
+#: 周期间隔下限：过小会让 QTimer 空转（与自动翻译轮询下限同一底线）
+MIN_REMOTE_SCREENSHOT_INTERVAL = MIN_AUTO_TRANSLATE_INTERVAL
+#: 缓存条数下限：0 条缓存无意义
+MIN_REMOTE_CACHE_SIZE_COUNT = 1
 
 
 @dataclass(frozen=True)
@@ -167,6 +177,9 @@ class AppConfig:
     hotkey_mouse_escape: str = DEFAULT_HOTKEY_MOUSE_ESCAPE
     # 遥控截图（快捷键模式期间存在的 A/B 触发/瞄准小圆窗；与主开关相互独立）
     remote_screenshot_enable: bool = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    # 遥控器自动化（周期截图翻译：间隔与内存缓存条数，紧跟 enable 之后，需求备注）
+    remote_screenshot_interval: float = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
+    remote_cache_size_count: int = DEFAULT_REMOTE_CACHE_SIZE_COUNT
     remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     remote_screenshot_diameter_b: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
 
@@ -223,6 +236,8 @@ def _write_defaults(target: Path) -> None:
         payload[f"hotkey_window_{index}"] = hotkey
     payload["hotkey_mouse_escape"] = DEFAULT_HOTKEY_MOUSE_ESCAPE
     payload["remote_screenshot_enable"] = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    payload["remote_screenshot_interval"] = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
+    payload["remote_cache_size_count"] = DEFAULT_REMOTE_CACHE_SIZE_COUNT
     payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["remote_screenshot_diameterB"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     try:
@@ -459,6 +474,18 @@ def load_config(path: Path | None = None) -> AppConfig:
         remote_screenshot_enable=_read_bool(
             raw, "remote_screenshot_enable", DEFAULT_REMOTE_SCREENSHOT_ENABLE
         ),
+        remote_screenshot_interval=_read_positive_float(
+            raw,
+            "remote_screenshot_interval",
+            DEFAULT_REMOTE_SCREENSHOT_INTERVAL,
+            MIN_REMOTE_SCREENSHOT_INTERVAL,
+        ),
+        remote_cache_size_count=_read_positive_int(
+            raw,
+            "remote_cache_size_count",
+            DEFAULT_REMOTE_CACHE_SIZE_COUNT,
+            MIN_REMOTE_CACHE_SIZE_COUNT,
+        ),
         remote_screenshot_diameter_a=_read_positive_int(
             raw,
             "remote_screenshot_diameterA",
@@ -483,7 +510,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "asr（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "remote_screenshot（enable=%s，diameterA=%d，diameterB=%d）",
+        "remote_screenshot（enable=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d）",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -516,6 +543,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.hotkey_windows,
         app_config.hotkey_mouse_escape,
         app_config.remote_screenshot_enable,
+        app_config.remote_screenshot_interval,
+        app_config.remote_cache_size_count,
         app_config.remote_screenshot_diameter_a,
         app_config.remote_screenshot_diameter_b,
     )
