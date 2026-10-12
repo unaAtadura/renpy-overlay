@@ -13,7 +13,10 @@
    win32gui、win32process) / tkinter / sqlite3 / PyQt6（流式悬浮窗）/
    requests+websocket（实时识别 dashscope 链路，见 asr_rt），其余大体积库
    一律排除；
-4. 单文件（onefile）模式：EXE 直接收全部 binaries 与 datas。若想要启动更快的
+4. Analysis 后按名单过滤 datas / binaries，剔除非必需的静态资源与二进制
+   （Qt 翻译文件、Tcl 时区库、软件渲染 OpenGL、Qt PDF、罕见图像格式插件），
+   这些在运行链上均无引用；
+5. 单文件（onefile）模式：EXE 直接收全部 binaries 与 datas。若想要启动更快的
    目录版，把 EXE 的 ``a.binaries`` / ``a.datas`` 换成 ``exclude_binaries=True``，
    并追加 ``COLLECT(exe, a.binaries, a.datas, name="renpy-overlay")`` 即可。
 
@@ -44,6 +47,9 @@ EXCLUDES = [
     # 测试 / 构建工具与标准库测试包
     "pytest", "_pytest", "setuptools", "pkg_resources", "pip", "wheel",
     "test", "tkinter.test",
+    # 无引用链的标准库（被第三方库或钩子连带收集，运行链不使用）
+    "unittest", "pydoc", "pydoc_data", "doctest", "tarfile", "xmlrpc",
+    "tty", "socketserver",
 ]
 
 a = Analysis(  # noqa: F821 - PyInstaller 注入
@@ -72,6 +78,37 @@ a = Analysis(  # noqa: F821 - PyInstaller 注入
     noarchive=False,
     optimize=0,
 )
+
+# ---- 非必需 datas / binaries 过滤：只保留运行链真正会加载的资源 ----
+
+def _norm(name: str) -> str:
+    """统一正斜杠，便于按相对路径前缀/后缀匹配。"""
+    return name.replace("\\", "/")
+
+# Qt 翻译文件（~180 个 .qm）：界面文案硬编码中文，不加载 Qt 翻译系统
+a.datas = [entry for entry in a.datas if not _norm(entry[0]).endswith(".qm")]
+
+# Tcl 时区数据（tzdata ~600 个文件）：仅 Tcl clock 命令的时区库，
+# tkinter 目录/文件选择对话框用不到
+a.datas = [
+    entry for entry in a.datas
+    if "/_tcl_data/tzdata/" not in _norm(entry[0])
+]
+
+# 二进制剔除名单（basename）：
+# - opengl32sw：软件渲染 OpenGL 光栅器（~20MB），悬浮窗全为 QWidget+QPainter
+#   绘制，走系统 OpenGL/RHI，不经过软件光栅器；
+# - Qt6Pdf + qpdf 插件：程序不加载 PDF 图像；
+# - qtiff/qtga/qwbmp/qicns：罕见图像格式插件（png/jpg/webp/svg/ico 为内建
+#   或保留插件，assets 的 SVG 图标依赖 qsvgicon + Qt6Svg，均保留）。
+_DROP_BINARIES = {
+    "opengl32sw.dll", "qt6pdf.dll", "qpdf.dll",
+    "qtiff.dll", "qtga.dll", "qwbmp.dll", "qicns.dll",
+}
+a.binaries = [
+    entry for entry in a.binaries
+    if _norm(entry[0]).rsplit("/", 1)[-1].lower() not in _DROP_BINARIES
+]
 
 pyz = PYZ(a.pure)  # noqa: F821 - PyInstaller 注入
 
