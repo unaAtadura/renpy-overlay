@@ -151,6 +151,7 @@ class AvVideoPlayer(QObject):
     media_opened = pyqtSignal(object)
     open_failed = pyqtSignal(str)
     audio_chunk = pyqtSignal(bytes)
+    _audio_format_ready = pyqtSignal(int, int)  # worker→主线程建 sink（勿用跨线程 QTimer）
 
     def __init__(
         self,
@@ -175,8 +176,11 @@ class AvVideoPlayer(QObject):
         self._duration_ms = -1
         self._volume = 0.0
         self._audio_output = None  # QAudioSink 延迟创建（首次拿到音频参数时）
+        self._sink_io = None  # push 模式 QIODevice（sink.start() 返回，写 PCM 用）
+        self._sink_state = "stopped"  # 引擎侧跟踪：stopped/started/suspended
         self._cond = threading.Condition()
         self.audio_chunk.connect(self._write_audio)  # worker 音频流送主线程 sink
+        self._audio_format_ready.connect(self._apply_audio_format)  # 跨线程建 sink
         self._worker = threading.Thread(
             target=self._worker_loop, name="av-player-worker", daemon=True
         )
@@ -212,9 +216,9 @@ class AvVideoPlayer(QObject):
             self._cond.notify_all()
         # 丢弃旧音频缓冲；播放中 seek 后重启 sink 继续消费新流
         if self._audio_output is not None:
-            self._audio_output.reset()
+            self._control_sink("reset")
             if self._state == PlaybackState.Playing:
-                self._audio_output.start()
+                self._control_sink("start")
 
     def play(self) -> None:
         self._set_state(PlaybackState.Playing)
@@ -246,6 +250,7 @@ class AvVideoPlayer(QObject):
 
     def _set_state(self, state: PlaybackState) -> None:
         if self._state != state:
+            logger.debug("播放状态：%s → %s", self._state.name, state.name)
             self._state = state
             self.state_changed.emit(state)
 
@@ -261,28 +266,45 @@ class AvVideoPlayer(QObject):
             self._audio_output.stop()
         self._audio_output = QAudioSink(fmt, self)
         self._audio_output.setVolume(self._volume)
+        self._sink_io = None
+        self._sink_state = "stopped"  # 新 sink 未 start（play 时启动）
+        logger.info(
+            "音频输出已就绪：sink=%dHz/%dch/s16（音量 %.1f）", rate, channels, self._volume
+        )
 
     def _write_audio(self, chunk: bytes) -> None:
-        """音频 PCM 写入 sink（audio_chunk 信号槽，主线程；仅播放态消费）。"""
-        if self._audio_output is not None and self._state == PlaybackState.Playing:
-            self._audio_output.write(chunk)
+        """音频 PCM 写入 sink（audio_chunk 信号槽，主线程；仅播放态消费）。
+
+        PyQt6 6.11 的 QAudioSink 未绑定 write：流式写入走 push 模式——
+        start() 返回的 QIODevice（见 _control_sink）承担写入。
+        """
+        if self._sink_io is not None and self._state == PlaybackState.Playing:
+            self._sink_io.write(chunk)
 
     def _control_sink(self, action: str) -> None:
-        """QAudioSink 状态管理（主线程）：start 起播/resume、suspend 暂停。"""
+        """QAudioSink 状态管理（主线程）：start 起播/resume、suspend 暂停。
+
+        以引擎侧三态跟踪（started/suspended/stopped）代替读 sink.state()
+        （避免 QAudio 枚举耦合且离线 stub 可测）：suspended 恢复走 resume、
+        stopped 起播走 start（返回 push 模式 QIODevice 供写入）；reset
+        丢弃缓冲并回到 stopped。
+        """
         sink = self._audio_output
         if sink is None:
             return
         if action == "start":
-            from PyQt6.QtMultimedia import QAudio
-
-            if sink.state() == QAudio.State.SuspendedState:
+            if self._sink_state == "stopped":
+                self._sink_io = sink.start()
+            else:  # suspended（或已 started 的冗余请求）：恢复播放
                 sink.resume()
-            else:
-                sink.start()
+            self._sink_state = "started"
         elif action == "suspend":
             sink.suspend()
+            self._sink_state = "suspended"
         elif action == "reset":
             sink.reset()
+            self._sink_io = None
+            self._sink_state = "stopped"
 
     # ---- worker 线程（全部 av 操作限定于此） ---------------------------------
 
@@ -355,16 +377,18 @@ class AvVideoPlayer(QObject):
         return new_context
 
     def _apply_audio_format_later(self, audio_stream) -> None:
-        """音频参数投递主线程建 sink（QAudioSink 线程亲和主线程）。"""
+        """音频参数经信号投递主线程建 sink（QAudioSink 线程亲和主线程）。
+
+        勿用 QTimer.singleShot：其必须在有事件循环的线程调用，从 worker
+        调用静默失效（实测 sink 永不创建、播放无声）；跨线程一律走信号。
+        """
         rate = getattr(audio_stream, "rate", None)
         channels = len(audio_stream.layout.channels) if audio_stream.layout else 2
         try:
             rate = int(rate) if rate else AUDIO_RATE
         except (TypeError, ValueError):
             rate = AUDIO_RATE
-        from PyQt6.QtCore import QTimer
-
-        QTimer.singleShot(0, lambda: self._apply_audio_format(rate, channels or 2))
+        self._audio_format_ready.emit(rate, channels or 2)
 
     def _do_seek(self, target_ms: int, context: _DecodeContext) -> _DecodeContext:
         """seek（worker）：关键帧定位 + 逐帧解码到目标，仅投递完成帧。"""
@@ -377,7 +401,13 @@ class AvVideoPlayer(QObject):
             # 落在目标之前的关键帧，顺序解码到目标即帧精确（中间帧不投递）。
             context.container.seek(int(target_ms) * 1000, backward=True, any_frame=False)
             context.reset_streaming()
-            return context.decode_until(target_ms)
+            result = context.decode_until(target_ms)
+            if self._state == PlaybackState.Playing:
+                # 播放中 seek：重置节拍基准为新位置，否则 worker 以 delay=0
+                # 追赶旧基准与新位置间的差距（实测拖拽后 ~199fps 快放）
+                context.reset_play_clock()
+                logger.debug("seek 完成（播放中）：节拍基准重置 → %dms", self._position_ms)
+            return result
         except Exception as exc:  # pragma: no cover - 后端差异容错
             logger.warning("seek 失败（target=%dms）：%s", target_ms, exc)
             return context
@@ -487,10 +517,15 @@ class _DecodeContext:
 
     def apply_command(self, command: str) -> None:
         if command == _PLAY:
-            self._play_start_pts = self._player.position()
-            self._play_start_wall = self._player._clock_ms()
+            self.reset_play_clock()
+            logger.debug("命令应用：play（基准 pts=%d）", self._play_start_pts)
         elif command == _PAUSE:
             pass  # 播放节拍由 state != Playing 自然停止；sink 由门面控制
+
+    def reset_play_clock(self) -> None:
+        """重置播放节拍基准为当前引擎位置（play 与播放中 seek 共用）。"""
+        self._play_start_pts = self._player._position_ms
+        self._play_start_wall = self._player._clock_ms()
 
     def play_next_frame(self) -> _DecodeContext:
         """播放推进：解码一帧（音频同遍流送）→ 投递 → wait 下一帧节拍。"""

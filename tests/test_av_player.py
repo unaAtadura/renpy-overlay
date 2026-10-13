@@ -211,3 +211,112 @@ def test_decode_context_state_transitions():
     assert context._play_start_pts == 5000
     assert context._play_start_wall == 1000.0  # 注入钟
     context.apply_command("pause")  # 无操作不抛错
+
+
+class _FakeSinkIO:
+    """push 模式 QIODevice stub：write 记录（音频 PCM 落点）。"""
+
+    def __init__(self):
+        self.written: list[bytes] = []
+
+    def write(self, chunk):
+        self.written.append(chunk)
+        return len(chunk)
+
+
+class _StubSink:
+    """QAudioSink stub：记录 start/resume/suspend/reset/setVolume。"""
+
+    def __init__(self):
+        self.started = 0
+        self.resumed = 0
+        self.suspended = 0
+        self.reset_count = 0
+        self.volume: float | None = None
+        self.io = _FakeSinkIO()
+
+    def start(self):
+        self.started += 1
+        return self.io  # push 模式：返回 QIODevice
+
+    def resume(self):
+        self.resumed += 1
+
+    def suspend(self):
+        self.suspended += 1
+
+    def reset(self):
+        self.reset_count += 1
+        self.io = _FakeSinkIO()  # reset 后旧 io 失效（与引擎 _sink_io 同步）
+
+    def setVolume(self, v):
+        self.volume = v
+
+
+def test_control_sink_state_management():
+    """sink 状态管理：play→start（首）/resume（suspend 后）、
+    播放中 setPosition→reset+start、暂停态 setPosition→仅 reset。"""
+    player = _make_player()
+    sink = _StubSink()
+    player._audio_output = sink
+    player._state = PlaybackState.Playing
+    player._control_sink("start")
+    assert sink.started == 1
+    player._control_sink("suspend")
+    assert sink.suspended == 1
+    player._control_sink("start")  # suspend 后 start 走 resume
+    assert sink.resumed == 1
+    player.setPosition(5000)  # 播放中 seek：reset + start
+    assert sink.reset_count == 1
+    assert sink.started == 2
+    player._state = PlaybackState.Paused
+    player.setPosition(6000)  # 暂停态 seek：仅 reset
+    assert sink.reset_count == 2
+    assert sink.started == 2
+
+
+def test_write_audio_only_when_playing():
+    """音频写入守卫：仅播放态经 push io 写 sink（seek 快进/暂停丢弃）。"""
+    player = _make_player()
+    sink = _StubSink()
+    player._audio_output = sink
+    player._state = PlaybackState.Paused
+    player._write_audio(b"a")
+    assert sink.io.written == []
+    player._state = PlaybackState.Playing
+    player._control_sink("start")  # stopped→start 获得 push io
+    player._write_audio(b"b")
+    assert sink.io.written == [b"b"]
+
+
+def test_reset_play_clock_uses_engine_position():
+    """节拍基准重置：pts 取引擎缓存位置、wall 取注入钟；play 与
+    播放中 seek（_do_seek 内）共用同一重置入口（修复 seek 后快放）。"""
+    player = _make_player()
+    player._position_ms = 123_456
+    context = _DecodeContext(player)
+    context.reset_play_clock()
+    assert context._play_start_pts == 123_456
+    assert context._play_start_wall == 1000.0
+    player._position_ms = 223_456
+    context.apply_command("play")
+    assert context._play_start_pts == 223_456
+
+
+def test_audio_format_ready_signal_reaches_apply():
+    """worker→主线程的音频参数信号：emit 后参数正确到达槽（含音量同步）。
+
+    先断开真实 sink 构造槽（无 GUI 测试不构造 QAudioSink），另接记录器
+    验证信号到槽的参数传递（修复跨线程 QTimer.singleShot 静默失效致
+    sink 永不创建致无声的问题，该修复即本信号）。
+    """
+    player = _make_player()
+    sink = _StubSink()
+    player._audio_output = sink
+    player.setVolume(0.5)
+    player._audio_format_ready.disconnect(player._apply_audio_format)
+    received: list[tuple[int, int]] = []
+    player._audio_format_ready.connect(lambda rate, ch: received.append((rate, ch)))
+    player._audio_format_ready.emit(48_000, 2)
+    assert received == [(48_000, 2)]
+    assert player._volume == 0.5
