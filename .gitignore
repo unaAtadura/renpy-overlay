@@ -30,3 +30,6 @@ config.json
 
 # 测试用例
 .test_cases
+
+# 提交消息载体（git commit -F 专用，防 git add -A 误收）
+_commit_msg.txt
