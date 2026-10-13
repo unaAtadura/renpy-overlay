@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import types
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
 
 from renpy_overlay.video.editor_window import (
@@ -20,6 +21,7 @@ from renpy_overlay.video.editor_window import (
     format_duration,
     frame_duration_ms,
     frame_to_ms,
+    is_playback_toggle_key,
     max_frame_for,
     ms_to_frame,
     parse_frame_text,
@@ -94,6 +96,36 @@ def test_volume_from_wheel_steps_and_clamps():
 
 def test_step_ms_constant():
     assert STEP_MS == 1000  # 需求：步退/步进 1 秒
+
+
+def test_frame_digits_validator_rejects_space_and_non_digits():
+    """帧号框输入校验：纯数字可接受，空格/非数字在输入层拒绝（防干扰
+    窗口级空格快捷键判定，且帧号类文本框合规输入本就应为纯数字）。"""
+    from PyQt6.QtCore import QRegularExpression
+    from PyQt6.QtGui import QRegularExpressionValidator, QValidator
+
+    from renpy_overlay.video.editor_window import FRAME_DIGITS_PATTERN
+
+    assert FRAME_DIGITS_PATTERN == r"[0-9]*"
+    validator = QRegularExpressionValidator(QRegularExpression(FRAME_DIGITS_PATTERN))
+    state, _, _ = validator.validate("123", 3)  # 纯数字：接受
+    assert state == QValidator.State.Acceptable
+    state, _, _ = validator.validate("12 3", 4)  # 含空格：拒绝（中间态为 Intermediate 也非可接受）
+    assert state != QValidator.State.Acceptable
+    state, _, _ = validator.validate("1a2", 3)  # 非数字：拒绝
+    assert state != QValidator.State.Acceptable
+    state, _, _ = validator.validate("", 0)  # 空串：接受（清空合法）
+    assert state == QValidator.State.Acceptable
+
+
+def test_is_playback_toggle_key():
+    """空格快捷键判定：仅空格且非自动重复触发（长按不连发，其余键不触发）。"""
+    space = int(Qt.Key.Key_Space)
+    assert space == 0x20
+    assert is_playback_toggle_key(space, False) is True  # 空格按下
+    assert is_playback_toggle_key(space, True) is False  # 长按自动重复：不连发
+    assert is_playback_toggle_key(0x41, False) is False  # 非 Space 键（如 A）
+    assert is_playback_toggle_key(0x0D, False) is False  # 回车归输入框语义
 
 
 def test_log_liveness_reports_stats_snapshot():
@@ -483,6 +515,79 @@ def test_seek_to_uses_widened_button_window():
     VideoEditorWindow._seek_to(fake, 6000)
     assert clock.seeks == [5000], "按钮窗口 250ms 内应挂起"
     assert fake._pending_seek == 6000
+
+
+def _open_path_fake(tmp_path, *, exists: bool):
+    """open_path 的最小 fake（离线约定：不构造 QWidget，不真开 av）。
+
+    av_available 经局部导入自 av_media：monkeypatch 模块属性即可控制。
+    """
+    import renpy_overlay.video.av_media as av_media_mod
+
+    media = tmp_path / "v.mp4"
+    media.write_bytes(b"\x00" * 64 if exists else b"")
+    if not exists:
+        media.unlink()
+    focused: list[int] = []
+    fake = types.SimpleNamespace(
+        _path_edit=types.SimpleNamespace(setText=lambda t: None),
+        _status_label=types.SimpleNamespace(set_text=None),
+        _volume_slider=types.SimpleNamespace(setValue=lambda v: None),
+        _player=types.SimpleNamespace(open=lambda p: None),
+        _last_target_ms=None,
+        setFocus=lambda: focused.append(1),
+    )
+    fake._status_label.setText = lambda t: setattr(fake._status_label, "text", t)
+    return fake, focused, av_media_mod, media
+
+
+def test_open_path_moves_focus_off_path_edit(tmp_path, monkeypatch):
+    """选择视频打开成功后焦点移离路径框（空格快捷键立即可用，输入框不捕获空格）。"""
+    fake, focused, av_media_mod, media = _open_path_fake(tmp_path, exists=True)
+    monkeypatch.setattr(av_media_mod, "av_available", lambda: True)
+    VideoEditorWindow.open_path(fake, str(media))
+    assert focused == [1]
+
+
+def test_open_path_missing_file_keeps_focus(tmp_path):
+    """文件不存在：不打开也不动焦点（状态栏提示文件不存在）。"""
+    fake, focused, _, media = _open_path_fake(tmp_path, exists=False)
+    VideoEditorWindow.open_path(fake, str(media))
+    assert focused == []
+    assert fake._status_label.text == "文件不存在"
+
+
+def test_close_event_pauses_engine_without_killing_worker():
+    """窗口 close 只暂停引擎：worker 保留（close 杀线程致再次打开后选视频
+    无响应，实测）；渲染线程弃置 None 由下次 showEvent 重建。"""
+    paused: list[int] = []
+    player_closed: list[int] = []
+    renderer_stopped: list[int] = []
+    player = types.SimpleNamespace(
+        pause=lambda: paused.append(1),
+        close=lambda: player_closed.append(1),
+        stats_snapshot=lambda: {
+            "presented": 0,
+            "dropped": 0,
+            "stale": 0,
+            "audio_level_ms": 0.0,
+            "underruns": 0,
+            "seek_count": 0,
+            "seek_latency_ms": 0.0,
+            "vqueue_depth": 0,
+        },
+    )
+    renderer = types.SimpleNamespace(
+        stop=lambda: renderer_stopped.append(1),
+        wait=lambda timeout: None,
+        destroy_sdl=lambda: None,
+    )
+    fake = types.SimpleNamespace(_player=player, _renderer=renderer)
+    VideoEditorWindow._pause_engine_and_drop_renderer(fake)
+    assert paused == [1]
+    assert player_closed == [], "closeEvent 不得杀 worker（线程不可重启）"
+    assert renderer_stopped == [1]
+    assert fake._renderer is None  # 下次 showEvent 自动重建渲染线程
 
 
 def test_last_target_invalidates_when_position_catches_up():

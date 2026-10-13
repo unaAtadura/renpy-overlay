@@ -62,6 +62,10 @@ class VideoPlayer(QObject):
     ) -> None:
         super().__init__(parent)
         self._clock_ms = clock_ms or (lambda: time.monotonic() * 1000.0)
+        self._open_fn = open_fn  # av.open 注入点（离线测试；重建 worker 复用）
+        self._resampler_factory = resampler_factory  # 重采样工厂（同上）
+        self._convert_frame = convert_frame  # 帧转换钩子（None→默认 yuv420p）
+        self._worker_enabled = enable_worker  # close/stop 后自愈开关同步
         self._vqueue = BoundedFrameQueue(FRAME_QUEUE_DEPTH)
         bytes_per_ms = 48_000 * 4 / 1000.0  # 192 字节/ms（48kHz × s16 × 立体声）
         self._ring = AudioRingBuffer(int(AUDIO_CAPACITY_MS * bytes_per_ms))
@@ -75,20 +79,35 @@ class VideoPlayer(QObject):
         self._sdl_ready = False
         self._last_frame: VideoFrame | None = None  # 最近显示帧（暂停放大帧用）
         #: worker 回调（worker 线程执行；信号发射安全）
-        self._worker = DecoderWorker(
+        self._worker = self._build_worker()
+        if enable_worker:
+            self._worker.start()
+
+    def _build_worker(self) -> DecoderWorker:
+        """组装解码 worker（构造与死亡自愈重建共用同一钩子集）。"""
+        return DecoderWorker(
             vqueue=self._vqueue,
             ring=self._ring,
             stats=self._stats,
-            open_fn=open_fn,
-            resampler_factory=resampler_factory,
-            convert_frame=convert_frame or _default_convert_frame,
+            open_fn=self._open_fn,
+            resampler_factory=self._resampler_factory,
+            convert_frame=self._convert_frame or _default_convert_frame,
             on_display_frame=self._on_display_frame,
             on_audio_written=self._on_audio_written,
             on_audio_flushed=self._on_audio_flushed,
             on_open_failed=lambda msg: self.open_failed.emit(msg),
             on_opened=self._on_worker_opened,
         )
-        if enable_worker:
+
+    def _ensure_worker_alive(self) -> None:
+        """解码线程死亡自愈（open 入口检查；仅 enable_worker 时重建）。
+
+        threading.Thread 不可重启：close/stop 后再 open 若不重建，请求将
+        无人消费（实测：窗口 close 后再打开菜单选视频，播放无帧无声）。
+        """
+        if self._worker_enabled and not self._worker.is_alive():
+            logger.warning("解码线程已终止，重建 worker（open 自愈）")
+            self._worker = self._build_worker()
             self._worker.start()
 
     # ---- 主线程 API -----------------------------------------------------------
@@ -96,6 +115,7 @@ class VideoPlayer(QObject):
     def open(self, path: str) -> None:
         """请求打开媒体（异步；完成经 media_opened 回报，落定为暂停态）。"""
         self._ensure_sdl()
+        self._ensure_worker_alive()
         self._set_state(PlaybackState.Stopped)
         self._position_ms = 0
         self._duration_ms = -1

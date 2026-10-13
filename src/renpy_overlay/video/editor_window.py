@@ -12,7 +12,8 @@
 交互规则（需求）：路径回车打开（文件存在才打开）；暂停时播放区左键单击
 放大当前帧；起止点文本框记录帧位置、回车跳帧（越界不响应）、捕获取当前
 播放位置、终点允许早于起点（片段整理在 ASR 链路完成）；帧率取媒体元数据
-（读不到回退 30fps），帧号 ↔ 毫秒按帧率换算。
+（读不到回退 30fps），帧号 ↔ 毫秒按帧率换算；空格键切换播放/暂停（窗口
+激活且焦点不在输入框时生效，其余控件 NoFocus 不夺焦点）。
 
 播放引擎：由 :mod:`.player` 自管完成（移植自参考实验项目 videoplayer 的
 已验证方案：PyAV worker 线程单遍 demux 分流解码 + 关键帧索引 sidecar
@@ -42,7 +43,8 @@ import logging
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QRegularExpression, Qt, QTimer
+from PyQt6.QtGui import QRegularExpressionValidator
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -128,6 +130,11 @@ def max_frame_for(duration_ms: int, fps: float) -> int:
     return ms_to_frame(duration_ms, fps)
 
 
+#: 帧号文本框输入校验模式：纯数字（空格/其他字符在输入层直接拒绝，
+# 不进入文本也就不会干扰窗口级空格快捷键的判定）
+FRAME_DIGITS_PATTERN = r"[0-9]*"
+
+
 def format_duration(ms: int) -> str:
     """毫秒 → 时长文本：不足 1 小时为 mm:ss，否则 h:mm:ss；负值钳零。"""
     total = max(0, int(ms)) // 1000
@@ -136,6 +143,15 @@ def format_duration(ms: int) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def is_playback_toggle_key(key: int, auto_repeat: bool) -> bool:
+    """空格键且非自动重复 → 窗口级播放/暂停快捷键判定（离线测试用）。
+
+    焦点在可编辑文本框（路径/起止点）时按键由其消费不会冒泡到窗口，
+    自然保持文本输入语义；其余控件一律 NoFocus 不夺焦点。
+    """
+    return key == int(Qt.Key.Key_Space) and not auto_repeat
 
 
 def should_seek_now(
@@ -246,6 +262,7 @@ class SdlCanvas(QWidget):
         self._on_frame_click = on_frame_click
         self._press_pos = None
         self.setMinimumHeight(320)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 点击画布不夺焦点（空格可达窗口）
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -348,6 +365,7 @@ class VideoEditorWindow(QWidget):
         self._path_edit.setPlaceholderText("输入视频路径后回车打开")
         self._path_edit.returnPressed.connect(self._open_from_path_edit)
         browse_button = QPushButton("选择视频")
+        browse_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 空格快捷键焦点策略
         browse_button.clicked.connect(self._open_via_dialog)
         path_row.addWidget(self._path_edit, stretch=1)
         path_row.addWidget(browse_button)
@@ -358,6 +376,7 @@ class VideoEditorWindow(QWidget):
 
         self._position_slider = _ClickableSlider(Qt.Orientation.Horizontal)
         self._position_slider.setRange(0, 0)
+        self._position_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 防夺焦点致空格失灵
         self._scrubbing = False  # 拖拽中不回写播放位置（防回环抖动）
         self._position_slider.sliderPressed.connect(self._on_slider_pressed)
         self._position_slider.sliderReleased.connect(self._on_slider_released)
@@ -370,6 +389,7 @@ class VideoEditorWindow(QWidget):
         layout.addWidget(self._time_label)
 
         self._volume_slider = _VolumeSlider()
+        self._volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 防夺焦点致空格失灵
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
         layout.addWidget(self._volume_slider)
 
@@ -382,6 +402,9 @@ class VideoEditorWindow(QWidget):
             ("步进1秒", lambda: self._seek_by(STEP_MS)),
         ):
             button = QPushButton(text)
+            # NoFocus：点击按钮不夺焦点——空格始终切换播放，而不是重复触发
+            # 上次点击的那个按钮（Qt 按钮 Space/回车默认激活自身）
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.clicked.connect(handler)
             if text in (PLAY_BUTTON_TEXT_PAUSED, PLAY_BUTTON_TEXT_PLAYING):
                 self._play_button: QAbstractButton = button
@@ -392,6 +415,7 @@ class VideoEditorWindow(QWidget):
         self._end_edit = self._add_marker_row(layout, "定位终点")
 
         self._asr_button = QPushButton("语音识别")
+        self._asr_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 空格快捷键焦点策略
         self._asr_button.clicked.connect(self._request_asr)
         layout.addWidget(self._asr_button)
 
@@ -436,9 +460,22 @@ class VideoEditorWindow(QWidget):
         self._last_target_ms = None  # 新视频：步进累加基准失效
         self._player.open(str(target))  # 引擎：worker 打开，完成即暂停态+首帧
         self._volume_slider.setValue(0)  # 最小静音（需求）
+        self.setFocus()  # 焦点移离路径框：空格快捷键立即可用（输入框不捕获空格）
         logger.info("已打开视频（暂停）：%s", target)
 
     # ---- 播放控制 ---------------------------------------------------------------
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """窗口级空格快捷键：切换播放/暂停（仅窗口焦点链路触发，非全局热键）。
+
+        焦点在路径/起止点输入框时按键由其消费（文本输入语义保持）；
+        其余控件一律 NoFocus，事件冒泡到本窗口统一判定。
+        """
+        if is_playback_toggle_key(event.key(), event.isAutoRepeat()):
+            self._toggle_play()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _toggle_play(self) -> None:
         if self._player.playbackState() == PlaybackState.Playing:
@@ -565,12 +602,18 @@ class VideoEditorWindow(QWidget):
         row = QHBoxLayout()
         row.addWidget(QLabel(label_text))
         frame_edit = QLineEdit("0")
+        # 纯数字校验（帧号类文本框合规输入）：空格/非数字在输入层拒绝
+        frame_edit.setValidator(
+            QRegularExpressionValidator(QRegularExpression(FRAME_DIGITS_PATTERN), self)
+        )
         frame_edit.returnPressed.connect(
             lambda: self._jump_to_frame_text(frame_edit)
         )
         capture_button = QPushButton("捕获")
+        capture_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 空格快捷键焦点策略
         capture_button.clicked.connect(lambda: self._capture_frame(frame_edit))
         jump_button = QPushButton("跳转")
+        jump_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 空格快捷键焦点策略
         jump_button.clicked.connect(lambda: self._jump_to_frame_text(frame_edit))
         row.addWidget(frame_edit, stretch=1)
         row.addWidget(capture_button)
@@ -673,12 +716,23 @@ class VideoEditorWindow(QWidget):
                 self._status_label.setText("SDL 渲染器初始化失败（见日志）")
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self._player.close()
+        self._pause_engine_and_drop_renderer()
+        super().closeEvent(event)
+
+    def _pause_engine_and_drop_renderer(self) -> None:
+        """窗口 close 的引擎收尾：暂停 + 弃置渲染线程（离线可测的纯编排）。
+
+        不调 player.close()：解码线程不可重启，close 杀 worker 会导致再
+        次从菜单打开编辑窗后选视频无帧无声（实测）；引擎随宿主生命周期
+        常驻，窗口重开时渲染线程由 showEvent 自动重建。
+        """
+        self._player.pause()
         if self._renderer is not None:
             self._renderer.stop()
             self._renderer.wait(timeout=2.0)
             self._renderer.destroy_sdl()
-        super().closeEvent(event)
+            self._renderer = None  # 下次 showEvent 自动重建渲染线程
+        logger.info("编辑窗口关闭：引擎已暂停（worker 保留，再次打开自愈）")
 
     # ---- 语音识别 ----------------------------------------------------------------
 
