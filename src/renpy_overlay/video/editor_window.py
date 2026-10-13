@@ -14,23 +14,25 @@
 播放位置、终点允许早于起点（片段整理在 ASR 链路完成）；帧率取媒体元数据
 （读不到回退 30fps），帧号 ↔ 毫秒按帧率换算。
 
-播放引擎：解码由 :mod:`.av_player` 自管完成（PyAV worker 线程确定性
-解码，帧转 QImage 后投递主线程）——QMediaPlayer 的 FFmpeg 后端在连续
-seek 下产出抢占态坏帧（花屏）且 toImage 慢帧风暴独占主线程（卡死，
-实测见 logs/renpy_overlay_20261013_072050.log），本窗口已整体切换引擎。
+播放引擎：由 :mod:`.player` 自管完成（移植自参考实验项目 videoplayer 的
+已验证方案：PyAV worker 线程单遍 demux 分流解码 + 关键帧索引 sidecar
+缓存直跳 + 双缓冲预解码 + SDL2 音视频输出 + 音频主时钟同步）——
+QMediaPlayer 的 FFmpeg 后端在连续 seek 下产出抢占态坏帧（花屏）且
+慢帧风暴独占主线程（卡死），av_player 单进程音频链路存在音画同步
+缺陷，均已由本方案整体取代。
 
 稳定性防护：全部 seek（按钮/文本框/拖拽）经合并节流——窗口内只挂起最新
 目标，由兜底 QTimer（按钮/文本框 250ms 专用窗口）或 sliderReleased（拖拽
-150ms 窗口）落定；连点步进基于「挂起/最近请求目标」累加（position() 落定
-后异步更新，直接读它会重复 seek 同一目标，实测）。引擎侧 worker 串行
-消费 seek（最新胜出、中间帧不投递），花屏与卡死从机制上消除。
+150ms 窗口）落定；连点步进基于「挂起/最近请求目标」累加。引擎侧 seek
+为异步 latch（最新胜出、包间隙中断、双缓冲重预填充），花屏与卡死从
+机制上消除。
 
-引擎活性心跳：每 2s 输出帧/位置事件计数（DEBUG）。冻结判别器——主线程
-冻结则心跳日志消失（真空窗口即冻结时长）；引擎挂起则心跳仍在但帧/位置
-计数持续为 0，两类情况可区分。
+引擎指标心跳：每 2s 输出 presented/水位/underrun/seek 耗时（DEBUG）。
+冻结判别器——主线程冻结则心跳日志消失（真空窗口即冻结时长）；引擎
+挂起则心跳仍在但 presented 持续为 0，两类情况可区分。
 
 离线测试约定：几何与播放器交互不构造真实 QWidget，本模块的换算/解析/
-取值纯函数直接单测；窗口类依赖 av_player 引擎（av 解码/QAudioSink 链路），
+取值纯函数直接单测；窗口类依赖 player 引擎（av 解码/SDL 音视频链路），
 仅人工联测。
 """
 
@@ -41,7 +43,6 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -53,7 +54,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .av_player import DEFAULT_FPS, AvVideoPlayer, PlaybackState
+from .player.engine import PlaybackState, VideoPlayer
+from .player.renderer_sdl2 import SdlVideoRenderer
+from .player.sync_clock import DEFAULT_FPS
 
 logger = logging.getLogger("renpy_overlay.video.editor_window")
 
@@ -157,25 +160,6 @@ def volume_from_wheel(delta_y: int, current: int, step: int = VOLUME_WHEEL_STEP)
     return max(0, min(100, current + direction * step))
 
 
-class _LivenessStats:
-    """引擎活性统计：帧/位置事件计数（心跳打点用）。
-
-    仅在主线程访问（信号槽与心跳 timer 同线程），无需加锁；供日志判别
-    「主线程冻结（心跳消失）」与「引擎挂起（心跳在、计数恒 0）」。
-    """
-
-    def __init__(self) -> None:
-        self.frame_count = 0  # frame_ready 实际上屏帧数
-        self.frame_skip_count = 0  # 保留字段：引擎不跳帧，恒 0（口径兼容）
-        self.position_count = 0  # position_changed 次数
-
-    def reset(self) -> None:
-        """心跳打点后清零，进入下一个统计窗口。"""
-        self.frame_count = 0
-        self.frame_skip_count = 0
-        self.position_count = 0
-
-
 # ---------------------------------------------------------------- 窗口
 
 
@@ -247,41 +231,32 @@ class _VolumeSlider(QSlider):
         event.accept()
 
 
-class _VideoCanvas(QWidget):
-    """视频播放区：引擎帧投递绘制 + 暂停态单击放大当前帧。"""
+class SdlCanvas(QWidget):
+    """SDL 渲染器宿主：原生窗口句柄交给 SDL_CreateWindowFrom。
+
+    客户区内容完全归 SDL present（direct3d 翻转），Qt 侧必须双重禁绘：
+    WA_OpaquePaintEvent（跳过 paintEvent 前的调色板擦底——否则任何 UI
+    刷新引发的重绘都会白屏覆盖 SDL 画面）+ WA_NoSystemBackground（跳过
+    WM_ERASEBKGND 系统擦底）；paintEvent 保持空实现。暂停态单击放大：
+    mousePress/Release 归 Qt（≤4px 位移判定），回调 on_frame_click 不变。
+    """
 
     def __init__(self, on_frame_click, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._on_frame_click = on_frame_click
-        self._frame: QImage | None = None
-        self.setMinimumHeight(320)
         self._press_pos = None
+        self.setMinimumHeight(320)
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAutoFillBackground(False)
 
-    def current_frame(self) -> QImage | None:
-        return self._frame
+    def native_hwnd(self) -> int:
+        return int(self.winId())
 
-    def set_frame(self, frame: QImage) -> None:
-        """缓存最近一帧并重绘（videoFrameChanged 信号驱动）。"""
-        if frame.isNull():
-            return
-        self._frame = frame
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        from PyQt6.QtGui import QPainter
-
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), self.palette().window())
-        if self._frame is not None:
-            scaled = self._frame.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            x = (self.width() - scaled.width()) // 2
-            y = (self.height() - scaled.height()) // 2
-            painter.drawImage(x, y, scaled)
-        painter.end()
+    def paintEvent(self, event) -> None:  # noqa: N802 - 画面完全由 SDL 绘制
+        event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -337,12 +312,13 @@ class VideoEditorWindow(QWidget):
         #: 界面看不到"，实测）。
         self._frame_viewer = None
 
-        # ---- 播放引擎（av_player）：默认暂停 + 音量 0（静音，需求） ------------
-        #: 引擎工厂（离线测试 stub；默认 AvVideoPlayer，解码在 worker 线程）
-        self._player = player_factory(self) if player_factory is not None else AvVideoPlayer(self)
+        # ---- 播放引擎（SDL2 + PyAV，移植自 videoplayer 已验证方案） -------------
+        #: 引擎工厂（离线测试 stub；默认 VideoPlayer，解码在 worker 线程）
+        self._player = player_factory(self) if player_factory is not None else VideoPlayer(self)
         self._player.open_failed.connect(
             lambda text: logger.warning("媒体打开失败：%s", text)
         )
+        self._renderer: SdlVideoRenderer | None = None
         self._fps = DEFAULT_FPS
         #: 毫秒单调钟（构造注入，离线测试可控）：拖拽 seek 节流的时钟
         self._clock_ms = clock_ms or (lambda: time.monotonic() * 1000.0)
@@ -358,8 +334,7 @@ class VideoEditorWindow(QWidget):
         self._pending_timer.setSingleShot(True)
         self._pending_timer.setInterval(BUTTON_SEEK_THROTTLE_MS)
         self._pending_timer.timeout.connect(self._on_pending_timer_timeout)
-        #: 引擎活性统计与心跳（冻结/挂起判别，见 _log_liveness）
-        self._liveness = _LivenessStats()
+        #: 引擎指标心跳（冻结/挂起判别，见 _log_liveness；口径取引擎 stats）
         self._liveness_timer = QTimer(self)
         self._liveness_timer.setInterval(LIVENESS_HEARTBEAT_MS)
         self._liveness_timer.timeout.connect(self._log_liveness)
@@ -378,10 +353,8 @@ class VideoEditorWindow(QWidget):
         path_row.addWidget(browse_button)
         layout.addLayout(path_row)
 
-        self._canvas = _VideoCanvas(self._open_frame_viewer)
-        layout.addWidget(self._canvas, stretch=1)
-        # 引擎帧投递自绘（暂停帧放大需要 QImage；播放区即画布）
-        self._player.frame_ready.connect(self._on_frame_ready)
+        self._canvas = SdlCanvas(self._open_frame_viewer)
+        layout.addWidget(self._canvas, stretch=1)  # 客户区归 SDL present（双重禁绘）
 
         self._position_slider = _ClickableSlider(Qt.Orientation.Horizontal)
         self._position_slider.setRange(0, 0)
@@ -562,7 +535,6 @@ class VideoEditorWindow(QWidget):
             logger.debug("拖拽 seek → %dms", value)
 
     def _on_position_changed(self, position_ms: int) -> None:
-        self._liveness.position_count += 1
         self._update_time_label(position_ms)
         if self._last_target_ms is not None and abs(
             position_ms - self._last_target_ms
@@ -648,7 +620,7 @@ class VideoEditorWindow(QWidget):
         """暂停时单击播放区：放大当前帧（播放中单击忽略，需求）。"""
         if self._player.playbackState() == PlaybackState.Playing:
             return
-        frame = self._canvas.current_frame()
+        frame = self._player.grab_frame_image()  # 最近显示帧按需 yuv→QImage
         if frame is None or frame.isNull():
             return
         factory = self._frame_viewer_factory
@@ -665,25 +637,48 @@ class VideoEditorWindow(QWidget):
         viewer.show_frame()
         logger.info("已打开帧放大窗（帧号 %d）", ms_to_frame(self._player.position(), self._fps))
 
-    def _on_frame_ready(self, image: QImage) -> None:
-        """引擎完成帧上屏（成品 QImage，主线程零解码工作）+ 活性统计。"""
-        self._liveness.frame_count += 1
-        self._canvas.set_frame(image)
-
     def _log_liveness(self) -> None:
-        """引擎活性心跳（DEBUG）：帧/位置事件计数周期汇总。
+        """引擎指标心跳（DEBUG）：presented/水位/underrun/seek 耗时周期汇总。
 
         冻结判别器：主线程冻结时本日志消失（真空窗口即冻结时长）；引擎
-        挂起时主线程存活但帧/位置计数持续为 0——两类情况可区分。
+        挂起时主线程存活但 presented 持续为 0——两类情况可区分。
         """
-        stats = self._liveness
+        snap = self._player.stats_snapshot()
         logger.debug(
-            "引擎活性：帧=%d 跳过=%d 位置=%d",
-            stats.frame_count,
-            stats.frame_skip_count,
-            stats.position_count,
+            "引擎指标：presented=%d dropped=%d stale=%d 水位=%.1fms "
+            "underrun=%d seek=%d次（最近 %.1fms）vqueue=%d",
+            snap["presented"],
+            snap["dropped"],
+            snap["stale"],
+            snap["audio_level_ms"],
+            snap["underruns"],
+            snap["seek_count"],
+            snap["seek_latency_ms"],
+            snap["vqueue_depth"],
         )
-        stats.reset()
+
+    # ---- SDL 渲染装配与生命周期（画布句柄就绪后一次性） -----------------------------
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if self._renderer is None:
+            self._player.ensure_sdl()  # 渲染器 attach 前保证 SDL 已初始化
+            wiring = self._player.renderer_wiring()
+            renderer = SdlVideoRenderer(**wiring)
+            if renderer.attach_window(self._canvas.native_hwnd()):
+                self._player.set_renderer(renderer)
+                renderer.start()
+                logger.info("SDL 渲染线程已启动（挂载画布句柄）")
+            else:
+                self._status_label.setText("SDL 渲染器初始化失败（见日志）")
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._player.close()
+        if self._renderer is not None:
+            self._renderer.stop()
+            self._renderer.wait(timeout=2.0)
+            self._renderer.destroy_sdl()
+        super().closeEvent(event)
 
     # ---- 语音识别 ----------------------------------------------------------------
 

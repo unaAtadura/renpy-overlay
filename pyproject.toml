@@ -31,6 +31,9 @@ dependencies = [
     # 下限 19：自该系起官方 wheels 实测包含 libavdevice（gdigrab 抓屏）；
     # av 19 要求 Python>=3.12，更早解释器不安装（运行时降级禁用视频功能）
     "av>=19; python_version >= '3.12'",
+    # SDL2 播放引擎（video/player）：音视频输出与纹理渲染（已验证方案移植）
+    "pysdl2>=0.9.14",
+    "pysdl2-dll>=2.30.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]

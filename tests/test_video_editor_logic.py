@@ -14,11 +14,9 @@ from PyQt6.QtGui import QImage
 from renpy_overlay.video.editor_window import (
     BUTTON_SEEK_THROTTLE_MS,
     DEFAULT_FPS,
-    LIVENESS_HEARTBEAT_MS,
     SEEK_THROTTLE_MS,
     STEP_MS,
     VideoEditorWindow,
-    _LivenessStats,
     format_duration,
     frame_duration_ms,
     frame_to_ms,
@@ -30,6 +28,7 @@ from renpy_overlay.video.editor_window import (
     volume_from_wheel,
 )
 from renpy_overlay.video.frame_viewer import MAX_SCALE, MIN_SCALE, next_scale
+from renpy_overlay.video.player.engine import PlaybackState
 
 
 def test_frame_duration_ms_default_and_invalid_fps():
@@ -97,27 +96,22 @@ def test_step_ms_constant():
     assert STEP_MS == 1000  # 需求：步退/步进 1 秒
 
 
-def test_liveness_stats_counts_and_reset():
-    """活性统计：计数累加与心跳窗口重置（冻结/挂起判别的数据基础）。"""
-    assert LIVENESS_HEARTBEAT_MS == 2000
-    stats = _LivenessStats()
-    stats.frame_count += 2
-    stats.frame_skip_count += 1
-    stats.position_count += 3
-    stats.reset()
-    assert stats.frame_count == 0
-    assert stats.frame_skip_count == 0
-    assert stats.position_count == 0
-
-
-def test_log_liveness_logs_and_resets():
-    """心跳打点：输出汇总后清零计数（下个窗口从零开始）。"""
-    fake = types.SimpleNamespace(_liveness=_LivenessStats())
-    fake._liveness.frame_count = 4
-    fake._liveness.position_count = 7
+def test_log_liveness_reports_stats_snapshot():
+    """指标心跳：输出引擎 stats 快照关键子集（诊断口径，不抛错即通过）。"""
+    snap = {
+        "presented": 12,
+        "dropped": 1,
+        "stale": 0,
+        "audio_level_ms": 320.5,
+        "underruns": 2,
+        "seek_count": 3,
+        "seek_latency_ms": 210.7,
+        "vqueue_depth": 4,
+    }
+    fake = types.SimpleNamespace(
+        _player=types.SimpleNamespace(stats_snapshot=lambda: snap)
+    )
     VideoEditorWindow._log_liveness(fake)
-    assert fake._liveness.frame_count == 0
-    assert fake._liveness.position_count == 0
 
 
 def test_next_scale_zoom_in_out_and_clamp():
@@ -186,8 +180,9 @@ def _fake_editor(previous_viewer, new_viewer) -> types.SimpleNamespace:
     frame = QImage(4, 4, QImage.Format.Format_RGB32)
     fake = types.SimpleNamespace(
         _player=types.SimpleNamespace(
-            playbackState=lambda: None,  # 非 PlayingState：暂停态
+            playbackState=lambda: PlaybackState.Paused,  # 暂停态：允许放大
             position=lambda: 0,
+            grab_frame_image=lambda: frame,  # 引擎按需 yuv→QImage（SDL 模式）
         ),
         _fps=DEFAULT_FPS,
         _canvas=_StubCanvas(frame),
@@ -507,27 +502,12 @@ def test_last_target_invalidates_when_position_catches_up():
         _fps=DEFAULT_FPS,
         _scrubbing=False,
         _position_slider=slider,
-        _liveness=_LivenessStats(),
         _time_label=label,
         _player=types.SimpleNamespace(duration=lambda: 150_108),
     )
     fake._update_time_label = lambda pos: VideoEditorWindow._update_time_label(fake, pos)
     VideoEditorWindow._on_position_changed(fake, 397_000)  # 差 1000ms：不追平
     assert fake._last_target_ms == 398_000
-    assert fake._liveness.position_count == 1  # 活性统计同步累加
     assert fake._time_label.text == "06:37 / 02:30"  # 时间显示随位置刷新
     VideoEditorWindow._on_position_changed(fake, 398_010)  # 差 10ms ≤ 33ms：追平失效
     assert fake._last_target_ms is None
-
-
-def test_frame_ready_updates_canvas_and_liveness():
-    """引擎完成帧上屏：canvas 接收成品 QImage，活性帧计数同步累加。"""
-    frames: list = []
-    fake = types.SimpleNamespace(
-        _canvas=types.SimpleNamespace(set_frame=lambda img: frames.append(img)),
-        _liveness=_LivenessStats(),
-    )
-    VideoEditorWindow._on_frame_ready(fake, "IMG")
-    VideoEditorWindow._on_frame_ready(fake, "IMG2")
-    assert frames == ["IMG", "IMG2"]
-    assert fake._liveness.frame_count == 2

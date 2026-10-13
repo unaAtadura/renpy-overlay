@@ -1,0 +1,15 @@
+播放架构切换 SDL2 引擎：移植 videoplayer 已验证方案
+
+- 新增 video/player 子包：关键帧索引 sidecar 缓存（seek 毫秒级直跳）、
+  源滤镜分页 LRU（256KB 页/64MB）、解码 worker（seek 异步 latch 最新
+  胜出 + 单遍 demux 分流 + 双缓冲预解码 + 代数号丢陈帧 + 音频对齐
+  裁剪 + PCM 对齐/暂存回灌）、SDL2 音频环形缓冲（主时钟/underrun
+  计量/音量缩放）、SDL2 渲染器（IYUV 纹理直传 + 信箱/节拍上屏）、
+  同步时钟纯函数与指标聚合
+- editor_window 对接：SdlCanvas 宿主（双重禁绘 + 暂停单击放大迁移）、
+  showEvent 装配渲染线程、closeEvent 清理、放大帧改 grab_frame_image
+  按需转换、指标心跳改 stats 口径；合并节流/目标累加/时间标签等
+  既有行为语义不变
+- 删除 av_player（QAudioSink push 模式 workaround 一并废弃）
+- pyproject 声明 pysdl2/pysdl2-dll；移植参考项目测试 6 件
+  （含真实媒体端到端，素材缺失自动 skip）
