@@ -19,6 +19,7 @@ from renpy_overlay.video.editor_window import (
     STEP_MS,
     VideoEditorWindow,
     _LivenessStats,
+    format_duration,
     frame_duration_ms,
     frame_to_ms,
     max_frame_for,
@@ -248,7 +249,33 @@ def test_destroyed_signal_clears_reference():
 # ---------------------------------------------------------------- 进度跳转节流
 
 
-def test_should_seek_now_first_call_and_throttle_window():
+def test_format_duration_boundaries():
+    """时长文本：不足 1 小时为 mm:ss，否则 h:mm:ss；负值钳零。"""
+    assert format_duration(0) == "00:00"
+    assert format_duration(59_999) == "00:59"
+    assert format_duration(61_000) == "01:01"
+    assert format_duration(3_599_999) == "59:59"
+    assert format_duration(3_600_000) == "1:00:00"
+    assert format_duration(3_661_000) == "1:01:01"
+    assert format_duration(150_108) == "02:30"  # 实测视频时长样例
+    assert format_duration(-5) == "00:00"
+
+
+def test_update_time_label_shows_both_durations():
+    """时间显示：当前播放时长与总时长并存（播放/seek/打开均刷新同一入口）。"""
+    label = types.SimpleNamespace(text="")
+    label.setText = lambda text: setattr(label, "text", text)
+    fake = types.SimpleNamespace(
+        _time_label=label,
+        _player=types.SimpleNamespace(duration=lambda: 150_108),
+    )
+    VideoEditorWindow._update_time_label(fake, 61_000)
+    assert label.text == "01:01 / 02:30"
+    VideoEditorWindow._update_time_label(fake, 0)
+    assert label.text == "00:00 / 02:30"
+
+
+def test_seek_now_first_call_and_throttle_window():
     """首拍必放行（从未 seek）；节流窗口内挂起、超窗放行。"""
     assert should_seek_now(1000.0, -1.0) is True  # 首拍
     assert should_seek_now(1100.0, 1000.0) is False  # 窗口内（110ms < 150ms）
@@ -473,16 +500,22 @@ def test_last_target_invalidates_when_position_catches_up():
         blockSignals=lambda *_: None,
         setValue=lambda *_: None,
     )
+    label = types.SimpleNamespace(text="")
+    label.setText = lambda text: setattr(label, "text", text)
     fake = types.SimpleNamespace(
         _last_target_ms=398_000,
         _fps=DEFAULT_FPS,
         _scrubbing=False,
         _position_slider=slider,
         _liveness=_LivenessStats(),
+        _time_label=label,
+        _player=types.SimpleNamespace(duration=lambda: 150_108),
     )
+    fake._update_time_label = lambda pos: VideoEditorWindow._update_time_label(fake, pos)
     VideoEditorWindow._on_position_changed(fake, 397_000)  # 差 1000ms：不追平
     assert fake._last_target_ms == 398_000
     assert fake._liveness.position_count == 1  # 活性统计同步累加
+    assert fake._time_label.text == "06:37 / 02:30"  # 时间显示随位置刷新
     VideoEditorWindow._on_position_changed(fake, 398_010)  # 差 10ms ≤ 33ms：追平失效
     assert fake._last_target_ms is None
 

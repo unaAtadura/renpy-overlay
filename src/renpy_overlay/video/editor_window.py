@@ -125,6 +125,16 @@ def max_frame_for(duration_ms: int, fps: float) -> int:
     return ms_to_frame(duration_ms, fps)
 
 
+def format_duration(ms: int) -> str:
+    """毫秒 → 时长文本：不足 1 小时为 mm:ss，否则 h:mm:ss；负值钳零。"""
+    total = max(0, int(ms)) // 1000
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
 def should_seek_now(
     now_ms: float, last_seek_ms: float, throttle_ms: int = SEEK_THROTTLE_MS
 ) -> bool:
@@ -381,6 +391,11 @@ class VideoEditorWindow(QWidget):
         self._position_slider.sliderMoved.connect(self._on_slider_moved)
         layout.addWidget(self._position_slider)
 
+        # 时间显示：当前播放时长 / 视频总时长（随播放与 seek 实时刷新）
+        self._time_label = QLabel("00:00 / 00:00")
+        self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(self._time_label)
+
         self._volume_slider = _VolumeSlider()
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
         layout.addWidget(self._volume_slider)
@@ -518,6 +533,7 @@ class VideoEditorWindow(QWidget):
         """引擎元数据回报：帧率（帧位置精确到帧）与时长（进度条范围）。"""
         self._fps = info.fps
         self._on_duration_changed(info.duration_ms)
+        self._update_time_label(self._player.position())  # 打开新视频：归零显示
         logger.debug("视频元数据：fps=%s duration=%dms", info.fps, info.duration_ms)
 
     # ---- 进度条 -----------------------------------------------------------------
@@ -547,6 +563,7 @@ class VideoEditorWindow(QWidget):
 
     def _on_position_changed(self, position_ms: int) -> None:
         self._liveness.position_count += 1
+        self._update_time_label(position_ms)
         if self._last_target_ms is not None and abs(
             position_ms - self._last_target_ms
         ) <= frame_duration_ms(self._fps):
@@ -555,6 +572,12 @@ class VideoEditorWindow(QWidget):
             self._position_slider.blockSignals(True)
             self._position_slider.setValue(position_ms)
             self._position_slider.blockSignals(False)
+
+    def _update_time_label(self, position_ms: int) -> None:
+        """时间显示：当前播放时长 / 视频总时长（播放/seek/打开新视频均刷新）。"""
+        self._time_label.setText(
+            f"{format_duration(position_ms)} / {format_duration(self._player.duration())}"
+        )
 
     def _on_duration_changed(self, duration_ms: int) -> None:
         self._position_slider.setRange(0, max(0, duration_ms))
