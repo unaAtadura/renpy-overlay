@@ -1,0 +1,10 @@
+视频编辑窗口切换 PyAV 自管播放引擎，根治 seek 花屏与卡死
+
+- 新增 av_player 引擎：worker 线程单遍 demux 分流解码（视频帧转 QImage 投递、
+  音频重采样流送 QAudioSink），seek 关键帧定位+逐帧解码到目标，最新请求胜出
+- 移除 QMediaPlayer/QVideoSink 解码管线与 seek 静默期；保留 UI 层合并节流/
+  目标累加/兜底 timer/活性心跳
+- 步退/步进跨度 5 秒改 1 秒（含 CLI/README 文案与测试同步）
+- 修复 av19 Plane 无 to_bytes（ctypes 指针拷贝）、decode 生成器互吞包
+  （单遍分流）、audio_chunk 未连接与 sink 未启动（播放无声）等缺陷
+- 新增引擎离线测试 19 项；窗口纯函数测试同步适配

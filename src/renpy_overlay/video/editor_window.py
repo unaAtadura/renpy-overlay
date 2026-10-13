@@ -4,7 +4,7 @@
     视频播放窗口（暂停时左键单击放大该帧，见 :mod:`.frame_viewer`）
     进度条（拖拽 + 单击跳转；打开新视频默认暂停）
     音量条（拖拽 + 滚轮线性改变；打开新视频默认最小静音）
-    步退5秒 / 上一帧 / 暂停播放 / 下一帧 / 步进5秒（按钮组）
+    步退1秒 / 上一帧 / 暂停播放 / 下一帧 / 步进1秒（按钮组）
     定位起点（label + 帧号文本框 + 捕获 + 跳转）
     定位终点（同上）
     语音识别按钮（三态提示显示在窗口内状态标签）
@@ -14,8 +14,24 @@
 播放位置、终点允许早于起点（片段整理在 ASR 链路完成）；帧率取媒体元数据
 （读不到回退 30fps），帧号 ↔ 毫秒按帧率换算。
 
+播放引擎：解码由 :mod:`.av_player` 自管完成（PyAV worker 线程确定性
+解码，帧转 QImage 后投递主线程）——QMediaPlayer 的 FFmpeg 后端在连续
+seek 下产出抢占态坏帧（花屏）且 toImage 慢帧风暴独占主线程（卡死，
+实测见 logs/renpy_overlay_20261013_072050.log），本窗口已整体切换引擎。
+
+稳定性防护：全部 seek（按钮/文本框/拖拽）经合并节流——窗口内只挂起最新
+目标，由兜底 QTimer（按钮/文本框 250ms 专用窗口）或 sliderReleased（拖拽
+150ms 窗口）落定；连点步进基于「挂起/最近请求目标」累加（position() 落定
+后异步更新，直接读它会重复 seek 同一目标，实测）。引擎侧 worker 串行
+消费 seek（最新胜出、中间帧不投递），花屏与卡死从机制上消除。
+
+引擎活性心跳：每 2s 输出帧/位置事件计数（DEBUG）。冻结判别器——主线程
+冻结则心跳日志消失（真空窗口即冻结时长）；引擎挂起则心跳仍在但帧/位置
+计数持续为 0，两类情况可区分。
+
 离线测试约定：几何与播放器交互不构造真实 QWidget，本模块的换算/解析/
-取值纯函数直接单测；窗口类依赖 QMediaPlayer 等 Qt Multimedia，仅人工联测。
+取值纯函数直接单测；窗口类依赖 av_player 引擎（av 解码/QAudioSink 链路），
+仅人工联测。
 """
 
 from __future__ import annotations
@@ -24,9 +40,8 @@ import logging
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage
-from PyQt6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoSink
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -38,18 +53,25 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .av_player import DEFAULT_FPS, AvVideoPlayer, PlaybackState
+
 logger = logging.getLogger("renpy_overlay.video.editor_window")
 
-#: 帧率回退值：媒体元数据未提供 VideoFrameRate 时的帧步进取值
-DEFAULT_FPS = 30.0
-#: 步退/步进的跨度（毫秒）
-STEP_MS = 5000
+#: 步退/步进的跨度（毫秒）：按钮文案「步退1秒/步进1秒」与此一致
+STEP_MS = 1000
 #: 拖拽 seek 节流窗口（毫秒）：sliderMoved 高频触发时距上次真实 seek 不足
 #: 该窗口则挂起（FFmpeg 后端 seek 是重操作，逐事件 seek 的风暴会撕裂画面
 #: 甚至拖垮主线程），最终位置由 sliderReleased 落定
 SEEK_THROTTLE_MS = 150
-#: 取帧最小间隔（毫秒）：videoFrameChanged 按 30fps 节流 toImage 大帧拷贝
-FRAME_MIN_INTERVAL_MS = 33
+#: 按钮/文本框 seek 的专用节流窗口（毫秒）：比拖拽 150ms 更宽——150ms 窗口
+#: + 180ms 兜底实测仍以 ~200ms 间隔产生连续 seek 流，FFmpeg 后端暂停态长
+#: GOP seek 持续抢占即花屏；放宽到 250ms 给解码留出完成窗口。本值兼作兜底
+#: QTimer 周期：超时必已过窗、挂起目标必落定
+BUTTON_SEEK_THROTTLE_MS = 250
+#: 后端活性心跳周期（毫秒）：定时输出帧/位置事件计数。
+#: 冻结判别器——主线程冻结时心跳日志消失（真空窗口即冻结时长）；后端
+#: 挂起时主线程存活但帧/位置计数持续为 0，两类情况可区分
+LIVENESS_HEARTBEAT_MS = 2000
 #: 音量滚轮的单次步进（0-100 刻度）
 VOLUME_WHEEL_STEP = 5
 
@@ -103,31 +125,12 @@ def max_frame_for(duration_ms: int, fps: float) -> int:
     return ms_to_frame(duration_ms, fps)
 
 
-def fps_from_metadata(numeric_value) -> float:
-    """媒体元数据帧率 → fps（纯函数，离线测试用）：非法/缺失回退 30fps。"""
-    try:
-        value = float(numeric_value)
-    except (TypeError, ValueError):
-        return DEFAULT_FPS
-    return value if value > 0 else DEFAULT_FPS
-
-
 def should_seek_now(
     now_ms: float, last_seek_ms: float, throttle_ms: int = SEEK_THROTTLE_MS
 ) -> bool:
     """拖拽 seek 节流判定（纯函数，离线测试用）：距上次真实 seek 不足节流
     窗口则挂起本次请求；``last_seek_ms < 0`` 表示从未 seek（首拍必放行）。"""
     return last_seek_ms < 0 or now_ms - last_seek_ms >= throttle_ms
-
-
-def should_accept_frame(
-    now_ms: float,
-    last_frame_ms: float,
-    min_interval_ms: int = FRAME_MIN_INTERVAL_MS,
-) -> bool:
-    """取帧节流判定（纯函数，离线测试用）：距上次取帧不足最小间隔则跳过；
-    ``last_frame_ms < 0`` 表示从未取帧（首帧必收）。"""
-    return last_frame_ms < 0 or now_ms - last_frame_ms >= min_interval_ms
 
 
 def slider_value_from_click(pos_x: float, width: float, maximum: int) -> int:
@@ -142,6 +145,25 @@ def volume_from_wheel(delta_y: int, current: int, step: int = VOLUME_WHEEL_STEP)
     """音量条滚轮步进（纯函数）：上滚增大、下滚减小，钳到 [0, 100]。"""
     direction = 1 if delta_y > 0 else -1
     return max(0, min(100, current + direction * step))
+
+
+class _LivenessStats:
+    """引擎活性统计：帧/位置事件计数（心跳打点用）。
+
+    仅在主线程访问（信号槽与心跳 timer 同线程），无需加锁；供日志判别
+    「主线程冻结（心跳消失）」与「引擎挂起（心跳在、计数恒 0）」。
+    """
+
+    def __init__(self) -> None:
+        self.frame_count = 0  # frame_ready 实际上屏帧数
+        self.frame_skip_count = 0  # 保留字段：引擎不跳帧，恒 0（口径兼容）
+        self.position_count = 0  # position_changed 次数
+
+    def reset(self) -> None:
+        """心跳打点后清零，进入下一个统计窗口。"""
+        self.frame_count = 0
+        self.frame_skip_count = 0
+        self.position_count = 0
 
 
 # ---------------------------------------------------------------- 窗口
@@ -216,7 +238,7 @@ class _VolumeSlider(QSlider):
 
 
 class _VideoCanvas(QWidget):
-    """视频播放区：QVideoSink 帧绘制 + 暂停态单击放大当前帧。"""
+    """视频播放区：引擎帧投递绘制 + 暂停态单击放大当前帧。"""
 
     def __init__(self, on_frame_click, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -278,6 +300,7 @@ class VideoEditorWindow(QWidget):
         frame_viewer_factory=None,
         on_asr_request=None,
         clock_ms=None,
+        player_factory=None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("视频编辑")
@@ -304,23 +327,33 @@ class VideoEditorWindow(QWidget):
         #: 界面看不到"，实测）。
         self._frame_viewer = None
 
-        # ---- 播放器（Qt Multimedia）：默认暂停 + 音量 0（静音，需求） ----------
-        self._player = QMediaPlayer(self)
-        self._audio_output = QAudioOutput(self)
-        self._audio_output.setVolume(0.0)
-        self._player.setAudioOutput(self._audio_output)
-        self._fps = DEFAULT_FPS
-        # 解码器/后端异常只记日志（可见性），不影响主线程与其它功能
-        self._player.errorOccurred.connect(
-            lambda error, text="": logger.warning("媒体播放错误（%s）：%s", error, text)
+        # ---- 播放引擎（av_player）：默认暂停 + 音量 0（静音，需求） ------------
+        #: 引擎工厂（离线测试 stub；默认 AvVideoPlayer，解码在 worker 线程）
+        self._player = player_factory(self) if player_factory is not None else AvVideoPlayer(self)
+        self._player.open_failed.connect(
+            lambda text: logger.warning("媒体打开失败：%s", text)
         )
-        #: 毫秒单调钟（构造注入，离线测试可控）：拖拽 seek 节流与取帧节流的时钟
+        self._fps = DEFAULT_FPS
+        #: 毫秒单调钟（构造注入，离线测试可控）：拖拽 seek 节流的时钟
         self._clock_ms = clock_ms or (lambda: time.monotonic() * 1000.0)
         #: 拖拽 seek 节流状态：上次真实 seek 时刻与挂起中的最终位置
         self._last_seek_ms = -1.0
         self._pending_seek: int | None = None
-        #: 取帧节流状态：上次取帧时刻
-        self._last_frame_ms = -1.0
+        #: 最近一次 seek 请求的目标（挂起与已落定均算）：连点步进的累加基准。
+        #: position() 在落定后异步更新，直接读它连点会重复算出同一目标（实测
+        #: 连续两次落定同一位置）；位置回放追平（差 ≤ 一帧）或用户拖拽后失效
+        self._last_target_ms: int | None = None
+        #: 挂起 seek 的兜底落定 timer（按钮/文本框 seek 无 sliderReleased 兜底）
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setSingleShot(True)
+        self._pending_timer.setInterval(BUTTON_SEEK_THROTTLE_MS)
+        self._pending_timer.timeout.connect(self._on_pending_timer_timeout)
+        #: 引擎活性统计与心跳（冻结/挂起判别，见 _log_liveness）
+        self._liveness = _LivenessStats()
+        self._liveness_timer = QTimer(self)
+        self._liveness_timer.setInterval(LIVENESS_HEARTBEAT_MS)
+        self._liveness_timer.timeout.connect(self._log_liveness)
+        self._liveness_timer.start()
 
         # ---- 布局（需求自上而下） ----------------------------------------------
         layout = QVBoxLayout(self)
@@ -337,10 +370,8 @@ class VideoEditorWindow(QWidget):
 
         self._canvas = _VideoCanvas(self._open_frame_viewer)
         layout.addWidget(self._canvas, stretch=1)
-        # QVideoSink 取帧自绘（暂停帧放大需要 QImage；播放区即画布）
-        self._video_sink = QVideoSink(self)
-        self._player.setVideoSink(self._video_sink)
-        self._video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
+        # 引擎帧投递自绘（暂停帧放大需要 QImage；播放区即画布）
+        self._player.frame_ready.connect(self._on_frame_ready)
 
         self._position_slider = _ClickableSlider(Qt.Orientation.Horizontal)
         self._position_slider.setRange(0, 0)
@@ -356,11 +387,11 @@ class VideoEditorWindow(QWidget):
 
         controls_row = QHBoxLayout()
         for text, handler in (
-            ("步退5秒", lambda: self._seek_by(-STEP_MS)),
+            ("步退1秒", lambda: self._seek_by(-STEP_MS)),
             ("上一帧", lambda: self._seek_by(-frame_duration_ms(self._fps))),
             (PLAY_BUTTON_TEXT_PAUSED, self._toggle_play),
             ("下一帧", lambda: self._seek_by(frame_duration_ms(self._fps))),
-            ("步进5秒", lambda: self._seek_by(STEP_MS)),
+            ("步进1秒", lambda: self._seek_by(STEP_MS)),
         ):
             button = QPushButton(text)
             button.clicked.connect(handler)
@@ -379,11 +410,10 @@ class VideoEditorWindow(QWidget):
         self._status_label = QLabel("")
         layout.addWidget(self._status_label)
 
-        # ---- 播放器信号 ---------------------------------------------------------
-        self._player.positionChanged.connect(self._on_position_changed)
-        self._player.durationChanged.connect(self._on_duration_changed)
-        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
-        self._player.metaDataChanged.connect(self._on_meta_changed)
+        # ---- 引擎信号 ------------------------------------------------------------
+        self._player.position_changed.connect(self._on_position_changed)
+        self._player.state_changed.connect(self._on_playback_state_changed)
+        self._player.media_opened.connect(self._apply_media_info)
 
         logger.debug("视频编辑窗口已创建")
 
@@ -403,50 +433,92 @@ class VideoEditorWindow(QWidget):
 
     def open_path(self, path: str) -> None:
         """打开视频（需求：文件存在才打开）；打开后暂停、进度归零、音量静音。"""
+        from .av_media import av_available  # 局部导入：与录制/ASR 同一降级口径
+
         target = Path(path.strip().strip('"'))
         if not target.is_file():
             logger.info("视频文件不存在，忽略打开请求：%s", target)
             self._status_label.setText("文件不存在")
             return
+        if not av_available():
+            logger.warning("PyAV 不可用（import 失败），视频编辑降级")
+            self._status_label.setText("PyAV 不可用，视频功能降级")
+            return
         self._path_edit.setText(str(target))
-        self._player.setSource(QUrl.fromLocalFile(str(target)))
-        self._player.pause()
+        self._last_target_ms = None  # 新视频：步进累加基准失效
+        self._player.open(str(target))  # 引擎：worker 打开，完成即暂停态+首帧
         self._volume_slider.setValue(0)  # 最小静音（需求）
         logger.info("已打开视频（暂停）：%s", target)
 
     # ---- 播放控制 ---------------------------------------------------------------
 
     def _toggle_play(self) -> None:
-        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self._player.playbackState() == PlaybackState.Playing:
             self._player.pause()
         else:
             self._player.play()
 
     def _seek_by(self, delta_ms: int) -> None:
-        self._player.setPosition(
-            max(0, self._player.position() + delta_ms) if self._player.source().isValid() else 0
-        )
+        # 连点累加基准：挂起目标 → 最近请求目标 → 播放位置。position() 在
+        # seek 落定后异步更新，直接读它连点会重复算出同一目标（实测连续两次
+        # 落定同一位置），点 N 次也退不足 N 秒
+        if self._pending_seek is not None:
+            base = self._pending_seek
+        elif self._last_target_ms is not None:
+            base = self._last_target_ms
+        else:
+            base = self._player.position()
+        logger.debug("步进请求 delta=%+dms（base=%d）", delta_ms, base)
+        self._seek_to(base + delta_ms)
+
+    def _seek_to(self, position_ms: int, source: str = "button") -> None:
+        """统一 seek 合并入口：节流窗口内的连续请求只挂起最新目标，由兜底
+        timer 落定（拖拽路径由 sliderReleased 落定）。
+
+        按钮路径原先直连 setPosition：步退/步进改 1 秒跨度后连点频率大增，
+        高频 seek 风暴触发 FFmpeg 后端抢占，解码帧交错花屏 + 主线程
+        toImage 竞争卡死（实测）；经合并节流后任意时刻在途真实 seek 至多一次。
+        """
+        if not self._player.hasMedia():
+            return
+        self._pending_seek = max(0, position_ms)
+        self._last_target_ms = self._pending_seek
+        now = self._clock_ms()
+        if should_seek_now(now, self._last_seek_ms, BUTTON_SEEK_THROTTLE_MS):
+            self._commit_pending_seek(now)
+        else:
+            logger.debug("seek 挂起（source=%s target=%dms）", source, self._pending_seek)
+        self._pending_timer.start()
+
+    def _commit_pending_seek(self, now: float | None = None) -> None:
+        """落定挂起 seek（按钮兜底 timer / 拖拽 sliderReleased 共用出口）。
+
+        引擎 setPosition 为异步投递（最新胜出，worker 串行消费），耗时无
+        诊断意义；完成帧与位置回正由引擎信号异步回报。
+        """
+        if self._pending_seek is None:
+            return
+        target, self._pending_seek = self._pending_seek, None
+        self._pending_timer.stop()
+        self._last_seek_ms = self._clock_ms() if now is None else now
+        self._last_target_ms = target  # 步进累加基准更新为本次落定目标
+        self._player.setPosition(target)
+        logger.debug("seek 落定 → %dms", target)
+
+    def _on_pending_timer_timeout(self) -> None:
+        if self._scrubbing:  # 拖拽中由 sliderReleased 落定，timer 不抢
+            return
+        self._commit_pending_seek()
 
     def _on_playback_state_changed(self, state) -> None:
-        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        playing = state == PlaybackState.Playing
         self._play_button.setText(PLAY_BUTTON_TEXT_PLAYING if playing else PLAY_BUTTON_TEXT_PAUSED)
 
-    def _on_meta_changed(self) -> None:
-        """帧率取媒体元数据（需求：帧位置精确到帧）；读不到回退 30fps。
-
-        PyQt6 的 metaDataChanged 信号无参数：槽必须无参，元数据经
-        :meth:`QMediaPlayer.metaData` 主动读取（带参槽会 TypeError
-        使进程崩溃，实测见 logs/renpy_overlay_20261011_162520.log）。
-        """
-        metadata = self._player.metaData()
-        value = None
-        if metadata is not None:
-            try:
-                value = metadata.numericValue(QMediaMetaData.Key.VideoFrameRate)
-            except Exception:  # pragma: no cover - 元数据缺失/后端差异
-                value = None
-        self._fps = fps_from_metadata(value)
-        logger.debug("视频帧率：%s fps", self._fps)
+    def _apply_media_info(self, info) -> None:
+        """引擎元数据回报：帧率（帧位置精确到帧）与时长（进度条范围）。"""
+        self._fps = info.fps
+        self._on_duration_changed(info.duration_ms)
+        logger.debug("视频元数据：fps=%s duration=%dms", info.fps, info.duration_ms)
 
     # ---- 进度条 -----------------------------------------------------------------
 
@@ -455,10 +527,8 @@ class VideoEditorWindow(QWidget):
 
     def _on_slider_released(self) -> None:
         self._scrubbing = False
-        # 拖拽终点保证落定：节流期间挂起的最终位置补一次 seek
-        if self._pending_seek is not None:
-            self._player.setPosition(self._pending_seek)
-            self._pending_seek = None
+        # 拖拽终点保证落定：节流期间挂起的最终位置补一次 seek（共用出口）
+        self._commit_pending_seek()
 
     def _on_slider_moved(self, value: int) -> None:
         """拖拽进度：节流 seek（高频 sliderMoved 不逐个触发 FFmpeg seek）。
@@ -471,9 +541,16 @@ class VideoEditorWindow(QWidget):
         now = self._clock_ms()
         if should_seek_now(now, self._last_seek_ms):
             self._last_seek_ms = now
+            self._last_target_ms = None  # 用户拖拽主动定位：步进累加基准失效
             self._player.setPosition(value)
+            logger.debug("拖拽 seek → %dms", value)
 
     def _on_position_changed(self, position_ms: int) -> None:
+        self._liveness.position_count += 1
+        if self._last_target_ms is not None and abs(
+            position_ms - self._last_target_ms
+        ) <= frame_duration_ms(self._fps):
+            self._last_target_ms = None  # 位置回放已追平请求目标：步进改以实际位置为基准
         if not self._scrubbing:
             self._position_slider.blockSignals(True)
             self._position_slider.setValue(position_ms)
@@ -485,7 +562,7 @@ class VideoEditorWindow(QWidget):
     # ---- 音量条 -----------------------------------------------------------------
 
     def _on_volume_changed(self, value: int) -> None:
-        self._audio_output.setVolume(value / 100.0)
+        self._player.setVolume(value / 100.0)
 
     # ---- 起止点（捕获 / 跳转 / 文本框回车） ---------------------------------------
 
@@ -516,7 +593,7 @@ class VideoEditorWindow(QWidget):
         if frame is None:
             logger.info("帧号越界或非法，忽略跳转：%r", frame_edit.text())
             return
-        self._player.setPosition(frame_to_ms(frame, self._fps))
+        self._seek_to(frame_to_ms(frame, self._fps), "marker")
 
     # ---- 帧放大（暂停态单击播放区） -------------------------------------------------
 
@@ -546,7 +623,7 @@ class VideoEditorWindow(QWidget):
 
     def _open_frame_viewer(self) -> None:
         """暂停时单击播放区：放大当前帧（播放中单击忽略，需求）。"""
-        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self._player.playbackState() == PlaybackState.Playing:
             return
         frame = self._canvas.current_frame()
         if frame is None or frame.isNull():
@@ -565,23 +642,25 @@ class VideoEditorWindow(QWidget):
         viewer.show_frame()
         logger.info("已打开帧放大窗（帧号 %d）", ms_to_frame(self._player.position(), self._fps))
 
-    def _on_video_frame_changed(self, frame) -> None:
-        """取帧自绘：按最小间隔节流 + 有效性检查 + 异常隔离。
+    def _on_frame_ready(self, image: QImage) -> None:
+        """引擎完成帧上屏（成品 QImage，主线程零解码工作）+ 活性统计。"""
+        self._liveness.frame_count += 1
+        self._canvas.set_frame(image)
 
-        videoFrameChanged 每帧触发，主线程 toImage 大帧拷贝与解码线程竞争
-        是跳转花屏/卡死的诱因之一：节流至 30fps、跳过无效帧、异常帧只记
-        日志不传播。
+    def _log_liveness(self) -> None:
+        """引擎活性心跳（DEBUG）：帧/位置事件计数周期汇总。
+
+        冻结判别器：主线程冻结时本日志消失（真空窗口即冻结时长）；引擎
+        挂起时主线程存活但帧/位置计数持续为 0——两类情况可区分。
         """
-        if not frame.isValid():
-            return
-        now = self._clock_ms()
-        if not should_accept_frame(now, self._last_frame_ms):
-            return
-        self._last_frame_ms = now
-        try:
-            self._canvas.set_frame(frame.toImage())
-        except Exception:  # pragma: no cover - 后端异常帧隔离，不拖垮主线程
-            logger.debug("取帧失败，跳过该帧", exc_info=True)
+        stats = self._liveness
+        logger.debug(
+            "引擎活性：帧=%d 跳过=%d 位置=%d",
+            stats.frame_count,
+            stats.frame_skip_count,
+            stats.position_count,
+        )
+        stats.reset()
 
     # ---- 语音识别 ----------------------------------------------------------------
 

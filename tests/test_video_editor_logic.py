@@ -1,6 +1,6 @@
 """视频编辑纯函数的离线验证：帧率换算、文本解析、单击换算与音量步进。
 
-遵循项目离线测试约定：不构造真实 QWidget（窗口与 QMediaPlayer 交互由
+遵循项目离线测试约定：不构造真实 QWidget（窗口与播放引擎交互由
 人工联测覆盖），仅验证模块级纯函数的换算/解析/边界行为；帧放大窗的
 关闭/复用容错逻辑经 fake 对象绑定未绑定方法验证（不构造真实窗口）。
 """
@@ -12,34 +12,23 @@ import types
 from PyQt6.QtGui import QImage
 
 from renpy_overlay.video.editor_window import (
+    BUTTON_SEEK_THROTTLE_MS,
     DEFAULT_FPS,
-    FRAME_MIN_INTERVAL_MS,
+    LIVENESS_HEARTBEAT_MS,
     SEEK_THROTTLE_MS,
     STEP_MS,
     VideoEditorWindow,
-    fps_from_metadata,
+    _LivenessStats,
     frame_duration_ms,
     frame_to_ms,
     max_frame_for,
     ms_to_frame,
     parse_frame_text,
-    should_accept_frame,
     should_seek_now,
     slider_value_from_click,
     volume_from_wheel,
 )
 from renpy_overlay.video.frame_viewer import MAX_SCALE, MIN_SCALE, next_scale
-
-
-def test_fps_from_metadata_valid_and_fallback():
-    """元数据帧率解析（防回归：PyQt6 metaDataChanged 信号无参，槽内经
-    QMediaPlayer.metaData() 主动读取后交本纯函数换算）。"""
-    assert fps_from_metadata(30.0) == 30.0
-    assert fps_from_metadata(23.976) == 23.976
-    assert fps_from_metadata(0) == DEFAULT_FPS  # 零值回退
-    assert fps_from_metadata(-5) == DEFAULT_FPS  # 非法回退
-    assert fps_from_metadata(None) == DEFAULT_FPS  # 元数据缺失回退
-    assert fps_from_metadata("abc") == DEFAULT_FPS  # 类型非法回退
 
 
 def test_frame_duration_ms_default_and_invalid_fps():
@@ -104,7 +93,30 @@ def test_volume_from_wheel_steps_and_clamps():
 
 
 def test_step_ms_constant():
-    assert STEP_MS == 5000  # 需求：步退/步进 5 秒
+    assert STEP_MS == 1000  # 需求：步退/步进 1 秒
+
+
+def test_liveness_stats_counts_and_reset():
+    """活性统计：计数累加与心跳窗口重置（冻结/挂起判别的数据基础）。"""
+    assert LIVENESS_HEARTBEAT_MS == 2000
+    stats = _LivenessStats()
+    stats.frame_count += 2
+    stats.frame_skip_count += 1
+    stats.position_count += 3
+    stats.reset()
+    assert stats.frame_count == 0
+    assert stats.frame_skip_count == 0
+    assert stats.position_count == 0
+
+
+def test_log_liveness_logs_and_resets():
+    """心跳打点：输出汇总后清零计数（下个窗口从零开始）。"""
+    fake = types.SimpleNamespace(_liveness=_LivenessStats())
+    fake._liveness.frame_count = 4
+    fake._liveness.position_count = 7
+    VideoEditorWindow._log_liveness(fake)
+    assert fake._liveness.frame_count == 0
+    assert fake._liveness.position_count == 0
 
 
 def test_next_scale_zoom_in_out_and_clamp():
@@ -244,14 +256,6 @@ def test_should_seek_now_first_call_and_throttle_window():
     assert SEEK_THROTTLE_MS == 150
 
 
-def test_should_accept_frame_throttle():
-    """取帧节流：首帧必收、最小间隔内跳过、超窗接收。"""
-    assert should_accept_frame(100.0, -1.0) is True  # 首帧
-    assert should_accept_frame(110.0, 100.0) is False  # 10ms < 33ms
-    assert should_accept_frame(133.0, 100.0) is True  # 33ms 达到间隔
-    assert FRAME_MIN_INTERVAL_MS == 33
-
-
 class _SeekClock:
     """可控毫秒钟 + setPosition 记录（拖拽 seek 路径的 fake）。"""
 
@@ -264,13 +268,18 @@ class _SeekClock:
 
 
 def _seek_fake(clock: _SeekClock) -> types.SimpleNamespace:
-    return types.SimpleNamespace(
+    fake = types.SimpleNamespace(
         _player=clock.player(),
         _clock_ms=lambda: clock.now,
         _last_seek_ms=-1.0,
         _pending_seek=None,
         _scrubbing=True,
+        _pending_timer=_StubTimer(),
     )
+    fake._commit_pending_seek = lambda *args: (
+        VideoEditorWindow._commit_pending_seek(fake, *args)
+    )
+    return fake
 
 
 def test_slider_moved_throttles_seek_and_keeps_pending():
@@ -322,24 +331,170 @@ def test_drag_sequence_press_move_move_release():
     assert fake._pending_seek is None and fake._scrubbing is False
 
 
-def test_frame_changed_throttles_and_skips_invalid():
-    """取帧节流：无效帧跳过；最小间隔内的后续帧跳过（主线程 toImage 减负）。"""
+# ---------------------------------------------------------------- 统一 seek 合并（按钮/文本框路径）
+
+
+class _StubTimer:
+    """QTimer 的轻量 stub（记录 start/stop 调用，不进事件循环）。"""
+
+    def __init__(self):
+        self.started = 0
+        self.stopped = 0
+
+    def start(self):
+        self.started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+
+def _seek_to_fake(clock: _SeekClock, timer: _StubTimer, *, valid_source: bool = True):
+    fake = types.SimpleNamespace(
+        _player=types.SimpleNamespace(
+            setPosition=lambda p: clock.seeks.append(p),
+            position=lambda: 400_000,
+            hasMedia=lambda: valid_source,
+        ),
+        _clock_ms=lambda: clock.now,
+        _last_seek_ms=-1.0,
+        _pending_seek=None,
+        _last_target_ms=None,
+        _scrubbing=False,
+        _pending_timer=timer,
+    )
+    fake._commit_pending_seek = lambda *args: (
+        VideoEditorWindow._commit_pending_seek(fake, *args)
+    )
+    fake._seek_to = lambda *args, **kwargs: VideoEditorWindow._seek_to(fake, *args, **kwargs)
+    return fake
+
+
+def test_seek_to_commits_immediately_on_first_call():
+    """按钮/文本框 seek 首拍立即真实 seek（原先直连 setPosition 无节流，
+    连点步退触发 seek 风暴花屏卡死；现与拖拽共用合并节流）。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    VideoEditorWindow._seek_to(fake, 12_345)
+    assert clock.seeks == [12_345]
+    assert fake._pending_seek is None
+    assert fake._last_seek_ms == 1000.0  # 记录本次真实 seek 时刻
+    assert timer.started == 1  # 兜底 timer 已启动
+
+
+def test_seek_to_pends_within_throttle_window():
+    """节流窗口内连续 seek：只挂起最新目标，不触发真实 seek。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    VideoEditorWindow._seek_to(fake, 5000)
+    clock.now = 1050.0  # 距首拍 50ms（< 150ms 窗口）
+    VideoEditorWindow._seek_to(fake, 9000)
+    assert clock.seeks == [5000], "窗口内不应重复真实 seek"
+    assert fake._pending_seek == 9000, "挂起目标应更新为最新请求"
+    assert timer.started == 2
+
+
+def test_pending_timer_timeout_commits_latest_target():
+    """兜底 timer 超时落定：挂起的最新目标补一次 seek 并清空。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    VideoEditorWindow._seek_to(fake, 5000)
+    clock.now = 1050.0
+    VideoEditorWindow._seek_to(fake, 9000)  # 挂起 9000
+    clock.now = 1200.0
+    VideoEditorWindow._on_pending_timer_timeout(fake)
+    assert clock.seeks == [5000, 9000]
+    assert fake._pending_seek is None
+    assert fake._last_seek_ms == 1200.0
+
+
+def test_pending_timer_timeout_skips_while_scrubbing():
+    """拖拽中 timer 超时不抢落定（由 sliderReleased 落定）。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    fake._scrubbing = True
+    fake._pending_seek = 7000
+    VideoEditorWindow._on_pending_timer_timeout(fake)
+    assert clock.seeks == []
+    assert fake._pending_seek == 7000
+
+
+def test_seek_to_ignores_without_valid_source():
+    """未打开视频：不 seek、不挂起、不启动 timer。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer, valid_source=False)
+    VideoEditorWindow._seek_to(fake, 5000)
+    assert clock.seeks == []
+    assert fake._pending_seek is None
+    assert timer.started == 0
+
+
+def test_seek_by_accumulates_pending_target():
+    """连点步进基于「挂起/最近请求目标」累加：position() 读数陈旧时不再
+    重复 seek 同一目标（实测连续两次落定同一位置），点 N 次累计 N 秒。"""
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    VideoEditorWindow._seek_by(fake, -1000)  # 首拍：base=position()=400000，立即落定
+    assert clock.seeks == [399_000]
+    clock.now = 1050.0  # 按钮窗口内：挂起
+    VideoEditorWindow._seek_by(fake, -1000)  # base=最近请求目标 399000 → 398000
+    assert fake._pending_seek == 398_000, "累加基准应为最近请求目标而非陈旧 position()"
+    clock.now = 1350.0
+    VideoEditorWindow._on_pending_timer_timeout(fake)  # 兜底落定累加结果
+    assert clock.seeks == [399_000, 398_000]
+
+
+def test_seek_to_uses_widened_button_window():
+    """按钮 seek 专用 250ms 窗口：距上次 seek 200ms 的新请求仍挂起（拖拽
+    150ms 窗口此时会放行），抑制连点期间的持续 seek 流（花屏残留实测）。"""
+    assert BUTTON_SEEK_THROTTLE_MS == 250
+    clock = _SeekClock()
+    timer = _StubTimer()
+    fake = _seek_to_fake(clock, timer)
+    VideoEditorWindow._seek_to(fake, 5000)  # 首拍落定，last_seek_ms=1000
+    clock.now = 1200.0  # 距上次 seek 200ms（150 < 200 < 250）
+    VideoEditorWindow._seek_to(fake, 6000)
+    assert clock.seeks == [5000], "按钮窗口 250ms 内应挂起"
+    assert fake._pending_seek == 6000
+
+
+def test_last_target_invalidates_when_position_catches_up():
+    """位置回放追平请求目标（差 ≤ 一帧）后失效：后续步进改以实际位置为基准。
+
+    fake 最小依赖：_on_position_changed 只触碰 _last_target_ms/_fps/
+    _scrubbing/_position_slider（离线测试约定不构造真实 QWidget）。
+    """
+    slider = types.SimpleNamespace(
+        blockSignals=lambda *_: None,
+        setValue=lambda *_: None,
+    )
+    fake = types.SimpleNamespace(
+        _last_target_ms=398_000,
+        _fps=DEFAULT_FPS,
+        _scrubbing=False,
+        _position_slider=slider,
+        _liveness=_LivenessStats(),
+    )
+    VideoEditorWindow._on_position_changed(fake, 397_000)  # 差 1000ms：不追平
+    assert fake._last_target_ms == 398_000
+    assert fake._liveness.position_count == 1  # 活性统计同步累加
+    VideoEditorWindow._on_position_changed(fake, 398_010)  # 差 10ms ≤ 33ms：追平失效
+    assert fake._last_target_ms is None
+
+
+def test_frame_ready_updates_canvas_and_liveness():
+    """引擎完成帧上屏：canvas 接收成品 QImage，活性帧计数同步累加。"""
     frames: list = []
-    clock = types.SimpleNamespace(now=1000.0)
     fake = types.SimpleNamespace(
         _canvas=types.SimpleNamespace(set_frame=lambda img: frames.append(img)),
-        _clock_ms=lambda: clock.now,
-        _last_frame_ms=-1.0,
+        _liveness=_LivenessStats(),
     )
-    valid = types.SimpleNamespace(isValid=lambda: True, toImage=lambda: "IMG")
-    invalid = types.SimpleNamespace(isValid=lambda: False)
-    VideoEditorWindow._on_video_frame_changed(fake, invalid)
-    assert frames == [], "无效帧应被跳过"
-    VideoEditorWindow._on_video_frame_changed(fake, valid)
-    assert frames == ["IMG"]  # 首帧必收
-    clock.now = 1010.0  # 10ms < 33ms：节流窗口内
-    VideoEditorWindow._on_video_frame_changed(fake, valid)
-    assert frames == ["IMG"], "节流窗口内的帧应跳过（避免主线程 toImage 风暴）"
-    clock.now = 1033.0
-    VideoEditorWindow._on_video_frame_changed(fake, valid)
-    assert frames == ["IMG", "IMG"]
+    VideoEditorWindow._on_frame_ready(fake, "IMG")
+    VideoEditorWindow._on_frame_ready(fake, "IMG2")
+    assert frames == ["IMG", "IMG2"]
+    assert fake._liveness.frame_count == 2
