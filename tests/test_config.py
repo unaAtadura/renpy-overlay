@@ -44,6 +44,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "stream_window_line_spacing": 1.15,
         "stream_window_title_font_size": 12,
         "stream_window_title_gap": 2,
+        "translate_window_style": 1,
         "chat_window_width": 1760,
         "chat_window_height": 200,
         "screenshot_compress_percent": 10,
@@ -98,6 +99,7 @@ def test_default_file_key_order_matches_target(tmp_path):
         "stream_window_line_spacing",
         "stream_window_title_font_size",
         "stream_window_title_gap",
+        "translate_window_style",
         "chat_window_width",
         "chat_window_height",
         "screenshot_compress_percent",
@@ -693,6 +695,39 @@ def test_stream_window_size_loaded_and_fallback(tmp_path):
     assert config.load_config(target).stream_window_height == 200  # 低于下限 80
     target.write_text(json.dumps({"stream_window_width": 100}), encoding="utf-8")
     assert config.load_config(target).stream_window_width == 1760  # 低于下限 240
+
+
+# ---------------------------------------------------------- 流式窗口样式开关
+
+
+def test_translate_window_style_defaults_loaded(tmp_path):
+    """缺键回退默认 1（= 当前样式，行为不变）。"""
+    target = tmp_path / "config.json"
+    target.write_text("{}", encoding="utf-8")
+    loaded = config.load_config(target)
+    assert loaded.translate_window_style == 1
+    assert loaded.translate_window_style == config.DEFAULT_TRANSLATE_WINDOW_STYLE
+
+
+def test_translate_window_style_valid_values_loaded(tmp_path):
+    """合法值 2 生效；整值浮点（2.0）等价整数 2。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"translate_window_style": 2}), encoding="utf-8")
+    assert config.load_config(target).translate_window_style == 2
+    target.write_text(json.dumps({"translate_window_style": 2.0}), encoding="utf-8")
+    assert config.load_config(target).translate_window_style == 2
+    target.write_text(json.dumps({"translate_window_style": 1}), encoding="utf-8")
+    assert config.load_config(target).translate_window_style == 1
+
+
+def test_translate_window_style_invalid_falls_back(tmp_path, caplog):
+    """非整数 / 非 1/2 / bool 等非法值一律回退 1 并记警告日志。"""
+    target = tmp_path / "config.json"
+    for bad in (0, 3, -1, 1.5, "2", True, False, None, [2]):
+        target.write_text(json.dumps({"translate_window_style": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.translate_window_style == 1, f"{bad!r} 应回退默认"
+        assert "translate_window_style" in caplog.text
 
 
 # ---------------------------------------------------------------- AI 对话窗口

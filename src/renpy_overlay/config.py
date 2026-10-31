@@ -24,6 +24,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "stream_window_line_spacing": 1.45, # 流式正文行距倍数
       "stream_window_title_font_size": 8, # 流式标题窗字号（像素）
       "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
+      "translate_window_style": 1,        # 流式输出窗口样式（1=当前样式；2=半透明黑色悬浮窗新样式）
       "chat_window_width": 1760,          # AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
       "chat_window_height": 200,          # AI 对话窗高度（像素；缺省回退流式正文窗高度）
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
@@ -90,6 +91,8 @@ DEFAULT_STREAM_WINDOW_FONT_SIZE = 16  # 正文窗字号（像素）
 DEFAULT_STREAM_WINDOW_LINE_SPACING = 1.15  # 正文行距倍数
 DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 12  # 标题窗字号（像素）
 DEFAULT_STREAM_WINDOW_TITLE_GAP = 2  # 标题窗与正文窗间距（像素）
+#: 流式输出窗口样式：1=当前样式（默认）；2=半透明黑色悬浮窗新样式；非法值回退 1
+DEFAULT_TRANSLATE_WINDOW_STYLE = 1
 #: AI 对话窗尺寸：缺省时使用流式正文窗的（配置后）值，默认常量同源
 DEFAULT_CHAT_WINDOW_WIDTH = DEFAULT_STREAM_WINDOW_WIDTH
 DEFAULT_CHAT_WINDOW_HEIGHT = DEFAULT_STREAM_WINDOW_HEIGHT
@@ -164,6 +167,7 @@ class AppConfig:
     stream_window_line_spacing: float = DEFAULT_STREAM_WINDOW_LINE_SPACING
     stream_window_title_font_size: int = DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE
     stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
+    translate_window_style: int = DEFAULT_TRANSLATE_WINDOW_STYLE
     # AI 对话（尺寸缺省时回退流式正文窗的配置值）
     chat_window_width: int = DEFAULT_CHAT_WINDOW_WIDTH
     chat_window_height: int = DEFAULT_CHAT_WINDOW_HEIGHT
@@ -241,6 +245,7 @@ def _write_defaults(target: Path) -> None:
         "stream_window_line_spacing": DEFAULT_STREAM_WINDOW_LINE_SPACING,
         "stream_window_title_font_size": DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
+        "translate_window_style": DEFAULT_TRANSLATE_WINDOW_STYLE,
         "chat_window_width": DEFAULT_CHAT_WINDOW_WIDTH,
         "chat_window_height": DEFAULT_CHAT_WINDOW_HEIGHT,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
@@ -341,6 +346,25 @@ def _read_positive_float(raw: dict, key: str, default: float, minimum: float) ->
         logger.warning("%s 低于下限 %s（%r），回退默认 %s", key, minimum, value, default)
         return default
     return float(value)
+
+
+def _read_window_style(raw: dict) -> int:
+    """窗口样式字段校验（仅 1/2）：类型不对或取值非法 → 回退默认 1。"""
+    value = raw.get("translate_window_style", DEFAULT_TRANSLATE_WINDOW_STYLE)
+    # bool 是 int 子类，True/False 不算合法数字；整值浮点（2.0）等价整数
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or value != int(value)
+        or int(value) not in (1, 2)
+    ):
+        logger.warning(
+            "translate_window_style 非法（%r，仅支持 1/2），回退默认 %d",
+            value,
+            DEFAULT_TRANSLATE_WINDOW_STYLE,
+        )
+        return DEFAULT_TRANSLATE_WINDOW_STYLE
+    return int(value)
 
 
 def _read_percent(raw: dict, key: str, default: int) -> int:
@@ -460,6 +484,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         stream_window_title_gap=_read_non_negative_int(
             raw, "stream_window_title_gap", DEFAULT_STREAM_WINDOW_TITLE_GAP
         ),
+        translate_window_style=_read_window_style(raw),
         # 对话窗尺寸缺省（键不存在或类型非法）时回退流式正文窗的配置值（需求）
         chat_window_width=_read_positive_int(
             raw, "chat_window_width", stream_width, MIN_STREAM_WINDOW_WIDTH
@@ -521,7 +546,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
-        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d），"
+        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d，style=%d），"
         "chat_window（size=%dx%d），"
         "screenshot（compress=%d%%），"
         "vision（base_url=%s，model=%s，api_key=%s），"
@@ -547,6 +572,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.stream_window_line_spacing,
         app_config.stream_window_title_font_size,
         app_config.stream_window_title_gap,
+        app_config.translate_window_style,
         app_config.chat_window_width,
         app_config.chat_window_height,
         app_config.screenshot_compress_percent,
