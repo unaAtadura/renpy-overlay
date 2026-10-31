@@ -109,9 +109,13 @@ class StreamTranslateMixin:
             logger.warning("翻译返回空文本，保持当前显示")
             self._update_title("翻译失败")
             return
-        logger.info("翻译完成（seq=%s），译文已流式呈现（%d 字）", seq, len(text))
-        if self._stream_seq != seq:  # 兜底：全程无有效增量时整段补显
+        if self._stream_seq != seq or self._config.translate_window_style == 2:
+            # 兜底：全程无有效增量时整段补显；style=2 整段汇总上屏（已确认
+            # 决议：增量不入正文，完成后整段替换显示）
             self._display_text((who + "\n" if who else "") + text + "\n")
+            logger.info("翻译完成（seq=%s），译文整段上屏（%d 字）", seq, len(text))
+        else:
+            logger.info("翻译完成（seq=%s），译文已流式呈现（%d 字）", seq, len(text))
         self._update_title("翻译完成")
         # 成功后同步写入两级缓存（手动 / 自动一致）：内存覆盖视为新写入，
         # 数据库 UPSERT 覆盖同一原文的旧译文；失败由各自模块内部降级并记日志

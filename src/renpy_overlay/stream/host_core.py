@@ -50,7 +50,7 @@ from .constants import (
 )
 from .geometry import DOCK_CHOICES
 from .visual import TITLE_GLOW_FACTOR
-from .windows import BodyWindow, TitleWindow
+from .windows_style2 import resolve_window_classes
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -87,12 +87,16 @@ class StreamOverlayCore:
         # 最后一个可见窗口时，默认 quitOnLastWindowClosed 会连带退出整个工具
         # （实测：预构建弹窗点 X 后程序整体退出）
         self._app.setQuitOnLastWindowClosed(False)
-        self._body_window = BodyWindow(
+        # 窗口样式经配置切换（translate_window_style：1=既有透明双窗；
+        # 2=半透明黑色新样式）；两类构造签名与属性面完全兼容，后续
+        # 装配/跟随/交互/显示出口均不感知样式差异
+        title_cls, body_cls = resolve_window_classes(self._config.translate_window_style)
+        self._body_window = body_cls(
             self._config.stream_window_font_size,
             self._config.stream_window_line_spacing,
             host=self,
         )
-        self._title_window = TitleWindow(
+        self._title_window = title_cls(
             self._config.stream_window_title_font_size, host=self
         )
         self._body_window.resize(width, height)
@@ -671,6 +675,11 @@ class StreamOverlayCore:
         seq = payload.get("seq")
         if seq != self._translation_seq:
             logger.debug("翻译增量已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        if self._config.translate_window_style == 2:
+            # style=2 整段汇总上屏（已确认决议）：增量不入正文，整条译文
+            # 收完后由 _handle_translation 整段替换显示（翻译期间正文
+            # 保持上一条内容不变）
             return
         if self._stream_seq != seq:  # 该轮译文的第一个增量：清屏开新流
             self._stream_seq = seq
