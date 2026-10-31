@@ -5,14 +5,20 @@
 控制器状态机（开启前提提示、A 点击首轮/重启轮、周期变化判定、忙碌挂起
 与恢复、本控制器在途不置挂起、B 离开/换区/目标销毁停止、菜单关闭保留
 单击语义、隐藏遥控器不停自动化、快捷键模式退出复位、宿主拒受保持挂起、
-结果回执清在途并回填缓存、装填期提示框压制、注入契约 fail-fast）。
+结果回执清在途并回填缓存、装填期提示框压制、注入契约 fail-fast）；
+以及宿主侧「成功即落库」（stub ScreenshotStore：成功恰写一条，失败/中止/
+忙碌被拒/缓存命中零写入，store 降级/抛错不影响上屏与在途回执）。
 
-真实截图 / win32api / QTimer 均经构造注入替身；图像用 Pillow 现场生成。
+真实截图 / win32api / QTimer 均经构造注入替身；图像用 Pillow 现场生成；
+视觉 API 用 monkeypatch 替换（命中/中止用例一旦被调用即失败）。
 """
 
 from __future__ import annotations
 
+import queue
 import random
+import threading
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
@@ -31,6 +37,8 @@ from renpy_overlay.screenshot.remote_automation import (
     signature_change_ratio,
     signatures_similar,
 )
+from renpy_overlay.stream import screenshot_flow as flow_module
+from renpy_overlay.stream.screenshot_flow import ScreenshotFlowMixin
 
 # ---- 图像替身：确定性生成的测试画面 -------------------------------------------------
 
@@ -585,3 +593,255 @@ def test_shutdown_stops_and_resets():
     assert not h.timer.running
     h.controller.shutdown()  # 幂等
     assert not h.timer.running
+
+
+# ---- 宿主侧「成功即落库」（ScreenshotFlowMixin + stub ScreenshotStore） -------------
+#
+# 需求：自动化翻译成功即入库（与手动截图翻译同规则）；失败/中止/忙碌被拒/
+# 缓存命中一律零写入；store 降级/抛错只降级（上屏与在途回执不受影响）。
+
+
+class _StubStore:
+    """ScreenshotStore 替身：记录成功写入；fail=降级返回 None，explode=抛异常。"""
+
+    def __init__(self, fail: bool = False, explode: bool = False) -> None:
+        self.fail = fail
+        self.explode = explode
+        self.inserts: list[dict] = []
+
+    def insert(self, ts: int, ocr_text: str, img_original: bytes, img_thumbnail: bytes) -> int | None:
+        if self.explode:
+            raise RuntimeError("db exploded")
+        if not self.fail:
+            self.inserts.append(
+                {
+                    "ts": ts,
+                    "ocr_text": ocr_text,
+                    "img_original": img_original,
+                    "img_thumbnail": img_thumbnail,
+                }
+            )
+        return None if self.fail else len(self.inserts)
+
+
+class _StubAutomation:
+    """RemoteAutomationController 替身：记录在途回执（签名, 译文）。"""
+
+    def __init__(self) -> None:
+        self.results: list[tuple[object, str | None]] = []
+
+    def on_translation_result(self, signature: object, text: str | None) -> None:
+        self.results.append((signature, text))
+
+
+class _AutoHost(ScreenshotFlowMixin):
+    """最小宿主替身：仅自动化提交/收尾路径依赖的属性与方法（不建 QWidget）。"""
+
+    def __init__(self, store: _StubStore | None) -> None:
+        self._closed = False
+        self._translating = False
+        self._recognizing = False
+        self._chat_busy = False
+        self._translation_seq = 1
+        self._config = SimpleNamespace(screenshot_compress_percent=50)
+        self._queue = queue.Queue()
+        self._screenshot_store = store
+        self._remote_automation = _StubAutomation()
+        self.displayed: list[str] = []
+        self.titles: list[str] = []
+
+    def _display_text(self, text: str) -> None:
+        self.displayed.append(text)
+
+    def _update_title(self, text: str) -> None:
+        self.titles.append(text)
+
+    def worker_result(self) -> dict:
+        """取走 worker 入队的一条回执（payload 部分）。"""
+        return self._queue.get(timeout=5)[1]
+
+
+_AUTO_SIG = tuple([100] * 512)
+
+
+def _done_item(**overrides: object) -> dict:
+    """worker 成功回执的默认形态（可按用例覆盖字段）。"""
+    item = {
+        "seq": 1,
+        "signature": _AUTO_SIG,
+        "text": "自动化译文",
+        "aborted": False,
+        "error": None,
+        "original_jpeg": b"\xff\xd8original",
+        "thumb_jpeg": b"\xff\xd8thumb",
+    }
+    item.update(overrides)
+    return item
+
+
+def test_auto_success_writes_exactly_one_record():
+    """成功路径：恰好入库一条，字段与手动同规则（13 位毫秒 ts/译文/两图）。"""
+    store = _StubStore()
+    host = _AutoHost(store)
+    host._handle_remote_auto_done(_done_item())
+    assert len(store.inserts) == 1
+    record = store.inserts[0]
+    assert record["ocr_text"] == "自动化译文"  # 视觉链路只返回译文：与手动一致存译文
+    assert record["img_original"] == b"\xff\xd8original"
+    assert record["img_thumbnail"] == b"\xff\xd8thumb"
+    assert 1_000_000_000_000 <= record["ts"] < 10_000_000_000_000  # 13 位毫秒
+    assert host.displayed == ["自动化译文\n"]
+    assert host.titles == ["翻译完成"]
+    assert host._translating is False
+    assert host._remote_automation.results == [(_AUTO_SIG, "自动化译文")]
+
+
+def test_auto_failure_and_abort_write_nothing():
+    """失败（空文本）与中止路径：零写入、不上屏；中止回执不带译文。"""
+    store = _StubStore()
+    host = _AutoHost(store)
+    host._handle_remote_auto_done(_done_item(text="", error="空译文"))
+    assert store.inserts == []
+    assert host.displayed == []
+    assert host.titles == ["翻译失败"]
+    host_aborted = _AutoHost(store)
+    host_aborted._handle_remote_auto_done(_done_item(aborted=True, text=None))
+    assert store.inserts == []
+    assert host_aborted.displayed == []
+    assert host_aborted._remote_automation.results == [(_AUTO_SIG, None)]
+
+
+def test_auto_stale_seq_writes_nothing():
+    """seq 过期：零写入、不上屏；仅存结果在途回执仍送达控制器。"""
+    store = _StubStore()
+    host = _AutoHost(store)
+    host._translation_seq = 2
+    host._translating = True  # 互斥槽已被新一轮请求占用
+    host._handle_remote_auto_done(_done_item())
+    assert store.inserts == []
+    assert host.displayed == []
+    assert host._translating is True  # 过期结果不复位他人占用的互斥槽
+    assert host._remote_automation.results == [(_AUTO_SIG, "自动化译文")]
+
+
+def test_auto_submit_rejected_when_busy_writes_nothing():
+    """忙碌被拒：提交不受理（不起 worker），store 零写入。"""
+    store = _StubStore()
+    host = _AutoHost(store)
+    host._translating = True  # 任意在途翻译（互斥槽占用）
+    accepted = host._submit_remote_auto_translation(
+        _StubWindow("w"), _gradient_image(), _AUTO_SIG
+    )
+    assert accepted is False
+    assert store.inserts == []
+
+
+def test_auto_cache_hit_writes_nothing(monkeypatch):
+    """缓存命中：直接上屏、不经 worker（API 桩一旦被调用即失败）→ store 零写入。"""
+
+    def _forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("缓存命中不应发起 API")
+
+    monkeypatch.setattr(flow_module, "translate_image_verified", _forbidden)
+    store = _StubStore()
+    host = _AutoHost(store)
+    controller = RemoteAutomationController(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=host._display_remote_auto_text,
+        submit=host._submit_remote_auto_translation,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+        bbox_provider=lambda window: (0, 0, 100, 100),
+        capture_fn=lambda bbox: _gradient_image(),
+        timer_factory=lambda interval_ms, on_tick: _StubTimer(),
+    )
+    controller.toggle_automation()
+    controller.on_translation_result(grid_signature(_gradient_image()), "预存译文")
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert host.displayed == ["预存译文\n"]
+    assert store.inserts == []
+
+
+def test_auto_store_degraded_keeps_display():
+    """store 降级（insert 返回 None）：仅上屏不入库，回执照常送达。"""
+    store = _StubStore(fail=True)
+    host = _AutoHost(store)
+    host._handle_remote_auto_done(_done_item())
+    assert store.inserts == []
+    assert host.displayed == ["自动化译文\n"]
+    assert host.titles == ["翻译完成"]
+    assert host._remote_automation.results == [(_AUTO_SIG, "自动化译文")]
+
+
+def test_auto_store_error_keeps_display_and_receipt():
+    """store 抛错：上屏与在途回执不受影响（异常不得打断收尾链）。"""
+    store = _StubStore(explode=True)
+    host = _AutoHost(store)
+    host._handle_remote_auto_done(_done_item())
+    assert host.displayed == ["自动化译文\n"]
+    assert host.titles == ["翻译完成"]
+    assert host._remote_automation.results == [(_AUTO_SIG, "自动化译文")]
+
+
+def test_auto_store_missing_keeps_display():
+    """store 不可用（None）：仅上屏不入库。"""
+    host = _AutoHost(None)
+    host._handle_remote_auto_done(_done_item())
+    assert host.displayed == ["自动化译文\n"]
+    assert host.titles == ["翻译完成"]
+
+
+def test_auto_worker_success_encodes_original_and_thumbnail(monkeypatch):
+    """worker 成功：随结果回传原图与缩略图 JPEG 编码（复用 processing 纯函数）。"""
+    monkeypatch.setattr(
+        flow_module, "translate_image_verified", lambda *args, **kwargs: "worker 译文"
+    )
+    host = _AutoHost(_StubStore())
+    host._remote_auto_worker(
+        1, _gradient_image(size=(200, 100)), _AUTO_SIG, threading.Event(), {}
+    )
+    item = host.worker_result()
+    assert item["text"] == "worker 译文"
+    assert item["aborted"] is False
+    assert item["original_jpeg"][:2] == b"\xff\xd8"  # JPEG 魔数
+    assert item["thumb_jpeg"][:2] == b"\xff\xd8"
+
+
+def test_auto_worker_aborted_skips_encoding(monkeypatch):
+    """worker 中止：携带 aborted 回执、不生成入库图像。"""
+
+    def _forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("已中止不应发起 API")
+
+    monkeypatch.setattr(flow_module, "translate_image_verified", _forbidden)
+    host = _AutoHost(_StubStore())
+    stop = threading.Event()
+    stop.set()
+    host._remote_auto_worker(1, _gradient_image(), _AUTO_SIG, stop, {})
+    item = host.worker_result()
+    assert item["aborted"] is True
+    assert item["text"] is None
+    assert item["original_jpeg"] is None
+    assert item["thumb_jpeg"] is None
+
+
+def test_auto_worker_failure_reports_error_without_images(monkeypatch):
+    """worker 失败：收敛为 error 回执、不生成入库图像。"""
+
+    def _fail(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("网络错误")
+
+    monkeypatch.setattr(flow_module, "translate_image_verified", _fail)
+    host = _AutoHost(_StubStore())
+    host._remote_auto_worker(1, _gradient_image(), _AUTO_SIG, threading.Event(), {})
+    item = host.worker_result()
+    assert item["aborted"] is False
+    assert item["error"] == "网络错误"
+    assert item["text"] is None
+    assert item["original_jpeg"] is None
+    assert item["thumb_jpeg"] is None

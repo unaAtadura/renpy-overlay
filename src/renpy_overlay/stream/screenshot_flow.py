@@ -259,7 +259,7 @@ class ScreenshotFlowMixin:
         logger.warning("截图翻译失败：%s", item.get("error"))
         self._update_title("翻译失败")
 
-    # -- 遥控器自动化（右键菜单开关；提交走视觉链路但不隐藏窗口、不落库） ------
+    # -- 遥控器自动化（右键菜单开关；提交走视觉链路不隐藏窗口；成功即落库） ------
 
     def _is_translation_busy(self) -> bool:
         """自动化互斥查询（主线程）：存在任意在途翻译/识曲/对话即忙碌。"""
@@ -276,8 +276,9 @@ class ScreenshotFlowMixin:
         """自动化截图翻译提交（主线程，控制器回调）。
 
         与手动截图翻译共用 ``_translating`` 互斥槽（同时只允许一个在途），
-        但不隐藏任何窗口（需求：防爆闪），不写 screenshot.db（需求）；
-        受理返回 True，宿主忙碌被拒返回 False（控制器保持变化状态等待恢复）。
+        不隐藏任何窗口（需求：防爆闪）；成功结果与手动同规则落库
+        screenshot.db；受理返回 True，宿主忙碌被拒返回 False（控制器保持
+        变化状态等待恢复）。
         """
         if self._closed:
             return False
@@ -317,13 +318,17 @@ class ScreenshotFlowMixin:
     ) -> None:
         """后台线程：自动化截图的视觉链路（宽高比约束副本 → 压缩 → 识图翻译）。
 
-        与手动 worker 的区别：不生成缩略图/原图、不落库；中止时也回传
+        与手动 worker 的落库约定一致：仅成功（拿到译文且未中止）时生成
+        原始抓屏与 ≤10w 像素缩略图的 JPEG 编码随结果回传（复用
+        ``screenshot/processing`` 纯函数，主线程统一落库）；中止时也回传
         （携带 aborted 标记），保证控制器的在途标记一定被清除——否则自动
         化会永久停在「在途」态不再比较变化。
         """
         aborted = False
         text = None
         error = None
+        original_jpeg = None
+        thumb_jpeg = None
         try:
             ratio_image = constrain_aspect_ratio(image)
             api_image = scale_to_percent(
@@ -339,6 +344,12 @@ class ScreenshotFlowMixin:
                 )
                 if stop.is_set():
                     aborted = True
+                else:
+                    # 仅成功才生成入库图像（失败/中止不浪费编码开销）；原图为
+                    # 原始抓屏（与手动同规则），压缩副本只作 API 载荷不入库
+                    thumbnail = make_thumbnail(image)
+                    original_jpeg = encode_jpeg_bytes(image)
+                    thumb_jpeg = encode_jpeg_bytes(thumbnail)
         except Exception as exc:  # 网络/协议/图像错误统一收敛为失败结果
             if stop.is_set():
                 aborted = True
@@ -354,15 +365,19 @@ class ScreenshotFlowMixin:
                     "text": text,
                     "aborted": aborted,
                     "error": error,
+                    "original_jpeg": original_jpeg,
+                    "thumb_jpeg": thumb_jpeg,
                 },
             )
         )
 
     def _handle_remote_auto_done(self, item: dict) -> None:
-        """主线程：自动化翻译结果收尾（显示 + 缓存回填；不写 screenshot.db）。
+        """主线程：自动化翻译结果收尾（显示 + 成功落库 + 缓存回填）。
 
         seq 过期/中止的结果也要回传控制器清除在途标记（否则自动化停在
-        「在途」态不再比较变化）；中止/失败不回填缓存。
+        「在途」态不再比较变化）；中止/失败不回填缓存、不入库——仅成功
+        （有效译文 + 未中止 + 无异常）写 screenshot.db，与手动截图翻译同
+        一落库规则（先上屏后入库；落库失败只记日志，不影响上屏与回执）。
         """
         seq = item.get("seq")
         current = seq == self._translation_seq
@@ -382,6 +397,7 @@ class ScreenshotFlowMixin:
             logger.info(
                 "自动化截图翻译完成（seq=%d，译文 %d 字），已显示在正文窗", seq, len(text)
             )
+            self._store_remote_auto_record(item, text)
         elif not aborted and current:
             logger.warning("自动化截图翻译失败：%s", item.get("error") or "返回空文本")
             self._update_title("翻译失败")
@@ -389,3 +405,27 @@ class ScreenshotFlowMixin:
         self._remote_automation.on_translation_result(
             item.get("signature"), text if not aborted and text else None
         )
+
+    def _store_remote_auto_record(self, item: dict, text: str) -> None:
+        """自动化成功结果的落库（主线程）：字段规则与手动截图翻译一致。
+
+        ts 为 13 位毫秒时间戳；img_original/img_thumbnail 为 worker 编码的
+        原始抓屏与缩略图 JPEG bytes；视觉链路只返回译文（无独立原文），
+        与手动一致把译文存入 ``ocr_text``。store 不可用或写入失败一律降级
+        为「仅上屏不入库」：异常必须吞掉，保证在途回执一定送达控制器
+        （否则自动化永久停在「在途」态不再比较变化）。
+        """
+        if self._screenshot_store is None:
+            return  # 数据库不可用：仅显示不入库
+        try:
+            record_id = self._screenshot_store.insert(
+                ts=int(time.time() * 1000),  # 13 位毫秒时间戳（与手动一致）
+                ocr_text=text,
+                img_original=bytes(item.get("original_jpeg") or b""),
+                img_thumbnail=bytes(item.get("thumb_jpeg") or b""),
+            )
+        except Exception as exc:  # 防御：入库异常不得影响上屏与在途回执
+            logger.warning("自动化截图记录入库异常，仅保留正文显示：%s", exc)
+            return
+        if record_id is None:
+            logger.warning("自动化截图记录入库失败，仅保留正文显示")
