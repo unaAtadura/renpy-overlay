@@ -11,6 +11,11 @@
 - 日期下拉选择后跳转到该日期后的第一张（无则最后一张），居中并按同一
   延迟逻辑自动选中。
 
+原图导出：「导出」把选中记录的 img_original 原始 BLOB 写入 screenshot.db
+同级的 ``renpy_overlay_cache/screenshot`` 目录（文件名 ``<id>.<ext>``，
+按魔数定扩展名，逐字节不重编码）；「全部导出」分片导出全部记录。重名
+（文件或目录同名）一律跳过绝不覆盖，前台静默、仅记日志。
+
 性能策略：固定槽宽布局（无需解码即可排版）；仅解码可见槽 ±2 范围的
 BLOB；QPixmap 与 bytes 双层 LRU 缓存，大库不卡顿。窗口关闭 = 隐藏
 （单例复用，由宿主持有）。
@@ -22,6 +27,7 @@ import calendar
 import logging
 from bisect import bisect_left
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtGui import QColor, QPixmap
@@ -65,6 +71,65 @@ def _index_after_delete(deleted_index: int, new_count: int) -> int:
     if new_count <= 0:
         return -1
     return min(deleted_index, new_count - 1)
+
+
+# ---- 原图导出（纯函数，离线可测；写入与重名判断均不依赖 GUI） ------------------------
+
+#: 导出目录名（与 screenshot.db 同级：renpy_overlay_cache\screenshot）
+EXPORT_DIR_NAME = "screenshot"
+#: 全部导出的分片大小（每轮事件循环处理的记录数，避免大库冻结 UI）
+EXPORT_BATCH_SIZE = 8
+#: 单条导出结果状态（:func:`export_original_bytes` 的返回值）
+EXPORT_EXPORTED = "exported"  # 成功写入
+EXPORT_SKIPPED = "skipped"  # 重名或 BLOB 为空：跳过不覆盖
+EXPORT_FAILED = "failed"  # 目录创建或写入失败
+
+
+def export_target_dir(db_path: Path) -> Path:
+    """导出目录：screenshot.db 同级的 ``renpy_overlay_cache/screenshot``（纯函数）。"""
+    return Path(db_path).parent / EXPORT_DIR_NAME
+
+
+def blob_extension(blob: bytes) -> str:
+    """按 BLOB 魔数推断扩展名（当前 img_original 均由 JPEG 编码生成 → .jpg）。"""
+    if blob.startswith(b"\xff\xd8"):
+        return ".jpg"
+    if blob.startswith(b"\x89PNG"):
+        return ".png"
+    return ".jpg"  # 未知格式按现状兜底（写入字节仍是原始 BLOB，不转码）
+
+
+def export_original_bytes(blob: bytes, target_dir: Path, record_id: int) -> str:
+    """把数据库原始 BLOB bytes 写入 ``target_dir/<id>.<ext>``（纯 IO，前台静默）。
+
+    文件名以记录主键的十进制字符串命名（无前导零）；写入用 ``xb`` 独占
+    创建语义，从机制上保证绝不覆盖/截断既有文件（同名目录经 exists 预检
+    跳过）。重名或 BLOB 为空返回跳过、目录创建或写盘失败返回失败，均只记
+    日志不抛出，调用方继续处理其余记录。
+    """
+    if not blob:
+        logger.warning("导出跳过（id=%s）：原图 BLOB 为空", record_id)
+        return EXPORT_SKIPPED
+    target = target_dir / f"{record_id}{blob_extension(blob)}"
+    if target.exists():  # 文件或目录同名均跳过（预检 + "xb" 独占创建双保险）
+        logger.info("导出跳过（id=%s）：目标已存在（%s）", record_id, target)
+        return EXPORT_SKIPPED
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # 含父路径被文件占位的 FileExistsError：目录创建失败
+        logger.warning("导出失败（id=%s）：目录创建失败（%s）：%s", record_id, target_dir, exc)
+        return EXPORT_FAILED
+    try:
+        with open(target, "xb") as handle:  # 独占创建：文件不存在才创建
+            handle.write(blob)
+    except FileExistsError:  # exists 预检与写入之间的竞态窗口兜底
+        logger.info("导出跳过（id=%s）：目标已存在（%s）", record_id, target)
+        return EXPORT_SKIPPED
+    except OSError as exc:
+        logger.warning("导出失败（id=%s → %s）：%s", record_id, target, exc)
+        return EXPORT_FAILED
+    logger.debug("已导出（id=%s）→ %s（%d 字节原始 BLOB）", record_id, target, len(blob))
+    return EXPORT_EXPORTED
 
 
 class _ThumbStrip(QWidget):
@@ -434,12 +499,20 @@ class ScreenshotHistoryWindow(QWidget):
         self._delete_btn = QPushButton("删除")
         self._delete_btn.setEnabled(False)  # 无选中记录时不可用
         self._delete_btn.clicked.connect(self._delete_selected)
+        self._export_btn = QPushButton("导出")
+        self._export_btn.setEnabled(False)  # 无选中记录时不可用（与删除同规则）
+        self._export_btn.clicked.connect(self._export_selected)
+        self._export_all_btn = QPushButton("全部导出")
+        self._export_all_btn.setEnabled(False)  # 空库时不可用（refresh 同步）
+        self._export_all_btn.clicked.connect(self._export_all)
         date_row = QHBoxLayout()
         date_row.addWidget(self._year_combo)
         date_row.addWidget(self._month_combo)
         date_row.addWidget(self._day_combo)
         date_row.addStretch(1)
         date_row.addWidget(self._delete_btn)
+        date_row.addWidget(self._export_btn)
+        date_row.addWidget(self._export_all_btn)
 
         date_box = QVBoxLayout()
         date_box.addWidget(self._first_label)
@@ -459,6 +532,13 @@ class ScreenshotHistoryWindow(QWidget):
 
         self._entries: list[tuple[int, int]] = []
         self._updating_date = False  # 程序性填充下拉时抑制 _on_date_changed
+        # 全部导出分片状态：待处理 id 队列 + [成功, 跳过, 失败] 计数
+        self._export_ids: list[int] = []
+        self._export_stats = [0, 0, 0]
+        self._export_timer = QTimer(self)
+        self._export_timer.setSingleShot(True)
+        self._export_timer.setInterval(0)  # 每轮让出事件循环，大库导出 UI 不冻结
+        self._export_timer.timeout.connect(self._export_all_step)
 
     # ---- 对外接口 -----------------------------------------------------------
 
@@ -475,6 +555,10 @@ class ScreenshotHistoryWindow(QWidget):
             self._entries = self._store.entries() if self._store is not None else []
             self._strip.set_entries(self._entries)
             self._delete_btn.setEnabled(False)  # 重建后无选中；选中后由 _show_record 启用
+            self._export_btn.setEnabled(False)  # 与删除同规则：无选中不可用
+            self._export_all_btn.setEnabled(
+                bool(self._entries) and not self._export_ids
+            )  # 空库不可用；全部导出进行中保持禁用（防重入）
             first_last = (
                 self._store.first_last_ts() if self._store is not None else None
             )
@@ -577,8 +661,10 @@ class ScreenshotHistoryWindow(QWidget):
     # ---- 记录展示 -----------------------------------------------------------
 
     def _show_record(self, payload: tuple[str, bytes] | None) -> None:
-        """缩略图选中回调：更新译文框与原图区，并同步删除按钮可用状态。"""
-        self._delete_btn.setEnabled(self._strip.selected_index != -1)
+        """缩略图选中回调：更新译文框与原图区，并同步删除/导出按钮可用状态。"""
+        has_selection = self._strip.selected_index != -1
+        self._delete_btn.setEnabled(has_selection)
+        self._export_btn.setEnabled(has_selection)
         if not payload:
             self._text_view.setPlainText("（读取记录失败）")
             return
@@ -636,6 +722,88 @@ class ScreenshotHistoryWindow(QWidget):
             self._viewer = ImageViewerWindow()
         self._viewer.show_pixmap(pixmap)
         logger.debug("已打开原图查看弹窗（%dx%d）", pixmap.width(), pixmap.height())
+
+    # ---- 原图导出（不触碰选中/滚动/日期下拉/详情展示，前台静默） ---------------------
+
+    def _export_selected(self) -> None:
+        """导出当前选中记录的原图（主线程同步：一次读 BLOB + 一次写盘）。
+
+        store 不可用或读取失败只记日志安全返回，不影响浏览与删除。
+        """
+        record_id = self._selected_record_id()
+        if record_id is None:
+            logger.info("没有选中的截图记录，忽略导出请求")
+            return
+        if self._store is None:
+            logger.warning("截图数据库不可用，无法导出（id=%s）", record_id)
+            return
+        payload = self._store.record(record_id)
+        if payload is None:
+            logger.warning("导出失败：读取原图失败（id=%s）", record_id)
+            return
+        _text, original_blob = payload
+        result = export_original_bytes(
+            original_blob, export_target_dir(self._store.path), record_id
+        )
+        if result == EXPORT_EXPORTED:
+            logger.info("已导出截图记录 id=%s", record_id)
+
+    def _export_all(self) -> None:
+        """全部导出（主线程分片）：一次性导出全部记录，不受日期/选中/可视范围影响。
+
+        导出目录创建失败立即中止；进行中禁用「全部导出」防重入；单条失败/
+        跳过不中断后续记录（前台静默，汇总见完成日志）。
+        """
+        if self._store is None or not self._entries:
+            logger.info("截图数据库不可用或暂无记录，忽略全部导出请求")
+            return
+        if self._export_ids:
+            logger.info("全部导出已在进行中，忽略重复请求")
+            return
+        target_dir = export_target_dir(self._store.path)
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("全部导出中止：导出目录创建失败（%s）：%s", target_dir, exc)
+            return
+        self._export_ids = [record_id for record_id, _ts in self._entries]
+        self._export_stats = [0, 0, 0]
+        self._export_all_btn.setEnabled(False)
+        logger.info("开始全部导出（共 %d 条）→ %s", len(self._export_ids), target_dir)
+        self._export_timer.start()
+
+    def _export_all_step(self) -> None:
+        """全部导出分片步进（主线程）：每轮处理一批后让出事件循环保持 UI 响应。
+
+        SQLite 连接全程只在主线程读取（线程约定）；导出中条目被删除时
+        ``record()`` 返回 None，按失败计数跳过，不影响其余记录。
+        """
+        for _ in range(EXPORT_BATCH_SIZE):
+            if not self._export_ids:
+                exported, skipped, failed = self._export_stats
+                logger.info(
+                    "全部导出完成：成功 %d / 跳过 %d / 失败 %d", exported, skipped, failed
+                )
+                self._export_ids = []
+                self._export_all_btn.setEnabled(bool(self._entries))  # 完成后恢复
+                return
+            record_id = self._export_ids.pop(0)
+            payload = self._store.record(record_id) if self._store is not None else None
+            if payload is None:
+                logger.warning("全部导出：读取原图失败（id=%s），计入失败", record_id)
+                self._export_stats[2] += 1
+                continue
+            _text, original_blob = payload
+            result = export_original_bytes(
+                original_blob, export_target_dir(self._store.path), record_id
+            )
+            if result == EXPORT_EXPORTED:
+                self._export_stats[0] += 1
+            elif result == EXPORT_SKIPPED:
+                self._export_stats[1] += 1
+            else:
+                self._export_stats[2] += 1
+        self._export_timer.start()
 
     # ---- 生命周期 -----------------------------------------------------------
 
