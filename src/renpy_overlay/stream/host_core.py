@@ -18,7 +18,6 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from .. import config, translation_store
-from ..pretranslate_dialog import PretranslateDialog
 from ..quick_menu import QuickMenu
 from ..screenshot import (
     AIChatWindow,
@@ -115,12 +114,11 @@ class StreamOverlayCore:
         self._body_hwnd = self._body_window.hwnd
         self._title_hwnd = self._title_window.hwnd
         # 注入相关入口（预构建翻译缓存）内嵌在标题窗文本右侧，注入确认后经
-        # _handle_injected 注入；豁免前台 API 互斥，写库共用进程级写锁
+        # _handle_injected 注入；预构建主窗口单例（惰性创建，关闭即清引用）
         self._game_dir = game_dir or ""
         self._injected = False
-        self._prebuild_dialog: PretranslateDialog | None = None
-        self._prebuild_seq = 0
-        self._prebuild_stop: threading.Event | None = None
+        self._prebuild_window = None
+        self._settings_window = None
         logger.debug(
             "流式悬浮窗 HWND：正文=0x%X 标题=0x%X（标题高=%dpx 间距=%dpx）",
             self._body_hwnd,
@@ -180,6 +178,8 @@ class StreamOverlayCore:
             on_record_video=self._toggle_video_record,
             on_open_video_clip=self._open_video_clip,
             on_open_asr_history=self._open_asr_history,
+            on_open_prebuild=self.request_prebuild,
+            on_open_settings=self._open_settings,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
         # 提示走标题窗唯一出口，触发翻译直接复用截图翻译入口（含既有提示规则）
@@ -237,7 +237,8 @@ class StreamOverlayCore:
         self._asr_rt = AsrRtController(
             submit=lambda kind, payload: self._queue.put((kind, payload)),
             notify=self._update_title,
-            is_busy=lambda: self._is_translation_busy() or self._prebuild_stop is not None,
+            is_busy=lambda: self._is_translation_busy()
+            or (self._prebuild_window is not None and self._prebuild_window.is_running),
             acquire=self._acquire_chat_slot,
             release=self._release_chat_slot,
             options=lambda: resolve_asr_rt_options(self._config),
@@ -316,6 +317,95 @@ class StreamOverlayCore:
     def request_close(self) -> None:
         self._queue.put(("cmd", "quit"))
 
+    def _open_settings(self) -> None:
+        """快捷菜单「设置」：打开/唤回设置窗口（单例，关闭即清引用）。"""
+        if self._closed:
+            return
+        from ..settings_window import SettingsWindow  # 局部导入：仅入口时加载
+
+        window = self._settings_window
+        if window is not None:
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            return
+        self._settings_window = SettingsWindow(
+            on_reload=self.reload_config,
+            on_closed=lambda: setattr(self, "_settings_window", None),
+        )
+        self._settings_window.show()
+        logger.info("设置窗口已打开")
+
+    def reload_config(self) -> str | None:
+        """重新加载 config.json 并热应用到运行时（设置窗口「确定」触发）。
+
+        返回 None=成功；错误字符串=失败原因（设置窗口提示；已写盘的
+        新配置不受影响，运行时整体回退旧配置）。热应用范围：
+
+        - API 参数 / 截图压缩比 / 识曲时长等现取键：引用替换即生效；
+        - 自动翻译轮询间隔：重设定时器（开关是运行时状态，保留用户
+          当前选择不覆盖，下次启动读新值）；
+        - 全局热键组 / 锁鼠标逃脱键：重建控制器并重注册；
+
+        需重启键（双窗样式与尺寸、对话窗尺寸、fullscreen_mode、内存缓存
+        容量、遥控截图参数）由设置窗口提示，不做热切换（风险点：运行中
+        单例持有字体/几何，双层控制器重建风险高）。
+        """
+        try:
+            new_cfg = config.load_config()
+        except Exception as exc:  # 读取异常：运行时保持现状
+            logger.warning("重载配置失败（读取）：%s", exc)
+            return f"读取配置失败：{exc}"
+        old_cfg = self._config
+        self._config = new_cfg
+        errors = self._apply_runtime_config(new_cfg)
+        if errors:
+            # 任一组件重建失败：整体回退旧配置（旧键已注销，用旧值重建即恢复）
+            self._config = old_cfg
+            fallback_errors = self._apply_runtime_config(old_cfg)
+            if fallback_errors:
+                logger.error("配置回退未完全成功：%s", "；".join(fallback_errors))
+            message = "；".join(errors)
+            logger.warning("配置热重载失败，已回退原配置：%s", message)
+            return f"{message}（已回退原配置）"
+        logger.info("配置已热重载并生效（需重启键由设置窗口提示）")
+        return None
+
+    def _apply_runtime_config(self, cfg: config.AppConfig) -> list[str]:
+        """把 ``cfg`` 热应用到运行时组件（热键/鼠标锁重建 + 定时器间隔）。"""
+        errors: list[str] = []
+        try:
+            self._auto_timer.setInterval(self._auto_interval_ms())
+            if self._auto_translate_on:
+                self._auto_timer.start()
+        except Exception as exc:  # pragma: no cover - 定时器异常极罕见
+            errors.append(f"自动翻译间隔应用失败：{exc}")
+        try:
+            self._hotkey_mode.shutdown()
+            self._hotkey_mode = HotkeyMode(
+                controller=self._quick_menu,
+                notify=self._update_title,
+                trigger_translation=self.request_screenshot_translation,
+                main_hotkey=cfg.hotkey_main,
+                window_hotkeys=cfg.hotkey_windows,
+            )
+            self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
+            self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
+        except Exception as exc:
+            logger.exception("热键组重注册失败")
+            errors.append(f"热键重注册失败：{exc}")
+        try:
+            self._mouse_lock.shutdown()
+            self._mouse_lock = MouseLockController(
+                notify=self._update_title,
+                escape_hotkey=cfg.hotkey_mouse_escape,
+            )
+            self._quick_menu.attach_mouse_lock(self._mouse_lock)
+        except Exception as exc:
+            logger.exception("锁鼠标逃脱键重注册失败")
+            errors.append(f"锁鼠标热键重注册失败：{exc}")
+        return errors
+
     @property
     def hwnd(self) -> int:
         return self._body_hwnd
@@ -353,7 +443,6 @@ class StreamOverlayCore:
         if self._translating:
             self._abort_translation("窗口关闭")
         self._abort_song_recognition("窗口关闭")
-        self._abort_prebuild("窗口关闭")
         self._cancel_pending_click()
         for timer in (
             self._drain_timer,
@@ -394,6 +483,18 @@ class StreamOverlayCore:
             except Exception:  # pragma: no cover
                 pass
             self._video_clip_window = None
+        if self._prebuild_window is not None:
+            try:
+                self._prebuild_window.close()  # closeEvent 内限时收束在途任务
+            except Exception:  # pragma: no cover
+                pass
+            self._prebuild_window = None
+        if self._settings_window is not None:
+            try:
+                self._settings_window.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._settings_window = None
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -425,12 +526,6 @@ class StreamOverlayCore:
             except Exception:  # pragma: no cover
                 pass
             self._chat_window = None
-        if self._prebuild_dialog is not None:
-            try:
-                self._prebuild_dialog.deleteLater()
-            except Exception:  # pragma: no cover
-                pass
-            self._prebuild_dialog = None
         for window in (self._title_window, self._body_window):
             try:
                 window.close()
@@ -486,7 +581,8 @@ class StreamOverlayCore:
             self._translation_history_window,
             self._asr_history_window,
             self._video_clip_window,
-            self._prebuild_dialog,
+            self._prebuild_window,
+            self._settings_window,
         ):
             if window is not None:
                 items.append(item(window.isVisible, window.hide, window.show))
@@ -537,12 +633,6 @@ class StreamOverlayCore:
                     self._handle_command(payload)
                 elif kind == "injected":
                     self._handle_injected()
-                elif kind == "prebuild_phase":
-                    self._handle_prebuild_phase(payload)
-                elif kind == "prebuild_progress":
-                    self._handle_prebuild_progress(payload)
-                elif kind == "prebuild_finished":
-                    self._handle_prebuild_finished(payload)
         except queue.Empty:
             pass
         except Exception:  # pragma: no cover - UI 异常不应终止循环
