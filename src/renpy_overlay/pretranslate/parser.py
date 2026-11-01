@@ -24,6 +24,7 @@ import logging
 import pickle
 import re
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -336,16 +337,23 @@ def _load_source(rel: str, game_dir: Path) -> str:
     return raw.decode("utf-8-sig", "replace")
 
 
-def collect_texts(files: list[str], game_dir: Path) -> list[SourceText]:
+def collect_texts(
+    files: list[str],
+    game_dir: Path,
+    on_file: Callable[[int, int, int], None] | None = None,
+) -> list[SourceText]:
     """收集勾选文件的缓存键原文条目：加载 → 解析 → 清洗 → 全局去重。
 
     - 对白与 tl 文本经 :func:`clean_text`，选项组经 :func:`build_choice_key`；
     - 清洗后为空（纯标签 / 空串）的条目丢弃；同一原文只保留首个来源
       （每原文只翻译一次）；
-    - 单文件加载 / 解析失败记日志跳过，不中断整体。
+    - 单文件加载 / 解析失败记日志跳过，不中断整体；
+    - ``on_file(done, total, discovered)`` 在每个文件处理完后回调（GUI
+      渐进显示统计进度用；None 表示不回调）。
     """
     seen: dict[str, SourceText] = {}
-    for rel in files:
+    total = len(files)
+    for index, rel in enumerate(files):
         try:
             content = _load_source(rel, Path(game_dir))
             blocks = extract_blocks(content)
@@ -360,4 +368,6 @@ def collect_texts(files: list[str], game_dir: Path) -> list[SourceText]:
             if not text or text in seen:
                 continue
             seen[text] = SourceText(text=text, kind=kind, source=rel)
+        if on_file is not None:
+            on_file(index + 1, total, len(seen))
     return list(seen.values())
