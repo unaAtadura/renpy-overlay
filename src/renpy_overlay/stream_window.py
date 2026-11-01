@@ -39,7 +39,7 @@ re-export：所有历史公开符号保持从本模块可导入）：
   ``stream.translate_flow``（流式+自动翻译）/ ``stream.screenshot_flow``
   （截图翻译+遥控自动化）/ ``stream.song_flow``（听歌识曲）/
   ``stream.video_flow``（视频线+实时ASR）/ ``stream.history_flow``
-  （历史窗口+AI对话）/ ``stream.prebuild_flow``（预构建+注入入口）。
+  （历史窗口+AI对话）/ ``stream.injection_flow``（注入入口+模式切换）。
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ from .bound_window import (  # noqa: F401
     TitleEntryStrip,
     dispatch_action,
 )
-from .pretranslate import PrebuildTask, scan_rpy_files  # noqa: F401
-from .pretranslate_dialog import PretranslateDialog  # noqa: F401
+from .prebuild_window import PrebuildWindow  # noqa: F401
+from .pretranslate import scan_rpy_files  # noqa: F401
 from .quick_menu import QuickMenu  # noqa: F401
 from .screenshot import (  # noqa: F401
     AIChatWindow,
@@ -85,6 +85,7 @@ from .screenshot import (  # noqa: F401
     scale_to_percent,
 )
 from .screenshot.vision import translate_image_verified  # noqa: F401
+from .settings_window import SettingsWindow  # noqa: F401
 from .song_recognition import (  # noqa: F401
     RECORDER_AVAILABLE,
     SHAZAMIO_AVAILABLE,
@@ -122,8 +123,8 @@ from .stream.icons import (  # noqa: F401
     BOUND_PREBUILD_ICON,
     translation_mode_icon,
 )
+from .stream.injection_flow import InjectionFlowMixin
 from .stream.interaction import MouseInteractionMixin
-from .stream.prebuild_flow import PrebuildFlowMixin
 from .stream.screenshot_flow import ScreenshotFlowMixin
 from .stream.scroll_logic import (  # noqa: F401
     DRAG_SCROLL_DEBOUNCE_PX,
@@ -217,8 +218,7 @@ __all__ = [
     "MASK_PAD_Y",
     "MASK_RADIUS",
     "MouseLockController",
-    "PrebuildTask",
-    "PretranslateDialog",
+    "PrebuildWindow",
     "QApplication",
     "QColor",
     "QFont",
@@ -241,6 +241,7 @@ __all__ = [
     "SHAZAMIO_AVAILABLE",
     "SPAWN_DURATION",
     "ScreenshotHistoryWindow",
+    "SettingsWindow",
     "SongHistoryWindow",
     "StreamOverlayWindow",
     "TITLE_GLOW_FACTOR",
@@ -299,7 +300,7 @@ class StreamOverlayWindow(
     VideoFlowMixin,
     ScreenshotFlowMixin,
     StreamTranslateMixin,
-    PrebuildFlowMixin,
+    InjectionFlowMixin,
     MouseInteractionMixin,
     WindowFollowMixin,
 ):
