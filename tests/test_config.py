@@ -65,6 +65,15 @@ def test_missing_file_creates_defaults(tmp_path):
         "remote_cache_size_count": 50,
         "remote_screenshot_diameterA": 100,
         "remote_screenshot_diameterB": 100,
+        "max_concurrency": 8,
+        "initial_concurrency": 1,
+        "concurrency_increase_after": 6,
+        "latency_guard_seconds": 15.0,
+        "circuit_break_threshold": 5,
+        "retries": 2,
+        "include_tl_strings": True,
+        "tl_langs": [],
+        "last_game_dir": "",
     }
 
 
@@ -121,6 +130,15 @@ def test_default_file_key_order_matches_target(tmp_path):
         "remote_cache_size_count",
         "remote_screenshot_diameterA",
         "remote_screenshot_diameterB",
+        "max_concurrency",
+        "initial_concurrency",
+        "concurrency_increase_after",
+        "latency_guard_seconds",
+        "circuit_break_threshold",
+        "retries",
+        "include_tl_strings",
+        "tl_langs",
+        "last_game_dir",
     ]
 
 
@@ -837,3 +855,105 @@ def test_unfrozen_default_path_falls_back_to_cwd(tmp_path, monkeypatch):
     workdir.mkdir()
     monkeypatch.chdir(workdir)
     assert config.default_path() == workdir / "config.json"
+
+
+# ---------------------------------------------------- 预构建翻译缓存（移植键）
+
+
+def test_prebuild_defaults_loaded(tmp_path):
+    """预构建 9 新键的默认值（与待移植项目一致）。"""
+    target = tmp_path / "config.json"
+    loaded = config.load_config(target)
+    assert loaded.max_concurrency == 8
+    assert loaded.initial_concurrency == 1
+    assert loaded.concurrency_increase_after == 6
+    assert loaded.latency_guard_seconds == 15.0
+    assert loaded.circuit_break_threshold == 5
+    assert loaded.retries == 2
+    assert loaded.include_tl_strings is True
+    assert loaded.tl_langs == ()
+    assert loaded.last_game_dir == ""
+
+
+def test_prebuild_values_loaded(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "max_concurrency": 16,
+                "initial_concurrency": 2,
+                "concurrency_increase_after": 10,
+                "latency_guard_seconds": 20.0,
+                "circuit_break_threshold": 3,
+                "retries": 0,
+                "include_tl_strings": False,
+                "tl_langs": ["chinese", "japanese"],
+                "last_game_dir": "D:/Games/Sample",
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.max_concurrency == 16
+    assert loaded.initial_concurrency == 2
+    assert loaded.concurrency_increase_after == 10
+    assert loaded.latency_guard_seconds == 20.0
+    assert loaded.circuit_break_threshold == 3
+    assert loaded.retries == 0
+    assert loaded.include_tl_strings is False
+    assert loaded.tl_langs == ("chinese", "japanese")
+    assert loaded.last_game_dir == "D:/Games/Sample"
+
+
+def test_prebuild_out_of_range_falls_back(tmp_path):
+    """越界回退默认：并发上限 1..64、increase_after 1..1000、
+    latency_guard >= 1.0、circuit_break 1..100、retries 0..10。"""
+    target = tmp_path / "config.json"
+    for bad, key, default in (
+        (0, "max_concurrency", 8),
+        (65, "max_concurrency", 8),
+        (True, "max_concurrency", 8),
+        ("many", "initial_concurrency", 1),
+        (0, "concurrency_increase_after", 6),
+        (0.5, "latency_guard_seconds", 15.0),
+        (0, "circuit_break_threshold", 5),
+        (101, "circuit_break_threshold", 5),
+        (-1, "retries", 2),
+        (11, "retries", 2),
+    ):
+        target.write_text(json.dumps({key: bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert getattr(loaded, key) == default, f"{key}={bad!r} 应回退默认"
+
+
+def test_tl_langs_invalid_falls_back_to_all(tmp_path):
+    """tl_langs 非列表回退空元组（= 全部语言）；列表内非字符串项被剔除。"""
+    target = tmp_path / "config.json"
+    for bad in ("chinese", 123, True, {"a": 1}):
+        target.write_text(json.dumps({"tl_langs": bad}), encoding="utf-8")
+        assert config.load_config(target).tl_langs == (), f"{bad!r}"
+    target.write_text(json.dumps({"tl_langs": ["zh", 3, "  ", "ja"]}), encoding="utf-8")
+    assert config.load_config(target).tl_langs == ("zh", "ja")
+
+
+def test_existing_keys_keep_user_values_when_prebuild_keys_added(tmp_path):
+    """键冲突优先级（需求）：本项目已有键的用户取值不被预构建默认覆盖。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "api_base_url": "https://user.example",
+                "api_timeout": 45.0,
+                "auto_translate": False,
+                "retries": 4,
+                "tl_langs": ["russian"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.api_base_url == "https://user.example"
+    assert loaded.api_timeout == 45.0
+    assert loaded.auto_translate is False
+    assert loaded.retries == 4
+    assert loaded.tl_langs == ("russian",)

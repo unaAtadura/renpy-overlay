@@ -54,6 +54,15 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "remote_cache_size_count": 50,      # 遥控器自动化：内存循环队列缓存条数（感知签名↔译文）
       "remote_screenshot_diameterA": 100, # 遥控截图窗口 A（触发器）直径（像素）
       "remote_screenshot_diameterB": 100, # 遥控截图窗口 B（瞄准器）直径（像素）
+      "max_concurrency": 8,               # 预构建自适应并发的上限（在途请求数）
+      "initial_concurrency": 1,           # 预构建本轮起步并发（保守起步自动爬坡）
+      "concurrency_increase_after": 6,    # 连续成功多少条后并发 +1
+      "latency_guard_seconds": 15.0,      # 时延闸门：近期中位时延超过此值不再升档
+      "circuit_break_threshold": 5,       # 连续端点不可达多少条后熔断
+      "retries": 2,                       # 预构建单条普通失败的最大重试次数
+      "include_tl_strings": true,         # 预构建是否把 game/tl/ 下的翻译文件纳入扫描
+      "tl_langs": [],                     # 预构建 tl 语言过滤；空列表 = 全部语言
+      "last_game_dir": "",                # 预构建上次选择的游戏目录（启动时预填）
     }
 """
 
@@ -147,6 +156,20 @@ DEFAULT_REMOTE_CACHE_SIZE_COUNT = 50
 MIN_REMOTE_SCREENSHOT_INTERVAL = MIN_AUTO_TRANSLATE_INTERVAL
 #: 缓存条数下限：0 条缓存无意义
 MIN_REMOTE_CACHE_SIZE_COUNT = 1
+# 预构建自适应并发默认值（移植自 renpy-overlay-batch-translator）
+DEFAULT_MAX_CONCURRENCY = 8
+DEFAULT_INITIAL_CONCURRENCY = 1
+DEFAULT_CONCURRENCY_INCREASE_AFTER = 6
+DEFAULT_LATENCY_GUARD_SECONDS = 15.0
+DEFAULT_CIRCUIT_BREAK_THRESHOLD = 5
+DEFAULT_RETRIES = 2
+# 预构建扫描范围默认值
+DEFAULT_INCLUDE_TL_STRINGS = True
+DEFAULT_TL_LANGS: tuple[str, ...] = ()
+DEFAULT_LAST_GAME_DIR = ""
+#: 预构建并发相关字段的合法范围（越界回退默认值）
+MAX_CONCURRENCY_LIMIT = 64
+MAX_RETRIES_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -204,6 +227,16 @@ class AppConfig:
     remote_cache_size_count: int = DEFAULT_REMOTE_CACHE_SIZE_COUNT
     remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     remote_screenshot_diameter_b: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
+    # 预构建翻译缓存：自适应并发 / 重试 / 熔断 / 扫描范围 / 目录记忆
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    initial_concurrency: int = DEFAULT_INITIAL_CONCURRENCY
+    concurrency_increase_after: int = DEFAULT_CONCURRENCY_INCREASE_AFTER
+    latency_guard_seconds: float = DEFAULT_LATENCY_GUARD_SECONDS
+    circuit_break_threshold: int = DEFAULT_CIRCUIT_BREAK_THRESHOLD
+    retries: int = DEFAULT_RETRIES
+    include_tl_strings: bool = DEFAULT_INCLUDE_TL_STRINGS
+    tl_langs: tuple[str, ...] = DEFAULT_TL_LANGS
+    last_game_dir: str = DEFAULT_LAST_GAME_DIR
 
 
 def default_path() -> Path:
@@ -221,6 +254,36 @@ def default_path() -> Path:
     if (package_root / "pyproject.toml").is_file():
         return package_root / CONFIG_FILENAME
     return Path.cwd() / CONFIG_FILENAME
+
+
+def update_config_keys(updates: dict, path: Path | None = None) -> bool:
+    """合并式更新 config.json 的若干键（读 raw → 改键 → 整文件写回）。
+
+    供设置窗口 / 预构建窗口的单键变更落盘：只改 ``updates`` 中的键，
+    未涉及的键（含未知键与手工编辑内容）原样保留。文件不存在或读取
+    失败时以空骨架重建（仅写入 updates）；写盘失败记日志返回 False，
+    不抛异常（配置问题绝不导致程序崩溃）。
+    """
+    target = Path(path) if path is not None else default_path()
+    raw: dict = {}
+    if target.is_file():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                raw = loaded
+        except (OSError, ValueError) as exc:
+            logger.warning("读取配置失败（%s），合并写入将重建骨架：%s", target, exc)
+    raw.update(updates)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("保存配置失败（%s）：%s", target, exc)
+        return False
+    logger.info("配置键已更新（%d 项）：%s", len(updates), "、".join(sorted(updates)))
+    return True
 
 
 def _write_defaults(target: Path) -> None:
@@ -267,6 +330,15 @@ def _write_defaults(target: Path) -> None:
     payload["remote_cache_size_count"] = DEFAULT_REMOTE_CACHE_SIZE_COUNT
     payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["remote_screenshot_diameterB"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
+    payload["max_concurrency"] = DEFAULT_MAX_CONCURRENCY
+    payload["initial_concurrency"] = DEFAULT_INITIAL_CONCURRENCY
+    payload["concurrency_increase_after"] = DEFAULT_CONCURRENCY_INCREASE_AFTER
+    payload["latency_guard_seconds"] = DEFAULT_LATENCY_GUARD_SECONDS
+    payload["circuit_break_threshold"] = DEFAULT_CIRCUIT_BREAK_THRESHOLD
+    payload["retries"] = DEFAULT_RETRIES
+    payload["include_tl_strings"] = DEFAULT_INCLUDE_TL_STRINGS
+    payload["tl_langs"] = list(DEFAULT_TL_LANGS)
+    payload["last_game_dir"] = DEFAULT_LAST_GAME_DIR
     try:
         target.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -353,6 +425,28 @@ def _read_positive_float(raw: dict, key: str, default: float, minimum: float) ->
         logger.warning("%s 低于下限 %s（%r），回退默认 %s", key, minimum, value, default)
         return default
     return float(value)
+
+
+def _read_int_in_range(raw: dict, key: str, default: int, minimum: int, maximum: int) -> int:
+    """带上下限的整数字段校验（预构建并发参数）：类型不对或越界 → 回退默认。"""
+    value = raw.get(key, default)
+    # 注意 bool 是 int 的子类，True/False 不算合法数字
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != int(value):
+        logger.warning("%s 不是整数（%r），回退默认 %d", key, value, default)
+        return default
+    if not minimum <= int(value) <= maximum:
+        logger.warning("%s 超出 %d..%d（%r），回退默认 %d", key, minimum, maximum, value, default)
+        return default
+    return int(value)
+
+
+def _read_tl_langs(raw: dict) -> tuple[str, ...]:
+    """预构建 tl 语言过滤列表校验：非列表回退空元组（= 全部语言）。"""
+    value = raw.get("tl_langs", list(DEFAULT_TL_LANGS))
+    if not isinstance(value, list):
+        logger.warning("tl_langs 不是列表（%r），回退默认空列表（全部语言）", value)
+        return DEFAULT_TL_LANGS
+    return tuple(str(item) for item in value if isinstance(item, str) and item.strip())
 
 
 def _read_fullscreen_mode(raw: dict) -> str:
@@ -562,6 +656,32 @@ def load_config(path: Path | None = None) -> AppConfig:
             DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
             MIN_REMOTE_SCREENSHOT_DIAMETER,
         ),
+        max_concurrency=_read_int_in_range(
+            raw, "max_concurrency", DEFAULT_MAX_CONCURRENCY, 1, MAX_CONCURRENCY_LIMIT
+        ),
+        initial_concurrency=_read_int_in_range(
+            raw, "initial_concurrency", DEFAULT_INITIAL_CONCURRENCY, 1, MAX_CONCURRENCY_LIMIT
+        ),
+        concurrency_increase_after=_read_int_in_range(
+            raw,
+            "concurrency_increase_after",
+            DEFAULT_CONCURRENCY_INCREASE_AFTER,
+            1,
+            1000,
+        ),
+        latency_guard_seconds=_read_positive_float(
+            raw,
+            "latency_guard_seconds",
+            DEFAULT_LATENCY_GUARD_SECONDS,
+            1.0,
+        ),
+        circuit_break_threshold=_read_int_in_range(
+            raw, "circuit_break_threshold", DEFAULT_CIRCUIT_BREAK_THRESHOLD, 1, 100
+        ),
+        retries=_read_int_in_range(raw, "retries", DEFAULT_RETRIES, 0, MAX_RETRIES_LIMIT),
+        include_tl_strings=_read_bool(raw, "include_tl_strings", DEFAULT_INCLUDE_TL_STRINGS),
+        tl_langs=_read_tl_langs(raw),
+        last_game_dir=_read_str(raw, "last_game_dir", DEFAULT_LAST_GAME_DIR),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
@@ -575,7 +695,10 @@ def load_config(path: Path | None = None) -> AppConfig:
         "asr_rt（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "remote_screenshot（enable=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d）",
+        "remote_screenshot（enable=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d），"
+        "prebuild（max=%d，initial=%d，increase_after=%d，latency_guard=%.1fs，"
+        "circuit_break=%d，retries=%d，include_tl=%s，tl_langs=%s），"
+        "last_game_dir=%s",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -616,5 +739,14 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.remote_cache_size_count,
         app_config.remote_screenshot_diameter_a,
         app_config.remote_screenshot_diameter_b,
+        app_config.max_concurrency,
+        app_config.initial_concurrency,
+        app_config.concurrency_increase_after,
+        app_config.latency_guard_seconds,
+        app_config.circuit_break_threshold,
+        app_config.retries,
+        app_config.include_tl_strings,
+        list(app_config.tl_langs) or "<全部>",
+        app_config.last_game_dir or "<无>",
     )
     return app_config

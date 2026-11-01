@@ -209,3 +209,78 @@ def test_choice_translation_text_reexport_equivalent():
 
     items = ["A", "B"]
     assert via_window(items) == choice_translation_text(items) == "1. A\n2. B"
+
+
+# ---- 预构建移植扩展：判存（has）与三链路并发写 --------------------------------
+
+
+def test_has_reports_presence_and_absence(tmp_path):
+    store = open_store(tmp_path)
+    try:
+        assert store.has("Hello") is False
+        store.put("Hello", "你好")
+        assert store.has("Hello") is True
+        assert store.has("未翻译过") is False
+        assert store.has("") is True  # 空原文直接视为已存在（无需翻译）
+    finally:
+        store.close()
+
+
+def test_has_returns_true_when_degraded(tmp_path):
+    store = open_store(tmp_path)
+    try:
+        store._broken = True  # 模拟写入降级后的短路状态
+        assert store.has("任意原文") is True, "降级后应视为已存在，避免无意义翻译请求"
+    finally:
+        store.close()
+
+
+def test_db_path_for_layout(tmp_path):
+    from renpy_overlay.translation_store import db_path_for
+
+    assert db_path_for(tmp_path) == tmp_path / CACHE_DIR_NAME / DB_FILENAME
+
+
+def test_three_write_chains_concurrent_puts(tmp_path):
+    """三链路并发写（前台翻译连接 + 预构建线程池共享连接）不丢数据。
+
+    复刻移植后真实写库拓扑：主线程前台连接逐条写、预构建两个工作线程
+    共享同一独立连接并发写；进程级写锁串行化 + busy_timeout 兑底，
+    全部条目落库且无 sqlite3 异常。
+    """
+    import threading
+
+    store_front = open_store(tmp_path)  # 前台（主线程）连接
+    store_prebuild = open_store(tmp_path)  # 预构建工作线程池共享连接
+    try:
+        errors: list[Exception] = []
+
+        def front_writer() -> None:
+            try:
+                for i in range(40):
+                    assert store_front.put(f"front{i}", "译") is True
+            except Exception as exc:  # pragma: no cover - 失败时收集诊断
+                errors.append(exc)
+
+        def pool_writer(prefix: str) -> None:
+            try:
+                for i in range(40):
+                    assert store_prebuild.put(f"{prefix}{i}", "译") is True
+                    assert isinstance(store_prebuild.has(f"{prefix}{i}"), bool)
+            except Exception as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=front_writer),
+            threading.Thread(target=pool_writer, args=("pb1",)),
+            threading.Thread(target=pool_writer, args=("pb2",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert store_front.count() == 120, "三条链路共 120 条应全部落库"
+    finally:
+        store_front.close()
+        store_prebuild.close()

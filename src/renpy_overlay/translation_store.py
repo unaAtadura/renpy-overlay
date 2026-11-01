@@ -29,6 +29,11 @@ logger = logging.getLogger("renpy_overlay.translation_store")
 CACHE_DIR_NAME = "renpy_overlay_cache"
 DB_FILENAME = "translations.db"
 
+
+def db_path_for(game_dir) -> Path:
+    """游戏根目录对应的翻译数据库路径（GUI 展示 / 预构建提示用）。"""
+    return Path(game_dir) / CACHE_DIR_NAME / DB_FILENAME
+
 #: 进程级写锁：同一库存在两条写链路 —— 前台翻译落库（Qt 主线程）与离线
 #: 预构建落库（后台线程，独立连接）；put/delete 持锁串行化，粒度为单条
 #: 记录，对既有主线程调用方无竞争（恒立即获得）。读不加锁（读写在
@@ -100,6 +105,26 @@ class TranslationStore:
             return None
         logger.info("翻译数据库命中（原文 %d 字）", len(original))
         return str(row[0])
+
+    def has(self, original: str) -> bool:
+        """按原文判存（哈希 + 原文精确匹配）；数据库已降级时返回 True
+
+        （视为已存在，避免向不可写库发起无意义的预构建翻译请求）。
+        """
+        if not original:
+            return True
+        if self._broken:
+            return True
+        key = self._hash_func(original)
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM translations WHERE hash = ? AND original = ?",
+                (key, original),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            self._degrade("判存", exc)
+            return True
+        return row is not None
 
     def put(self, original: str, translated: str) -> bool:
         """增量写入 / 覆盖同一原文的译文，返回是否写入成功。
