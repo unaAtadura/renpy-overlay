@@ -48,6 +48,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "api_base_url_asr_rt": "",         # 实时语音识别独立 API 基址（不回退其它链路，留空即不可用）
       "model_asr_rt": "",                # 实时语音识别模型（不回退其它链路，留空即不可用）
       "api_key_asr_rt": "",              # 实时语音识别的 API Key（不回退其它链路，留空即不可用）
+      "fullscreen_mode": "sdl",           # 视频剪辑全屏渲染路径：sdl=SDL 独立窗口（默认）/ qt=Qt 顶层回退
       "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
       "remote_screenshot_interval": 0.5,  # 遥控器自动化：周期截图间隔（秒）
       "remote_cache_size_count": 50,      # 遥控器自动化：内存循环队列缓存条数（感知签名↔译文）
@@ -113,6 +114,9 @@ DEFAULT_API_KEY_ASR = ""
 DEFAULT_API_BASE_URL_ASR_RT = ""
 DEFAULT_MODEL_ASR_RT = ""
 DEFAULT_API_KEY_ASR_RT = ""
+#: 视频剪辑全屏渲染路径："sdl"=SDL 独立顶层窗口（默认）；"qt"=Qt 顶层窗口 +
+#: 画布重绑保底回退（外部移植方案实测 sdl 更稳，qt 存在窗口不显示风险）
+DEFAULT_FULLSCREEN_MODE = "sdl"
 #: 听歌识曲录制系统音频的时长（秒）：参考项目验证值
 DEFAULT_RECORDING_DURATION = 8
 #: 快捷键模式：主开关键默认 Alt+T（不含 Ctrl 以规避 Ren'Py 持续快进），窗口键默认数字 1-8（红橙黄绿青蓝紫黑）
@@ -184,6 +188,8 @@ class AppConfig:
     api_base_url_asr_rt: str = DEFAULT_API_BASE_URL_ASR_RT
     model_asr_rt: str = DEFAULT_MODEL_ASR_RT
     api_key_asr_rt: str = DEFAULT_API_KEY_ASR_RT
+    # 视频剪辑（全屏渲染路径：sdl / qt，非法值回退 qt 保底）
+    fullscreen_mode: str = DEFAULT_FULLSCREEN_MODE
     # 听歌识曲
     recording_duration: int = DEFAULT_RECORDING_DURATION
     # 截图翻译快捷键模式（主开关 + 8 个窗口键，均为全局热键）
@@ -235,6 +241,7 @@ def _write_defaults(target: Path) -> None:
         "api_base_url_asr_rt": DEFAULT_API_BASE_URL_ASR_RT,
         "model_asr_rt": DEFAULT_MODEL_ASR_RT,
         "api_key_asr_rt": DEFAULT_API_KEY_ASR_RT,
+        "fullscreen_mode": DEFAULT_FULLSCREEN_MODE,
         "enable_thinking": DEFAULT_ENABLE_THINKING,
         "reasoning_effort": DEFAULT_REASONING_EFFORT,
         "api_timeout": DEFAULT_API_TIMEOUT,
@@ -346,6 +353,19 @@ def _read_positive_float(raw: dict, key: str, default: float, minimum: float) ->
         logger.warning("%s 低于下限 %s（%r），回退默认 %s", key, minimum, value, default)
         return default
     return float(value)
+
+
+def _read_fullscreen_mode(raw: dict) -> str:
+    """视频剪辑全屏渲染路径校验（仅 sdl/qt）：非法值回退 qt（attach 保底）。"""
+    value = raw.get("fullscreen_mode", DEFAULT_FULLSCREEN_MODE)
+    if not isinstance(value, str):
+        logger.warning("fullscreen_mode 不是字符串（%r），回退默认 %r", value, DEFAULT_FULLSCREEN_MODE)
+        return DEFAULT_FULLSCREEN_MODE
+    mode = value.strip().lower()
+    if mode not in ("sdl", "qt"):
+        logger.warning("fullscreen_mode 非法值 %r，回退 qt（attach 保底）", value)
+        return "qt"
+    return mode
 
 
 def _read_window_style(raw: dict) -> int:
@@ -506,6 +526,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         api_base_url_asr_rt=_read_str(raw, "api_base_url_asr_rt", DEFAULT_API_BASE_URL_ASR_RT),
         model_asr_rt=_read_str(raw, "model_asr_rt", DEFAULT_MODEL_ASR_RT),
         api_key_asr_rt=_read_str(raw, "api_key_asr_rt", DEFAULT_API_KEY_ASR_RT),
+        fullscreen_mode=_read_fullscreen_mode(raw),
         recording_duration=_read_positive_int(
             raw, "recording_duration", DEFAULT_RECORDING_DURATION, MIN_RECORDING_DURATION
         ),

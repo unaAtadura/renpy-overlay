@@ -31,7 +31,7 @@ import sysconfig
 ROOT = SPECPATH  # noqa: F821 - PyInstaller 注入：spec 文件所在目录
 SRC = os.path.join(ROOT, "src")
 
-# SDL2 本体（video/player 播放引擎）：pysdl2-dll 无 PyInstaller hook，其
+# SDL2 本体（video/clip/player 播放引擎）：pysdl2-dll 无 PyInstaller hook，其
 # sdl2dll/dll 目录下的 DLL 不会自动收集，必须手动加入 binaries；
 # 运行链仅用 SDL2 本体（render/audio/events），SDL2_image/mixer/ttf/gfx
 # 扩展及其第三方依赖链（libwebp、libogg 等）不被使用，不打包
