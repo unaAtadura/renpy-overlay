@@ -100,8 +100,9 @@ EPILOG = """\
               映射为切片标记。「应用」：按当前播放序列导出（重编码帧精确
               CRF 可调 / 关键帧吸附无损流拷贝二选一，导出前预估大小、
               可中断）。「全屏」按钮进入 SDL 独立全屏窗口（Esc 退出，
-              悬浮面板控制播放）。PyAV/SDL2 缺失时降级提示；日志区域
-              同步显示窗口相关日志（可切完整调试模式）
+              悬浮面板控制播放）。PyAV/SDL2 缺失时降级提示；日志区域为
+              内部进度通道（导出/字幕/载入等任务进度与状态显式上报，
+              默认简洁模式恒可见，「调试」按钮切换诊断通道显示）
   ASR 配置    config.json 的 api_base_url_asr / model_asr / api_key_asr（三键排在
               视觉三键之后）：空值分别回退主链路 api_base_url / model / api_key；
               无备选模型。转写请求为 chat/completions + input_audio（qwen-omni
