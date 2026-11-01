@@ -116,9 +116,14 @@ class _SubtitleWorker(QThread):
     API 互斥：制作开始经 ``api_acquire`` 占用宿主互斥槽（与实时语音
     识别同模式：批量任务独占，期间其余 API 入口被拦截），结束/失败/
     中断在 ``finally`` 释放；回调未注入时跳过（离线测试便利）。
+
+    进度可见性：逐条进度经 ``entry_progress`` 信号回主线程写入日志面板
+    的进度通道（携带第 N/总数、当前切片起止时间与 ASR/翻译阶段）——
+    INFO 级恒可见，不依赖 logging 传播链，简洁模式默认可见且切换显示
+    等级不丢失。
     """
 
-    entry_done = pyqtSignal(int, int)  # (已完成数, 总数)
+    entry_progress = pyqtSignal(int, int, str)  # (已完成数, 总数, 进度说明)
     finished_ok = pyqtSignal(int)  # 成功条数
     failed = pyqtSignal(str)
 
@@ -156,8 +161,17 @@ class _SubtitleWorker(QThread):
                 sub_file.write(ASS_HEADER)  # 头段一次（文件已由调用方清空）
                 for index, seg in enumerate(self._segments, start=1):
                     if self._stop:
-                        logger.info("制作字幕已中断：保留已落盘 %d 条", done)
+                        # 中断状态经进度信号回主线程上屏（worker 不直接操作控件）
+                        self.entry_progress.emit(
+                            done,
+                            len(self._segments),
+                            f"制作已中断，保留已落盘 {done} 条",
+                        )
                         break
+                    total = len(self._segments)
+                    seg_label = (
+                        f"切片 {index}/{total} [{seg.start_ms}-{seg.end_ms}ms]"
+                    )
                     wav = extract_wav(
                         video_path=self._video_path,
                         start_s=seg.start_ms / 1000.0,
@@ -174,6 +188,10 @@ class _SubtitleWorker(QThread):
                         enable_thinking=self._config.enable_thinking,
                         reasoning_effort=self._config.reasoning_effort,
                     )
+                    # 阶段进度（INFO 无心跳标记）：ASR 慢时也能看到切片推进
+                    self.entry_progress.emit(
+                        done, total, f"{seg_label} ASR 完成，翻译中"
+                    )
                     zh_text = translate_text(
                         src_text,
                         base_url=self._config.api_base_url,
@@ -189,7 +207,9 @@ class _SubtitleWorker(QThread):
                     sub_file.write(build_ass_dialogue(entry))
                     sub_file.flush()  # 逐条落盘（中断保留）
                     done += 1
-                    self.entry_done.emit(done, len(self._segments))
+                    self.entry_progress.emit(
+                        done, total, f"{seg_label} ASR+翻译完成，已落盘"
+                    )
         except (TranslationError, RuntimeError) as exc:
             # EndpointUnavailable 是 TranslationError 子类，一并收敛
             self.failed.emit(f"{exc}（已落盘 {done} 条）")
@@ -309,13 +329,11 @@ class _ExportWorker(QThread):
                 crf=self._crf,
             )
         except ExportAborted:
-            logger.info("导出已中断，清理半成品文件")
             self._cleanup_partial()
-            self.aborted.emit()
+            self.aborted.emit()  # 中断提示由主窗口经 aborted 信号写入日志面板
             return
         except Exception as exc:  # 编码/IO 异常统一收敛
-            logger.error("导出失败：%s", exc, exc_info=True)
-            self.failed.emit(str(exc))
+            self.failed.emit(str(exc))  # 失败原因由主窗口经 failed 信号写入面板
             return
         self.finished_ok.emit(self._out_path)
 
@@ -424,9 +442,6 @@ class EditorWindow(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        # 窗口日志区域接管 root logger（同一 logger 树；幂等）：窗口打开
-        # 期间主程序日志同步流入面板，closeEvent 时 detach
-        self._log_panel.attach_logger()
 
     # ---- UI 构建 ---------------------------------------------------------------
 
@@ -544,16 +559,22 @@ class EditorWindow(QMainWindow):
         self._worker = _WaveformWorker(path, self)
         self._worker.waveform_ready.connect(self._on_waveform_ready)
         self._worker.start()
-        logger.info(
-            "已载入剪辑会话：%s（时长 %dms，fps=%.3f）", path, duration_ms, self._fps
+        self._log_panel.append_info(
+            f"已载入剪辑会话：{path}（时长 {duration_ms}ms，fps={self._fps:.3f}）",
+            category="播放",
         )
 
     def _on_waveform_ready(self, wave) -> None:
         if wave is None:
-            logger.warning("声波图不可用（无音频轨或解码失败）")
+            self._log_panel.append_warning(
+                "声波图不可用（无音频轨或解码失败）", category="播放"
+            )
             return
         self._waveform.set_waveform(wave)
-        logger.info("声波图就绪（%dms，块 %dms）", wave.duration_ms, wave.block_ms)
+        self._log_panel.append_info(
+            f"声波图就绪（{wave.duration_ms}ms，块 {wave.block_ms}ms）",
+            category="播放",
+        )
 
     def _on_media_opened(self, info) -> None:
         self._fps = info.fps
@@ -935,30 +956,44 @@ class EditorWindow(QMainWindow):
             self._subtitle_worker.isRunning()
         ):
             self._subtitle_worker.stop()  # 制作中再次点击：停止制作
-            logger.info("正在停止字幕制作（保留已落盘内容）…")
+            self._log_panel.append_info(
+                "正在停止字幕制作（保留已落盘内容）…", category="字幕"
+            )
             return
         segments = self._markers.segments()
         if not segments:
-            logger.info("制作字幕无效：尚无切片标记（按 f 标记）")
+            self._log_panel.append_info(
+                "制作字幕无效：尚无切片标记（按 f 标记）", category="字幕"
+            )
             return
         video_path = self._pane.current_video_path()
         if video_path is None:
-            logger.info("制作字幕无效：未打开视频")
+            self._log_panel.append_info(
+                "制作字幕无效：未打开视频", category="字幕"
+            )
             return
         cfg = self._config
         # ASR 三键经回退链解析（空值跟随主链路）后与翻译主链路一并校验
         asr_base_url, asr_model, _asr_key = resolve_asr_options(cfg)
         if not (asr_base_url and asr_model and cfg.api_base_url and cfg.model):
-            logger.warning("ASR/翻译配置缺失（config.json 三键），无法制作字幕")
+            self._log_panel.append_warning(
+                "ASR/翻译配置缺失（config.json 三键），无法制作字幕",
+                category="字幕",
+            )
             return
         subtitle_path = self._subtitle_path_for(video_path)
         sub_path = Path(subtitle_path)
         if sub_path.exists():  # 制作前删除同名字幕，无法删除则中止
             try:
                 sub_path.unlink()
-                logger.info("已删除旧字幕文件：%s", subtitle_path)
+                self._log_panel.append_info(
+                    f"已删除旧字幕文件：{subtitle_path}", category="字幕"
+                )
             except OSError as exc:
-                logger.error("旧字幕删除失败，中止制作（%s）：%s", subtitle_path, exc)
+                self._log_panel.append_error(
+                    f"旧字幕删除失败，中止制作（{subtitle_path}）：{exc}",
+                    category="字幕",
+                )
                 return
         answer = QMessageBox.question(
             self,
@@ -967,7 +1002,7 @@ class EditorWindow(QMainWindow):
             f"输出：{subtitle_path}\n制作中再次点击「制作字幕」可停止。是否继续？",
         )
         if answer != QMessageBox.StandardButton.Yes:
-            logger.info("制作字幕已取消")
+            self._log_panel.append_info("制作字幕已取消", category="字幕")
             return
         worker = _SubtitleWorker(
             segments,
@@ -978,16 +1013,27 @@ class EditorWindow(QMainWindow):
             api_release=self._api_release,
             parent=self,
         )
-        worker.entry_done.connect(
-            lambda done, total: logger.info("字幕进度：%d / %d", done, total)
+        worker.entry_progress.connect(
+            lambda done, total, note: self._log_panel.append_progress(
+                f"字幕进度：{done} / {total} {note}", category="字幕"
+            )
         )
         worker.finished_ok.connect(
-            lambda n: logger.info("字幕制作完成：共 %d 条 → %s", n, subtitle_path)
+            lambda n: self._log_panel.append_success(
+                f"字幕制作完成：共 {n} 条 → {subtitle_path}", category="字幕"
+            )
         )
-        worker.failed.connect(lambda msg: logger.error("字幕制作失败：%s", msg))
+        worker.failed.connect(
+            lambda msg: self._log_panel.append_error(
+                f"字幕制作失败：{msg}", category="字幕"
+            )
+        )
         self._subtitle_worker = worker
         worker.start()
-        logger.info("字幕制作已启动（%d 个切片）", len(segments))
+        self._log_panel.append_info(
+            f"字幕制作已启动：{len(segments)} 个切片 → {subtitle_path}",
+            category="字幕",
+        )
 
     def _load_subtitles(self) -> None:
         """加载字幕：同名 ASS → 解析 Dialogue → 切片标记映射（先清空现有切片）。"""
@@ -1015,12 +1061,14 @@ class EditorWindow(QMainWindow):
         """应用：预估大小 → 策略弹窗（Radio 二选一）→ 后台导出 → 对比。"""
         clips = self._model.clips()
         if not clips:
-            logger.info("应用无效：未载入视频")
+            self._log_panel.append_info("应用无效：未载入视频", category="导出")
             return
         worker = getattr(self, "_export_worker", None)
         if worker is not None and worker.isRunning():
             worker.stop()  # 导出中再次点击：中断导出（半成品自动清理）
-            logger.info("正在中断导出（半成品文件将清理）…")
+            self._log_panel.append_info(
+                "正在中断导出（半成品文件将清理）…", category="导出"
+            )
             return
         out_path = default_export_path(clips[0].source_path)
         # 导出前预估（需求 1/4）：失败仅告警不阻塞
@@ -1029,40 +1077,56 @@ class EditorWindow(QMainWindow):
         total_duration_s = sum(c.duration_ms for c in clips) / 1000.0
         if estimate is not None:
             est_mb = estimate.bytes_estimate / 1_048_576
-            logger.info(
-                "预计导出文件大小：%.2f MB（%s；片段总时长 %.1fs）",
-                est_mb,
-                estimate.method,
-                total_duration_s,
+            self._log_panel.append_info(
+                f"预计导出文件大小：{est_mb:.2f} MB"
+                f"（{estimate.method}；片段总时长 {total_duration_s:.1f}s）",
+                category="导出",
             )
             estimate_line = f"预计导出文件大小：{est_mb:.2f} MB"
         else:
-            logger.warning("导出大小预估不可用：%s", reason)
+            self._log_panel.append_warning(
+                f"导出大小预估不可用：{reason}", category="导出"
+            )
             estimate_line = "大小预估不可用"
         dialog = _ExportDialog(
             len(clips), total_duration_s, str(out_path), estimate_line, self
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            logger.info("应用已取消")
+            self._log_panel.append_info("应用已取消", category="导出")
             return
         mode, crf = dialog.choice()
         if mode == "snap":
-            logger.info(
-                "导出策略：关键帧吸附（边界吸附 ≤半个 GOP，零重编码损耗）"
+            self._log_panel.append_info(
+                "导出策略：关键帧吸附（边界吸附 ≤半个 GOP，零重编码损耗）",
+                category="导出",
             )
         else:
-            logger.info("导出策略：重编码（帧精确，CRF=%s）", crf)
+            self._log_panel.append_info(
+                f"导出策略：重编码（帧精确，CRF={crf}）", category="导出"
+            )
         worker = _ExportWorker(
             clips, str(out_path), mode=mode, crf=crf, parent=self
         )
-        worker.progress_logged.connect(lambda line: logger.info(line))
+        worker.progress_logged.connect(
+            lambda line: self._log_panel.append_progress(line, category="导出")
+        )
         worker.finished_ok.connect(self._on_export_done)
-        worker.failed.connect(lambda msg: logger.error("导出失败：%s", msg))
-        worker.aborted.connect(lambda: logger.info("导出已中断（半成品已清理）"))
+        worker.failed.connect(
+            lambda msg: self._log_panel.append_error(
+                f"导出失败：{msg}", category="导出"
+            )
+        )
+        worker.aborted.connect(
+            lambda: self._log_panel.append_info(
+                "导出已中断（半成品已清理）", category="导出"
+            )
+        )
         worker.finished.connect(lambda: setattr(self, "_export_worker", None))
         self._export_worker = worker
         worker.start()
-        logger.info("导出已启动 → %s", out_path)
+        self._log_panel.append_info(
+            f"导出已启动：{len(clips)} 个片段 → {out_path}", category="导出"
+        )
 
     def _on_export_done(self, out_path: str) -> None:
         """导出完成：实际大小 + 与预估对比误差（需求 3）；清空命令流。"""
@@ -1085,19 +1149,20 @@ class EditorWindow(QMainWindow):
                 if abs(error_pct) > 50
                 else ""
             )
-            logger.info(
-                "导出完成：实际大小 %.2f MB，预计大小 %.2f MB，误差 %.1f%%（%s）%s → %s",
-                actual_mb,
-                est_mb,
-                error_pct,
-                estimate.method,
-                hint,
-                out_path,
+            self._log_panel.append_success(
+                f"导出完成：实际大小 {actual_mb:.2f} MB，预计大小 {est_mb:.2f} MB，"
+                f"误差 {error_pct:.1f}%（{estimate.method}）{hint} → {out_path}",
+                category="导出",
             )
         elif actual_mb is not None:
-            logger.info("导出完成：实际大小 %.2f MB → %s", actual_mb, out_path)
+            self._log_panel.append_success(
+                f"导出完成：实际大小 {actual_mb:.2f} MB → {out_path}",
+                category="导出",
+            )
         else:
-            logger.info("导出完成 → %s", out_path)
+            self._log_panel.append_success(
+                f"导出完成 → {out_path}", category="导出"
+            )
         self._undo_stack.clear()  # 二次确认后一律清空命令流（不检查是否剪辑过）
 
     # ---- 生命周期 ---------------------------------------------------------------
@@ -1115,5 +1180,4 @@ class EditorWindow(QMainWindow):
             self._fullscreen.close()
         if self._renderer is not None:
             self._renderer.stop()  # 渲染线程尾部自清理 SDL 对象后退出
-        self._log_panel.detach_logger()
         super().closeEvent(event)

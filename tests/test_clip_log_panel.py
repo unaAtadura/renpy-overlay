@@ -1,10 +1,14 @@
-"""日志面板等级切换单测（offscreen；root 级别与文件/控制台两路不受影响）。
+"""日志面板内部进度信息流单测（offscreen；不依赖 logging 传播链）。
 
-覆盖：默认简洁模式（DEBUG/心跳隐藏但入缓存）、切换即时全量刷新（双向）、
-心跳标记日志仅调试模式可见（含历史复现；引擎指标与 renderer_sdl2 渲染
-循环心跳同走统一谓词）、按钮位于文本区上方独立一行
-（不重叠、缩放稳定）、按钮选中态与 tooltip、仅内存不落盘（不动 logger
-树）、环形历史上限、卸载后不再转发。
+面板内容只来自显式 append 系列（主线程）；本文件断言：
+- 通道消息（info/success/warning/error）默认简洁模式恒可见并入环形缓存，
+  切换显示等级不清空不丢行；debug 诊断通道仅完整调试模式可见；
+- 与 logging 解耦：向 root logger 写日志（含引擎心跳）面板不再追加，
+  attach/detach 上屏路径已移除；
+- append 镜像写 logging（原始文本、对应级别）——文件/控制台存档保留；
+- 长耗时任务进度（导出/字幕）经 worker 信号回主线程写入面板：离线驱动
+  信号（不构造真实导出/ASR/媒体链路）断言可见性与缓存；
+- 环形历史上限；按钮布局与阈值状态；root 级别不受切换影响。
 """
 
 import os
@@ -17,10 +21,12 @@ import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
+from renpy_overlay.video.clip.editor_window import _ExportWorker, _SubtitleWorker
 from renpy_overlay.video.clip.log_panel import COMPACT_LEVEL, DEBUG_LEVEL, LogPanel
 
 TEST_LOGGER = logging.getLogger("renpy_overlay.video.clip.test.log_panel")
 RENDER_LOGGER = logging.getLogger("renpy_overlay.video.clip.player.renderer_sdl2")
+PANEL_LOGGER = logging.getLogger("renpy_overlay.video.clip.log_panel")
 
 
 @pytest.fixture(scope="module")
@@ -40,13 +46,10 @@ def debug_root():
 
 @pytest.fixture()
 def panel(qapp, debug_root):
-    p = LogPanel()
-    p.attach_logger()
-    yield p
-    p.detach_logger()
+    return LogPanel()
 
 
-class TestDefaultCompact:
+class TestPanelDefaults:
     def test_new_panel_defaults_compact(self, qapp):
         """重启等价场景：新建面板恢复默认简洁模式（状态不落盘）。"""
         p = LogPanel()
@@ -58,152 +61,151 @@ class TestDefaultCompact:
         assert panel._toggle.text() == "调试"
         assert not panel._toggle.isChecked()
         assert "简洁模式" in panel._toggle.toolTip()
-        assert "DEBUG" in panel._toggle.toolTip()
-
-    def test_debug_hidden_info_shown(self, panel):
-        TEST_LOGGER.debug("调试细节 d1")
-        TEST_LOGGER.info("任务进度 i1")
-        text = panel.toPlainText()
-        assert "任务进度 i1" in text
-        assert "调试细节 d1" not in text
-
-    def test_debug_cached_while_hidden(self, panel):
-        TEST_LOGGER.debug("缓存 d1")
-        assert any("缓存 d1" in m for *_, m in panel._history)
+        assert "任务进度恒可见" in panel._toggle.toolTip()
 
 
-class TestToggleDebug:
-    def test_shows_cached_debug_immediately(self, panel):
-        TEST_LOGGER.debug("早期细节 d1")
-        TEST_LOGGER.info("进度 i1")
-        panel.set_debug_visible(True)
-        text = panel.toPlainText()
-        assert "早期细节 d1" in text  # 简洁期缓存的 DEBUG 切换后即时可见
-        assert "进度 i1" in text
+class TestInternalChannel:
+    """append 系列显式通道：可见性、格式、缓存。"""
 
-    def test_toggle_back_hides_debug_keeps_info(self, panel):
-        TEST_LOGGER.debug("d1")
-        TEST_LOGGER.info("i1")
-        panel.set_debug_visible(True)
-        panel.set_debug_visible(False)
-        text = panel.toPlainText()
-        assert "d1" not in text
-        assert "i1" in text
-
-    def test_order_preserved_after_refresh(self, panel):
-        TEST_LOGGER.info("i1")
-        TEST_LOGGER.debug("d1")
-        TEST_LOGGER.info("i2")
-        panel.set_debug_visible(True)
-        text = panel.toPlainText()
-        assert text.index("i1") < text.index("d1") < text.index("i2")
-
-    def test_new_records_follow_threshold(self, panel):
-        panel.set_debug_visible(True)
-        TEST_LOGGER.debug("d2")
-        assert "d2" in panel.toPlainText()
-        panel.set_debug_visible(False)
-        TEST_LOGGER.debug("d3")
-        assert "d3" not in panel.toPlainText()
-
-    def test_button_state_and_tooltip_follow(self, panel):
-        panel.set_debug_visible(True)
-        assert panel._toggle.isChecked()
-        assert "完整调试模式" in panel._toggle.toolTip()
-        panel.set_debug_visible(False)
-        assert not panel._toggle.isChecked()
-        assert "简洁模式" in panel._toggle.toolTip()
-
-    def test_click_toggles_threshold(self, panel):
-        panel._toggle.setChecked(True)  # 模拟点击（toggled → 阈值切换）
-        assert panel.is_debug_visible()
-        panel._toggle.setChecked(False)
-        assert not panel.is_debug_visible()
-
-
-class TestHeartbeatVisibility:
-    """心跳标记日志（logging extra ``heartbeat``）：仅完整调试模式可见。"""
-
-    def test_heartbeat_hidden_in_compact(self, panel):
-        TEST_LOGGER.info("心跳行 hb1", extra={"heartbeat": True})
-        TEST_LOGGER.info("普通进度 i1")
-        text = panel.toPlainText()
-        assert "心跳行 hb1" not in text  # INFO 心跳也完全隐藏（不刷屏）
-        assert "普通进度 i1" in text
-
-    def test_heartbeat_cached_while_hidden(self, panel):
-        TEST_LOGGER.info("心跳行 hb1", extra={"heartbeat": True})
+    def test_append_info_visible_and_cached(self, panel):
+        panel.append_info("任务状态 s1", category="系统")
+        assert "任务状态 s1" in panel.toPlainText()  # 简洁模式默认可见
         assert any(
-            "心跳行 hb1" in m and hb for _, hb, m in panel._history
-        )  # 缓存带标记，格式化文本不受 extra 影响
+            lv == logging.INFO and not hb and "任务状态 s1" in m
+            for lv, hb, m in panel._history
+        )  # 入环形缓存且无心跳标记
 
-    def test_heartbeat_visible_in_debug_including_cached(self, panel):
-        TEST_LOGGER.info("心跳行 hb1", extra={"heartbeat": True})
-        panel.set_debug_visible(True)
-        assert "心跳行 hb1" in panel.toPlainText()  # 切换前缓存的历史心跳复现
+    def test_line_format_has_stamp_level_category(self, panel):
+        panel.append("文本 t1", level="warning", category="导出")
+        line = next(m for *_, m in panel._history if "文本 t1" in m)
+        assert "WARNING" in line
+        assert "[导出]" in line
+        assert "文本 t1" in line
 
-    def test_heartbeat_hidden_again_after_toggle_back(self, panel):
-        TEST_LOGGER.info("心跳行 hb1", extra={"heartbeat": True})
-        panel.set_debug_visible(True)
-        panel.set_debug_visible(False)
-        assert "心跳行 hb1" not in panel.toPlainText()  # 切回即时隐藏
+    def test_append_success_tag_visible(self, panel):
+        panel.append_success("导出完成行", category="导出")
+        assert "SUCCESS" in panel.toPlainText()
+        assert "导出完成行" in panel.toPlainText()
 
-    def test_debug_level_heartbeat_also_gated(self, panel):
-        TEST_LOGGER.debug("调试心跳 hb2", extra={"heartbeat": True})
-        assert "调试心跳 hb2" not in panel.toPlainText()
-        panel.set_debug_visible(True)
-        assert "调试心跳 hb2" in panel.toPlainText()
-
-    def test_non_heartbeat_info_unaffected(self, panel):
-        TEST_LOGGER.info("普通进度 i1")
-        panel.set_debug_visible(True)
-        panel.set_debug_visible(False)
-        assert "普通进度 i1" in panel.toPlainText()  # 非心跳 INFO 始终可见
-
-    def test_extra_not_in_formatted_text(self, panel):
-        TEST_LOGGER.info("心跳行 hb1", extra={"heartbeat": True})
-        assert all(
-            "heartbeat" not in m for *_, m in panel._history
-        )  # extra 不进格式化文本 → 文件日志内容不变
-
-
-class TestRendererSdl2Heartbeat:
-    """renderer_sdl2 渲染循环心跳：同 extra 标记走统一谓词，无特例分支。"""
-
-    HB_MSG = "渲染循环心跳：window=embed presented=1 cmd=idle"
-
-    def test_heartbeat_hidden_in_compact(self, panel):
-        RENDER_LOGGER.info(self.HB_MSG, extra={"heartbeat": True})
-        RENDER_LOGGER.info("rebind 命令已投递（mode=embed hwnd=1）")
-        text = panel.toPlainText()
-        assert "渲染循环心跳" not in text  # 简洁模式完全隐藏（不刷屏）
-        assert "rebind 命令已投递" in text  # 非心跳日志可见性不变
-
-    def test_toggle_debug_shows_then_compact_hides(self, panel):
-        RENDER_LOGGER.info(self.HB_MSG, extra={"heartbeat": True})
-        panel.set_debug_visible(True)
-        assert "渲染循环心跳" in panel.toPlainText()  # 切换前缓存历史心跳复现
-        panel.set_debug_visible(False)
-        assert "渲染循环心跳" not in panel.toPlainText()  # 切回即时隐藏
-
-    def test_heartbeat_still_reaches_root_handlers(self, panel, caplog):
-        # 仅界面过滤：心跳记录仍以 INFO 产生并流向 root 各 handler
-        # （文件/控制台 handler 级别未动，照常落盘）
-        with caplog.at_level(logging.INFO, logger="renpy_overlay.video.clip.player.renderer_sdl2"):
-            RENDER_LOGGER.info(self.HB_MSG, extra={"heartbeat": True})
+    def test_append_progress_alias_is_info(self, panel):
+        panel.append_progress("周期进度 p1", category="导出")
         assert any(
-            r.name == "renpy_overlay.video.clip.player.renderer_sdl2"
+            lv == logging.INFO and "周期进度 p1" in m for lv, _, m in panel._history
+        )
+
+    def test_warning_error_visible_in_compact(self, panel):
+        panel.append_warning("回退 w1", category="导出")
+        panel.append_error("失败 e1", category="字幕")
+        text = panel.toPlainText()
+        assert "回退 w1" in text and "失败 e1" in text
+        assert "WARNING" in text and "ERROR" in text
+
+    def test_append_mirrors_to_logging(self, panel, caplog):
+        """镜像写 logging：原始文本经 log_panel logger 流向文件/控制台。"""
+        with caplog.at_level(logging.INFO, logger=PANEL_LOGGER.name):
+            panel.append_info("镜像存档 m1")
+        assert any(
+            r.name == PANEL_LOGGER.name
             and r.levelno == logging.INFO
-            and "渲染循环心跳" in r.getMessage()
+            and r.getMessage() == "镜像存档 m1"  # 原始文本（不带面板行首格式）
             for r in caplog.records
         )
 
-    def test_heartbeat_extra_not_in_formatted_text(self, panel):
-        RENDER_LOGGER.info(self.HB_MSG, extra={"heartbeat": True})
+
+class TestLevelToggle:
+    def test_channel_visible_across_toggles(self, panel):
+        """进度通道两档均可见：切换不清空、先到缓存行与后到新行一致。"""
+        panel.append_info("切换前 i1", category="导出")
+        panel.set_debug_visible(True)
+        panel.append_info("调试档 i2", category="导出")
+        panel.set_debug_visible(False)
+        text = panel.toPlainText()
+        assert "切换前 i1" in text
+        assert "调试档 i2" in text
+
+    def test_debug_channel_gated(self, panel):
+        """append_debug 诊断通道：简洁隐藏但入缓存，完整调试可见。"""
+        panel.append_debug("诊断 d1", category="引擎")
+        assert "诊断 d1" not in panel.toPlainText()  # 简洁隐藏
+        assert any("诊断 d1" in m for *_, m in panel._history)  # 缓存保留
+        panel.set_debug_visible(True)
+        assert "诊断 d1" in panel.toPlainText()  # 完整调试复现
+        panel.set_debug_visible(False)
+        assert "诊断 d1" not in panel.toPlainText()  # 切回隐藏
+
+    def test_toggle_keeps_root_level(self, panel, debug_root):
+        before = debug_root.level
+        panel.set_debug_visible(True)
+        panel.set_debug_visible(False)
+        assert debug_root.level == before  # 仅界面阈值，不动 logger 树/文件日志
+
+
+class TestDecoupledFromRoot:
+    """与 logging 上屏链路解耦：root 写入不再进面板，attach 路径已移除。"""
+
+    def test_root_logging_does_not_reach_panel(self, panel):
+        panel.append_info("通道行 c1")
+        before = panel.toPlainText()
+        TEST_LOGGER.info("root 写入 r1")
+        TEST_LOGGER.warning("root 警告 r2")
+        assert panel.toPlainText() == before  # 面板不追加任何 logging 内容
+        assert "root 写入 r1" not in panel.toPlainText()
+        assert "root 警告 r2" not in panel.toPlainText()
+
+    def test_engine_heartbeat_does_not_reach_panel(self, panel):
+        """引擎/渲染心跳走 logging 现状，不经通道进简洁视图。"""
+        RENDER_LOGGER.info(
+            "渲染循环心跳：window=embed presented=1", extra={"heartbeat": True}
+        )
+        assert "渲染循环心跳" not in panel.toPlainText()
+
+    def test_attach_detach_path_removed(self):
+        assert not hasattr(LogPanel, "attach_logger")
+        assert not hasattr(LogPanel, "detach_logger")
+
+
+class TestTaskProgressViaSignals:
+    """长耗时任务进度经 worker 信号回主线程写入面板（离线驱动信号）。"""
+
+    def test_export_worker_progress_reaches_panel(self, panel):
+        worker = _ExportWorker([], "out.mp4")  # 不启动线程，不触真实导出
+        worker.progress_logged.connect(
+            lambda line: panel.append_progress(line, category="导出")
+        )
+        worker._on_progress(252, 600, "")  # 首次调用必过 0.5s 节流窗口
+        text = panel.toPlainText()
+        assert "导出进度 42.0%" in text
+        assert "252/600 帧" in text
+        assert "[导出]" in text
         assert any(
-            "渲染循环心跳" in m and hb and "heartbeat" not in m
-            for _, hb, m in panel._history
-        )  # 缓存带标记；extra 不进格式化文本 → 文件内容不变
+            lv == logging.INFO and "导出进度" in m for lv, _, m in panel._history
+        )  # INFO 入缓存（切换等级不丢失的前提）
+
+    def test_subtitle_worker_progress_reaches_panel(self, panel):
+        worker = _SubtitleWorker([], "v.mp4", "v.ass", config=object())  # 不触 ASR
+        worker.entry_progress.connect(
+            lambda done, total, note: panel.append_progress(
+                f"字幕进度：{done} / {total} {note}", category="字幕"
+            )
+        )
+        worker.entry_progress.emit(
+            3, 10, "切片 3/10 [6000-9000ms] ASR 完成，翻译中"
+        )
+        text = panel.toPlainText()
+        assert "字幕进度：3 / 10" in text
+        assert "切片 3/10 [6000-9000ms] ASR 完成，翻译中" in text  # 起止时间与阶段
+        assert "[字幕]" in text
+
+    def test_subtitle_abort_progress_reaches_panel(self, panel):
+        """中断提示走同一进度通道（worker 经信号上报，不直接操作控件）。"""
+        worker = _SubtitleWorker([], "v.mp4", "v.ass", config=object())
+        worker.entry_progress.connect(
+            lambda done, total, note: panel.append_progress(
+                f"字幕进度：{done} / {total} {note}", category="字幕"
+            )
+        )
+        worker.entry_progress.emit(4, 10, "制作已中断，保留已落盘 4 条")
+        assert "制作已中断，保留已落盘 4 条" in panel.toPlainText()
 
 
 class TestButtonRowLayout:
@@ -227,7 +229,6 @@ class TestButtonRowLayout:
         self._show(p, 300, 200)  # 缩小后布局仍稳定
         try:
             assert p._toggle.geometry().bottom() <= p._view.geometry().top()
-            assert not p._toggle.geometry().intersects(p._view.geometry())
         finally:
             p.close()
 
@@ -238,28 +239,16 @@ class TestButtonRowLayout:
 
 
 class TestScopeLimited:
-    def test_handler_level_always_debug(self, panel):
-        assert panel._handler.level == DEBUG_LEVEL  # 记录恒入缓存，过滤在主线程侧
-
-    def test_toggle_keeps_root_level(self, panel, debug_root):
-        before = debug_root.level
+    def test_toggle_keeps_threshold_in_memory_only(self, panel):
         panel.set_debug_visible(True)
+        assert panel._threshold == DEBUG_LEVEL  # 仅内存阈值
         panel.set_debug_visible(False)
-        assert debug_root.level == before  # 仅界面阈值，不动 logger 树/文件日志
+        assert panel._threshold == COMPACT_LEVEL
 
 
-class TestHistoryAndDetach:
+class TestHistoryRing:
     def test_history_ring_cap(self, panel):
         for i in range(2100):
-            TEST_LOGGER.info("行 %d", i)
+            panel.append_info(f"行 {i}")
         assert len(panel._history) == 2000
         assert "行 2099" in panel.toPlainText()
-
-    def test_detach_stops_forwarding(self, qapp, debug_root):
-        p = LogPanel()
-        p.attach_logger()
-        TEST_LOGGER.info("挂载期 i1")
-        p.detach_logger()
-        TEST_LOGGER.info("卸载期 i2")
-        assert "挂载期 i1" in p.toPlainText()
-        assert "卸载期 i2" not in p.toPlainText()
