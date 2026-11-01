@@ -57,6 +57,8 @@ class QuickMenu:
         on_record_video=None,
         on_open_video_clip=None,
         on_open_asr_history=None,
+        on_open_prebuild=None,
+        on_open_settings=None,
         frame_overlay_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
@@ -67,6 +69,10 @@ class QuickMenu:
         self._on_open_chat_history = on_open_chat_history
         self._on_open_translation_history = on_open_translation_history
         self._on_quit = on_quit
+        # 预构建翻译缓存（标题窗入口条同回调）与设置窗口（宿主接线；
+        # 未注入回调时菜单项仍显示、点击静默）
+        self._on_open_prebuild = on_open_prebuild
+        self._on_open_settings = on_open_settings
         # 视频功能（需求：录制视频/视频剪辑入口 + 语音识别历史）：
         # 录制控制器经 attach_recorder 注入（菜单文案随录制状态变化）
         self._on_record_video = on_record_video
@@ -94,11 +100,11 @@ class QuickMenu:
         """构建并弹出右键菜单（标题窗 / 正文窗文字处右键触发）。
 
         菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt +
-        future_视频录制补充_实时asr.txt）：
-        创建/销毁/快捷键模式 → 锁鼠标区域 → 遥控器自动化与隐藏遥控器
-        （future_截图翻译功能补充_遥控截图自动化）→ 分隔线 → 录制视频 →
-        视频剪辑 → 实时语音识别（开关式）→ 分隔线 → 听歌识曲 → 对话 →
-        查看历史（二级菜单）→ 退出。
+        future_视频录制补充_实时asr.txt，含预构建入口与设置入口）：
+        创建/销毁/快捷键模式 → 锁鼠标区域 → 遥控器自动化与隐藏遥控器 →
+        分隔线 → 录制视频 → 视频剪辑 → 实时语音识别（开关式）→ 分隔线 →
+        听歌识曲 → 分隔线 → 对话 → 预构建翻译缓存 → 分隔线 → 查看历史
+        （二级菜单）→ 分隔线 → 设置 → 退出（设置与退出间无分隔线）。
 
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
         保证菜单始终完整可见（配合宿主在菜单打开期间暂停周期性置顶重申，
@@ -158,6 +164,9 @@ class QuickMenu:
         song_action = menu.addAction("听歌识曲")
         menu.addSeparator()
         chat_action = menu.addAction("对话")
+        # 预构建翻译缓存：与「对话」之间不加分割线；跳过注入模式下仍显示，
+        # 点击由宿主经标题提示不可用
+        prebuild_action = menu.addAction("预构建翻译缓存")
         menu.addSeparator()
         # 查看历史二级菜单（需求给定顺序）：翻译历史 / 截图历史 / 识曲历史 /
         # 对话历史 / 语音识别历史（末尾追加，不需分隔线）
@@ -168,6 +177,8 @@ class QuickMenu:
         chat_history_action = view_history_menu.addAction("对话历史")
         asr_history_action = view_history_menu.addAction("语音识别历史")
         menu.addSeparator()
+        # 设置入口：位于「退出」正上方，与「退出」之间不加分割线（需求）
+        settings_action = menu.addAction("设置")
         quit_action = menu.addAction("退出")
         # 录制中菜单项计时实时刷新：QMenu.exec 的模态事件循环仍会派发
         # QTimer 事件，按秒更新「录制视频 mm:ss」（不依赖重新打开菜单）；
@@ -211,6 +222,10 @@ class QuickMenu:
             self._on_recognize_song()
         elif chosen is chat_action and callable(self._on_open_chat):
             self._on_open_chat()
+        elif chosen is prebuild_action and callable(self._on_open_prebuild):
+            self._on_open_prebuild()
+        elif chosen is settings_action and callable(self._on_open_settings):
+            self._on_open_settings()
         elif chosen is translation_history_action and callable(
             self._on_open_translation_history
         ):

@@ -172,12 +172,16 @@ def _open(monkeypatch, *, recorder=None, asr_rt=None, pick=None, **callbacks):
 PICK_RECORD = lambda m: m.items[3][1]  # noqa: E731 - 分隔线之后第一项：录制视频
 PICK_CLIP = lambda m: m.items[4][1]  # noqa: E731 - 紧随其后：视频剪辑
 PICK_ASR_RT = lambda m: m.items[5][1]  # noqa: E731 - 紧随其后：实时语音识别
-PICK_ASR = lambda m: m.items[-3][1].items[-1][1]  # noqa: E731 - 查看历史末项
+# 菜单末尾固定序列：… 对话 → 预构建翻译缓存 → 分隔线 → 查看历史 →
+# 分隔线 → 设置 → 退出，即查看历史 = items[-4]、设置 = items[-2]
+PICK_ASR = lambda m: m.items[-4][1].items[-1][1]  # noqa: E731 - 查看历史末项
+PICK_SETTINGS = lambda m: m.items[-2][1]  # noqa: E731 - 退出正上方：设置
 
 
 def test_menu_layout_and_order(monkeypatch):
-    """菜单顺序（需求）：…分隔线 → 录制视频 → 视频剪辑 → 分隔线 → 听歌识曲 …；
-    查看历史末尾追加语音识别历史（无分隔线）。"""
+    """菜单顺序（需求）：…分隔线 → 录制视频 → 视频剪辑 → 分隔线 → 听歌识曲 →
+    分隔线 → 对话 → 预构建翻译缓存 → 分隔线 → 查看历史 → 分隔线 → 设置 →
+    退出（设置与退出之间无分隔线）。"""
     menu, _calls = _open(monkeypatch, recorder=_StubRecorder("录制视频"))
     assert _layout(menu) == [
         "创建截图窗口（0/8）",
@@ -190,6 +194,7 @@ def test_menu_layout_and_order(monkeypatch):
         "听歌识曲",
         "---",
         "对话",
+        "预构建翻译缓存",
         "---",
         (
             "查看历史",
@@ -202,8 +207,19 @@ def test_menu_layout_and_order(monkeypatch):
             ],
         ),
         "---",
+        "设置",
         "退出",
     ]
+
+
+def test_settings_entry_directly_above_quit(monkeypatch):
+    """设置入口位于「退出」正上方，两者之间无分隔线（需求）。"""
+    menu, _calls = _open(monkeypatch)
+    layout = _layout(menu)
+    assert layout.index("设置") == len(layout) - 2
+    assert layout[-1] == "退出"
+    assert layout[-3] == "---", "设置与查看历史之间应有分隔线，与退出之间无"
+    assert layout[-2] == "设置"
 
 
 def test_recording_label_shown_while_recording(monkeypatch):
