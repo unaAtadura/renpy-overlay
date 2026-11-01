@@ -69,6 +69,7 @@ from .pretranslate.formatting import (
     format_tool_progress,
     format_tool_scan_result,
     normalize_game_dir,
+    start_button_enabled,
 )
 from .pretranslate.overlay_paths import list_relative, resolve_scan_root, unrpa_root
 from .pretranslate.parser import scan_rpy_files
@@ -240,6 +241,8 @@ class PrebuildWindow(QMainWindow):
                 lambda _checked=False, p=page: p.set_all_checked(False)
             )
             page.file_list.viewport().installEventFilter(self)
+        # 切页签后「开始处理」按当前页扫描结果刷新可用性
+        self._tabs.currentChanged.connect(lambda _index: self._apply_state())
 
         # ---- 进度区 ---------------------------------------------------------
         self._progress_bar = QProgressBar(self)
@@ -272,12 +275,13 @@ class PrebuildWindow(QMainWindow):
         layout.addLayout(button_row)
         self.setCentralWidget(central)
 
-        # 启动预填宿主当前目录（有效性校验通过才启用扫描）
-        candidate = initial_game_dir or self._cfg.last_game_dir
-        if candidate:
-            self._apply_game_dir(candidate)
+        # 启动预填入口链路给定的目录（注入模式为向上定位的游戏根；跳过
+        # 注入模式为空——目录行留空占位，由用户在窗口内选择；不回退
+        # last_game_dir 预填，可处理性完全由扫描结果决定）
+        if initial_game_dir:
+            self._apply_game_dir(initial_game_dir)
         else:
-            self._apply_scan_buttons()
+            self._apply_state()
 
     # ---- 事件过滤：整行点击切换勾选 -----------------------------------------
 
@@ -326,13 +330,13 @@ class PrebuildWindow(QMainWindow):
         if game_dir is None:
             self._dir_info.setText(format_dir_invalid(str(selected)))
             self._game_dir = None
-            self._apply_scan_buttons()
+            self._apply_state()
             return
         changed = self._game_dir != game_dir
         self._game_dir = game_dir
         self._dir_edit.setText(str(game_dir))
         self._dir_info.setText(format_dir_ok(game_dir, db_path_for(game_dir)))
-        self._apply_scan_buttons()
+        self._apply_state()
         self._refresh_db_count()
         # 目录变化后清空各页上一轮文件列表
         self._page_scan_roots.clear()
@@ -369,6 +373,8 @@ class PrebuildWindow(QMainWindow):
         prefix = "unrpa/" if scan_root == unrpa_root(self._game_dir) else "game/"
         self._pages[index].set_files([f"{prefix}{rel}" for rel in rels])
         self._progress_label.setText(message)
+        # 扫描结果决定「开始处理」可用性（含扫不到文件时的禁用）
+        self._apply_state()
         logger.info("页 %d 扫描完成：%d 个文件（扫描根=%s）", index, len(rels), scan_root)
 
     def _scan_translate_page(self) -> tuple[list[str], Path]:
@@ -563,7 +569,15 @@ class PrebuildWindow(QMainWindow):
 
     def _apply_state(self) -> None:
         running = self._state == STATE_RUNNING
-        self._start_button.setEnabled(not running)
+        # 开始处理：选择态 + 目录有效 + 当前页扫描到合法文件（可处理性
+        # 完全由扫描结果决定；扫不到文件保持不可用并已由进度行提示）
+        self._start_button.setEnabled(
+            start_button_enabled(
+                running,
+                self._game_dir is not None,
+                self._pages[self._tabs.currentIndex()].file_list.count(),
+            )
+        )
         self._start_button.setText("停止" if running else "开始处理")
         self._stop_button.setEnabled(running)
         self._browse_button.setEnabled(not running)

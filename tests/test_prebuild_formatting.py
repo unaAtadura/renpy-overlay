@@ -19,6 +19,9 @@ from renpy_overlay.pretranslate.formatting import (
     format_tool_progress,
     format_tool_scan_result,
     normalize_game_dir,
+    prebuild_initial_dir,
+    resolve_game_root,
+    start_button_enabled,
 )
 
 # ------------------------------------------------------------------ 目录归一
@@ -172,3 +175,65 @@ def test_format_progress_time_includes_finish_clock():
 def test_format_progress_time_completed_ratio():
     assert format_progress_time(100, 100, 20.0) == "已用 00:20 · 剩余 00:00"
     assert format_progress_time(120, 100, 20.0) == "已用 00:20 · 剩余 00:00"
+
+
+# ------------------------------------------------ 注入目录回溯与开始按钮可用性
+
+
+def make_renpy_layout(tmp_path, exe_subdir: str = "lib/windows-i686"):
+    """构造标准 Ren'Py 布局：<根>/game + <根>/<exe_subdir>/<exe>。"""
+    root = tmp_path / "SomeGame-1.0-pc"
+    (root / "game").mkdir(parents=True)
+    exe_dir = root / exe_subdir
+    exe_dir.mkdir(parents=True)
+    (exe_dir / "Game.exe").write_bytes(b"MZ")
+    return root, exe_dir
+
+
+def test_resolve_game_root_ascends_from_exe_dir(tmp_path):
+    """注入模式 game_dir 是 exe 所在目录：向上定位含 game/ 的游戏根。"""
+    root, exe_dir = make_renpy_layout(tmp_path)
+    assert resolve_game_root(exe_dir) == root
+
+
+def test_resolve_game_root_self_with_game_returned_directly(tmp_path):
+    """给定点自身含 game/ 子目录：直接作为游戏根（旧版布局）。"""
+    root, _exe_dir = make_renpy_layout(tmp_path)
+    assert resolve_game_root(root) == root
+
+
+def test_resolve_game_root_missing_game_returns_none(tmp_path):
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    assert resolve_game_root(flat) is None
+
+
+def test_resolve_game_root_missing_dir_returns_none(tmp_path):
+    assert resolve_game_root(tmp_path / "不存在") is None
+
+
+def test_prebuild_initial_dir_resolves_root(tmp_path):
+    """入口取值链路：exe 目录被回溯为游戏根（日志 147 行场景的修正）。"""
+    root, exe_dir = make_renpy_layout(tmp_path)
+    assert prebuild_initial_dir(str(exe_dir)) == str(root)
+
+
+def test_prebuild_initial_dir_empty_when_no_game_dir():
+    """跳过注入模式无 game_dir：目录行留空（占位提示由窗口负责）。"""
+    assert prebuild_initial_dir("") == ""
+    assert prebuild_initial_dir(None) == ""
+
+
+def test_prebuild_initial_dir_falls_back_to_original_when_unresolvable(tmp_path):
+    """非标准布局（无 game/ 祖先）：回退原值，窗口内提示无效后由用户改选。"""
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    assert prebuild_initial_dir(str(flat)) == str(flat)
+
+
+def test_start_button_enabled_requires_scan_result():
+    """开始按钮可用性完全由扫描结果决定：选择态 + 目录有效 + 列表非空。"""
+    assert start_button_enabled(False, True, 3) is True
+    assert start_button_enabled(False, True, 0) is False  # 扫不到合法文件
+    assert start_button_enabled(False, False, 5) is False  # 未选/未验证目录
+    assert start_button_enabled(True, True, 3) is False  # 任务在途

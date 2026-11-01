@@ -37,6 +37,48 @@ def normalize_game_dir(selected: str | Path) -> Path | None:
     return None
 
 
+def resolve_game_root(game_dir: str | Path) -> Path | None:
+    """从注入目标目录（进程 exe 所在目录）定位游戏根目录（纯函数）。
+
+    Ren'Py 布局：``<根>/game``、``<根>/lib/<arch>/<exe>``——注入发现按
+    exe 所在目录定位，预构建扫描需要含 ``game/`` 子目录的根。自给定点
+    向上最多 3 层查找，给定点自身含 ``game/`` 时直接返回；找不到
+    （非标准布局）返回 None，调用方回退原值。
+    """
+    path = Path(game_dir)
+    if not path.is_dir():
+        return None
+    for candidate in (path, *list(path.parents)[:3]):
+        if (candidate / "game").is_dir():
+            return candidate
+    return None
+
+
+def prebuild_initial_dir(game_dir: str | Path | None) -> str:
+    """预构建窗口的初始目录（纯函数，入口链路专用）。
+
+    - 无 game_dir（跳过注入模式）→ 空串（目录行留空，由用户在窗口内
+      选择游戏根目录）；
+    - 注入模式 game_dir 是进程 exe 所在目录：经 :func:`resolve_game_root`
+      向上定位游戏根后返回；定位失败回退原值（窗口内会提示目录无效，
+      用户可改）。
+    """
+    if not game_dir:
+        return ""
+    root = resolve_game_root(game_dir)
+    return str(root) if root is not None else str(game_dir)
+
+
+def start_button_enabled(running: bool, has_game_dir: bool, file_count: int) -> bool:
+    """预构建窗口「开始处理」按钮可用性（纯函数）。
+
+    可处理性完全由扫描结果决定：选择态（未在途）+ 目录有效 + 当前页
+    扫描到合法文件（列表非空）才允许开始；扫不到文件 / 未选目录 /
+    未扫描 / 任务在途均保持不可用，不报错不静默。
+    """
+    return not running and has_game_dir and file_count > 0
+
+
 def format_dir_invalid(selected: str) -> str:
     return f"目录无效：{selected} 下未找到 game/ 子目录（请选择 Ren'Py 游戏根目录）。"
 

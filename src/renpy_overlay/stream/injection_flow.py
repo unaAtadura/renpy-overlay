@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from ..bound_window import BoundAction
+from ..pretranslate.formatting import prebuild_initial_dir
 from .icons import BOUND_LOCATE_ICON, BOUND_PREBUILD_ICON, translation_mode_icon
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -53,13 +54,17 @@ class InjectionFlowMixin:
         )
 
     def request_prebuild(self) -> None:
-        """预构建入口回调（标题窗入口条 / 右键菜单共用）：打开或唤回主窗口。"""
+        """预构建入口回调（标题窗入口条 / 右键菜单共用）：打开或唤回主窗口。
+
+        注入模式：game_dir 是进程 exe 所在目录（如 ``<根>/lib/windows-i686``），
+        经 :func:`prebuild_initial_dir` 向上定位含 ``game/`` 子目录的游戏根后
+        预填窗口目录行（四库的 game_dir 用法与位置不受影响）；定位失败回退
+        原值，窗口内提示目录无效后由用户改选。
+        跳过注入模式：不在入口处拦截——窗口目录行留空占位，由用户在窗口内
+        「选择目录…」指定游戏根目录；可处理性完全由扫描结果决定。
+        实时语音识别开启期间沿用 P5 决议阻塞预构建请求。
+        """
         if self._closed:
-            return
-        if self.skip_injection or not self._game_dir:
-            # 跳过注入模式下无游戏目录可扫描：明确提示，不报错
-            self._update_title("预构建：需注入游戏后可用")
-            logger.info("跳过注入模式下忽略预构建请求（无游戏目录）")
             return
         if self._asr_rt.enabled:
             # P5 决议：实时识别开启期间阻塞预构建，正文窗仅显示实时识别内容
@@ -74,13 +79,17 @@ class InjectionFlowMixin:
             window.raise_()
             window.activateWindow()
             return
+        initial_dir = prebuild_initial_dir(self._game_dir)
         self._prebuild_window = PrebuildWindow(
             self._config,
-            initial_game_dir=str(self._game_dir),
+            initial_game_dir=initial_dir,
             on_closed=lambda: setattr(self, "_prebuild_window", None),
         )
         self._prebuild_window.show()
-        logger.info("预构建窗口已打开（game_dir=%s）", self._game_dir)
+        if initial_dir:
+            logger.info("预构建窗口已打开（game_dir=%s）", initial_dir)
+        else:
+            logger.info("预构建窗口已打开（未预置目录，等待用户在窗口内选择）")
 
     def _sync_translation_mode_entry(self) -> None:
         """把标题窗「切换翻译模式」入口图标同步为当前生效模式。
