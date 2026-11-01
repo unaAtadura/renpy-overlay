@@ -522,6 +522,20 @@ uv run renpy-overlay --pid 12345
   `concurrency_increase_after` / `latency_guard_seconds` / `circuit_break_threshold` /
   `retries`，以及扫描范围 `include_tl_strings` / `tl_langs`。
 
+#### 外部工具来源与获取地址
+
+「.rpyc 反编译」与「.rpa 解包」页签依赖的两个外部工具随本工具一并打包
+分发（`assets/plugin/`），开箱即用；如需最新版本或查阅源码，从下表仓库
+获取：
+
+| 工具 | 用途 | 仓库（最新版本与源码） |
+| --- | --- | --- |
+| unrpyc | `.rpyc` 反编译 | https://github.com/CensoredUsername/unrpyc |
+| rpaextract | `.rpa` 解包 | https://github.com/Kaskadee/rpaextract |
+
+注：rpaextract 基于 .NET 10 运行时构建，运行机器需已安装 .NET 10 Desktop
+Runtime。
+
 ### 设置
 
 右键快捷菜单「设置」（位于「退出」正上方）：双栏窗口，左侧为功能栏目
