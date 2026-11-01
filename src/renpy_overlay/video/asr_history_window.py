@@ -77,12 +77,12 @@ def normalize(text) -> str:
     return str(text or "").strip().casefold()
 
 
-#: 音量滚轮的单次步进（0-100 刻度）：与视频编辑窗口音量条同口径
+#: 音量滚轮的单次步进（0-100 刻度）
 VOLUME_WHEEL_STEP = 5
 
 
 def volume_from_wheel(delta_y: int, current: int, step: int = VOLUME_WHEEL_STEP) -> int:
-    """音量条滚轮步进（纯函数，与视频编辑窗口同口径）：上滚增、下滚减。
+    """音量条滚轮步进（纯函数）：上滚增、下滚减。
 
     结果钳制到 0..100；delta_y 为 0 时保持原值。
     """
@@ -284,7 +284,7 @@ class _TextCopyTableView(QTableView):
 
 
 class _VolumeSlider(QSlider):
-    """音量控制条：鼠标拖拽与滚轮线性调节，不响应键盘（参考视频编辑窗口）。"""
+    """音量控制条：鼠标拖拽与滚轮线性调节，不响应键盘。"""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)

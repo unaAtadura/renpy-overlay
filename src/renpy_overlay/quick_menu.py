@@ -55,7 +55,7 @@ class QuickMenu:
         on_open_translation_history=None,
         on_quit=None,
         on_record_video=None,
-        on_open_video_editor=None,
+        on_open_video_clip=None,
         on_open_asr_history=None,
         frame_overlay_factory=None,
     ) -> None:
@@ -67,10 +67,10 @@ class QuickMenu:
         self._on_open_chat_history = on_open_chat_history
         self._on_open_translation_history = on_open_translation_history
         self._on_quit = on_quit
-        # 视频功能（需求：录制视频/视频编辑入口 + 语音识别历史）：
+        # 视频功能（需求：录制视频/视频剪辑入口 + 语音识别历史）：
         # 录制控制器经 attach_recorder 注入（菜单文案随录制状态变化）
         self._on_record_video = on_record_video
-        self._on_open_video_editor = on_open_video_editor
+        self._on_open_video_clip = on_open_video_clip
         self._on_open_asr_history = on_open_asr_history
         self._recorder = None
         self._windows: list[ScreenshotWindow] = []  # 栈序 = 创建序，栈顶最新
@@ -96,8 +96,8 @@ class QuickMenu:
         菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt +
         future_视频录制补充_实时asr.txt）：
         创建/销毁/快捷键模式 → 锁鼠标区域 → 遥控器自动化与隐藏遥控器
-        （future_截图翻译功能补充_遥控截图自动化）→ 分隔线 → 录制视频/
-        视频编辑 → 实时语音识别（开关式）→ 分隔线 → 听歌识曲 → 对话 →
+        （future_截图翻译功能补充_遥控截图自动化）→ 分隔线 → 录制视频 →
+        视频剪辑 → 实时语音识别（开关式）→ 分隔线 → 听歌识曲 → 对话 →
         查看历史（二级菜单）→ 退出。
 
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
@@ -146,8 +146,8 @@ class QuickMenu:
             if self._recorder is not None
             else "录制视频"
         )
-        editor_action = menu.addAction("视频编辑")
-        # 实时语音识别（需求：视频编辑之下、听歌识曲之前的分隔线之上，
+        clip_action = menu.addAction("视频剪辑")
+        # 实时语音识别（需求：视频剪辑之下、听歌识曲之前的分隔线之上，
         # 开关式纯后台功能；未注入控制器时不显示）
         asr_rt_action = None
         if self._asr_rt is not None:
@@ -203,8 +203,8 @@ class QuickMenu:
             self._remote_automation.toggle_remote_hidden()
         elif chosen is record_action and callable(self._on_record_video):
             self._on_record_video()
-        elif chosen is editor_action and callable(self._on_open_video_editor):
-            self._on_open_video_editor()
+        elif chosen is clip_action and callable(self._on_open_video_clip):
+            self._on_open_video_clip()
         elif asr_rt_action is not None and chosen is asr_rt_action:
             self._asr_rt.toggle()
         elif chosen is song_action and callable(self._on_recognize_song):

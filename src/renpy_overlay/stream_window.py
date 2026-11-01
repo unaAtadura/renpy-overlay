@@ -181,18 +181,11 @@ from .video import (  # noqa: F401
     open_asr_store,
     resolve_asr_rt_options,
 )
-from .video import (
-    asr as video_asr,  # noqa: F401
-)
-from .video.av_media import av_available, extract_wav  # noqa: F401
-from .video.editor_window import ASR_FAIL_TEXT, ASR_SUCCESS_TEXT  # noqa: F401
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
 __all__ = [
     "AIChatWindow",
-    "ASR_FAIL_TEXT",
-    "ASR_SUCCESS_TEXT",
     "AsrHistoryWindow",
     "AsrRtController",
     "BODY_FILL_COLOR",
@@ -259,7 +252,6 @@ __all__ = [
     "TranslationHistoryWindow",
     "VideoRecorder",
     "WHEEL_LINES_PER_NOTCH",
-    "av_available",
     "body_drag_scroll_rate",
     "body_mask_bands",
     "body_scroll_target",
@@ -274,7 +266,6 @@ __all__ = [
     "encode_jpeg_base64",
     "encode_jpeg_bytes",
     "extract_track_info",
-    "extract_wav",
     "format_fail_body",
     "format_success_body",
     "has_sentence_end",
@@ -297,7 +288,6 @@ __all__ = [
     "translation_mode_icon",
     "translation_store",
     "translator",
-    "video_asr",
     "win32api",
 ]
 

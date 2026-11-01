@@ -178,7 +178,7 @@ class StreamOverlayCore:
             on_open_translation_history=self._open_translation_history,
             on_quit=self.request_close,
             on_record_video=self._toggle_video_record,
-            on_open_video_editor=self._open_video_editor,
+            on_open_video_clip=self._open_video_clip,
             on_open_asr_history=self._open_asr_history,
         )
         # 快捷键模式：全局热键主开关 + 8 窗口键，联动控制模块的布局锁定；
@@ -250,9 +250,8 @@ class StreamOverlayCore:
         self._asr_rt_current = ""
         self._history_window: ScreenshotHistoryWindow | None = None
         self._song_history_window: SongHistoryWindow | None = None
-        self._video_editor_window = None  # 视频编辑窗口单例（惰性创建）
         self._asr_history_window = None  # 语音识别历史窗口单例（惰性创建）
-        self._video_av_ready: bool | None = None  # PyAV 可用性惰性探测缓存
+        self._video_clip_window = None  # 视频剪辑窗口单例（关闭即销毁，destroyed 清引用）
         self._chat_history_window: ChatHistoryWindow | None = None
         self._translation_history_window: TranslationHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
@@ -387,6 +386,14 @@ class StreamOverlayCore:
         self._mouse_lock.shutdown()  # 必须先于退出解除 ClipCursor，否则鼠标被永久限制
         self._video_recorder.shutdown()  # 录制中则同步停止并完成合并收尾
         self._asr_rt.shutdown()  # 实时识别开启则静默停止并释放互斥槽
+        # 视频剪辑窗口：close()（非 deleteLater）触发 closeEvent——停播放
+        # 引擎/SDL 渲染线程/卸载日志面板；渲染线程未停会阻塞进程退出
+        if self._video_clip_window is not None:
+            try:
+                self._video_clip_window.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._video_clip_window = None
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -478,7 +485,7 @@ class StreamOverlayCore:
             self._chat_history_window,
             self._translation_history_window,
             self._asr_history_window,
-            self._video_editor_window,
+            self._video_clip_window,
             self._prebuild_dialog,
         ):
             if window is not None:
@@ -520,10 +527,6 @@ class StreamOverlayCore:
                     self._handle_song_done(payload)
                 elif kind == "song_fail":
                     self._handle_song_fail(payload)
-                elif kind == "asr_done":
-                    self._handle_asr_done(payload)
-                elif kind == "asr_fail":
-                    self._handle_asr_fail(payload)
                 elif kind == "asr_rt_delta":
                     self._handle_asr_rt_delta(payload)
                 elif kind == "asr_rt_completed":

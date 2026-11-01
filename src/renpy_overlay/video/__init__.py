@@ -1,9 +1,10 @@
-"""视频功能独立包：全屏录制（含系统音频）/ 视频编辑播放器 / 语音识别（ASR）。
+"""视频功能独立包：全屏录制（含系统音频）/ 视频剪辑（:mod:`.clip`）/
+语音识别（ASR）/ 实时语音识别。
 
 需求（.raw_plans/future_视频录制.txt）：为难以暂停截图的场景提供兜底方案，
 并额外支持 ASR。设计约束（与 :mod:`renpy_overlay.song_recognition` 同风格）：
 
-- 纯后台能力（录制/截取/ASR 客户端/存储）与窗口（编辑器/历史）分离，
+- 纯后台能力（录制/截取/ASR 客户端/存储）与窗口（剪辑器/历史）分离，
   各文件原子级功能，窗口之间互不依赖；
 - PyAV 由项目自带（进程内 FFmpeg 库，无需用户自备 ffmpeg.exe）：缺失时
   录制/语音识别降级提示，不影响主程序与其他功能（:mod:`.av_media`）；
@@ -15,7 +16,10 @@
 - 实时语音识别（ASR-RT，:mod:`.asr_rt`）：DashScope 实时流式识别（开关式
   后台功能，AsrRtController 自持状态），开启时经宿主互斥槽阻塞其余 API
   请求；识别结果实时上屏、不入 asr.db（需求：防止数据库过度膨胀）；
-- 识别成功结果落 ``renpy_overlay_cache/asr.db``（:mod:`.asr_store`）。
+- 识别成功结果落 ``renpy_overlay_cache/asr.db``（:mod:`.asr_store`）；
+- 视频剪辑（:mod:`.clip`，自独立实验项目 videocut 迁入）：SDL2 播放引擎 +
+  时间轴/声波图/切片/撤销 + 双语字幕制作（逐切片 ASR+翻译）+ 导出；
+  配置走宿主 config.json，制作字幕期间经宿主互斥槽阻塞其余 API 请求。
 """
 
 from .asr_history_window import AsrHistoryWindow

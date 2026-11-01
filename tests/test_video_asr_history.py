@@ -205,7 +205,7 @@ def test_model_query_highlights_matching_rows():
 
 
 def test_volume_from_wheel_step_and_clamp():
-    """音量条滚轮步进（与视频编辑窗口同口径）：上滚增、下滚减、钳制 0..100。"""
+    """音量条滚轮步进：上滚增、下滚减、钳制 0..100。"""
     assert volume_from_wheel(120, 50) == 50 + VOLUME_WHEEL_STEP
     assert volume_from_wheel(-120, 50) == 50 - VOLUME_WHEEL_STEP
     assert volume_from_wheel(120, 98) == 100  # 上限钳制

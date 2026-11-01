@@ -1,9 +1,9 @@
 """QuickMenu 视频功能菜单的离线验证：结构顺序、录制中文案与回调分发。
 
 QMenu 以轻量 stub 替换（记录条目序列，exec 返回预设动作），不弹真实菜单。
-覆盖需求（future_视频录制.txt）：录制视频/视频编辑位于锁鼠标区域与听歌
+覆盖需求（future_视频录制.txt）：录制视频/视频剪辑位于锁鼠标区域与听歌
 识曲之间（含分隔线）；录制中显示「录制视频 mm:ss」；语音识别历史追加在
-查看历史末尾；三个新回调正确分发。
+查看历史末尾；各回调正确分发。
 """
 
 from __future__ import annotations
@@ -145,13 +145,13 @@ def _open(monkeypatch, *, recorder=None, asr_rt=None, pick=None, **callbacks):
         return calls, lambda *args: calls.append(args)
 
     record_calls, on_record = _capture()
-    editor_calls, on_editor = _capture()
+    clip_calls, on_clip = _capture()
     asr_calls, on_asr = _capture()
     menu_obj = QuickMenu(
         on_capture_click=lambda w: None,
         on_open_history=lambda: None,
         on_record_video=callbacks.get("on_record_video", on_record),
-        on_open_video_editor=callbacks.get("on_open_video_editor", on_editor),
+        on_open_video_clip=callbacks.get("on_open_video_clip", on_clip),
         on_open_asr_history=callbacks.get("on_open_asr_history", on_asr),
     )
     if recorder is not None:
@@ -161,22 +161,22 @@ def _open(monkeypatch, *, recorder=None, asr_rt=None, pick=None, **callbacks):
     menu_obj.show_context_menu(QPoint(0, 0))
     return holder[0], {
         "record": record_calls,
-        "editor": editor_calls,
+        "clip": clip_calls,
         "asr": asr_calls,
     }
 
 
 #: 选中动作的取法（exec 时从当前菜单实例自取，保证对象身份一致）
-#: 条目序（无快捷键模式/锁鼠标时）：0 创建 1 销毁 2 分隔线 3 录制 4 编辑
-#: 5 实时语音识别（未注入控制器时不占位）…
+#: 条目序（无快捷键模式/锁鼠标时）：0 创建 1 销毁 2 分隔线 3 录制
+#: 4 视频剪辑 5 实时语音识别（未注入控制器时不占位，该位为分隔线）…
 PICK_RECORD = lambda m: m.items[3][1]  # noqa: E731 - 分隔线之后第一项：录制视频
-PICK_EDITOR = lambda m: m.items[4][1]  # noqa: E731 - 紧随其后：视频编辑
+PICK_CLIP = lambda m: m.items[4][1]  # noqa: E731 - 紧随其后：视频剪辑
 PICK_ASR_RT = lambda m: m.items[5][1]  # noqa: E731 - 紧随其后：实时语音识别
 PICK_ASR = lambda m: m.items[-3][1].items[-1][1]  # noqa: E731 - 查看历史末项
 
 
 def test_menu_layout_and_order(monkeypatch):
-    """菜单顺序（需求）：…分隔线 → 录制视频 → 视频编辑 → 分隔线 → 听歌识曲 …；
+    """菜单顺序（需求）：…分隔线 → 录制视频 → 视频剪辑 → 分隔线 → 听歌识曲 …；
     查看历史末尾追加语音识别历史（无分隔线）。"""
     menu, _calls = _open(monkeypatch, recorder=_StubRecorder("录制视频"))
     assert _layout(menu) == [
@@ -185,7 +185,7 @@ def test_menu_layout_and_order(monkeypatch):
         # 无快捷键模式与锁鼠标控制器时无对应项
         "---",
         "录制视频",
-        "视频编辑",
+        "视频剪辑",
         "---",
         "听歌识曲",
         "---",
@@ -226,11 +226,11 @@ class _StubAsrRt:
 
 
 def test_asr_rt_entry_layout_when_attached(monkeypatch):
-    """注入控制器后：实时语音识别位于视频编辑之下、分隔线与听歌识曲之上
-    （需求布局：视频编辑 → 实时语音识别: 关 → 分隔线 → 听歌识曲）。"""
+    """注入控制器后：实时语音识别位于视频剪辑之下、分隔线与听歌识曲之上
+    （需求布局：视频剪辑 → 实时语音识别: 关 → 分隔线 → 听歌识曲）。"""
     menu, _calls = _open(monkeypatch, asr_rt=_StubAsrRt(enabled=False))
     layout = _layout(menu)
-    assert layout.index("视频编辑") < layout.index("实时语音识别: 关")
+    assert layout.index("视频剪辑") < layout.index("实时语音识别: 关")
     sep_after = layout.index("---", layout.index("实时语音识别: 关"))
     assert layout.index("实时语音识别: 关") < sep_after < layout.index("听歌识曲")
 
@@ -253,14 +253,21 @@ def test_asr_rt_toggle_dispatch(monkeypatch):
 
 
 def test_record_video_callback_dispatch(monkeypatch):
-    """exec 返回对应动作时，三个新回调被正确分发。"""
+    """exec 返回对应动作时，各回调被正确分发。"""
     for pick, key in (
         (PICK_RECORD, "record"),
-        (PICK_EDITOR, "editor"),
+        (PICK_CLIP, "clip"),
         (PICK_ASR, "asr"),
     ):
         _menu, calls = _open(monkeypatch, pick=pick)
         assert calls[key] == [()]
+
+
+def test_missing_clip_callback_is_ignored(monkeypatch):
+    """视频剪辑回调为 None 时点击菜单项不崩溃（现状兼容）。"""
+    _menu, _calls = _open(
+        monkeypatch, on_open_video_clip=None, pick=PICK_CLIP
+    )
 
 
 def test_missing_callbacks_are_ignored(monkeypatch):
