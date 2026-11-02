@@ -329,27 +329,35 @@ uv sync            # 创建虚拟环境并安装依赖（psutil / pywin32 / PyQt
 修改该配置，或设置环境变量 `UV_DEFAULT_INDEX`（如
 `https://mirrors.aliyun.com/pypi/simple/`）。
 
-## 打包为独立 exe（可选）
+## 打包为可执行程序（可选）
 
-不想装 Python 环境时，可以把工具端打成单文件 exe：PyInstaller 打包运行必需的
-模块（psutil / pywin32 / tkinter / PyQt6 / PIL / 听歌识曲的 shazamio 链路 /
-实时识别的 dashscope 链路；包含
-Qt DLL 后体积明显增大），排除 scipy 等无关库：
+不想装 Python 环境时，可以用 PyInstaller 把工具端打成可执行程序。**默认为目录版
+（onedir）**：免每次启动解压，冷启动显著快于单文件版（实测 `--list` 启动中位数
+962ms vs 单文件 3005ms）。打包运行必需的模块（psutil / pywin32 / tkinter /
+PyQt6 / PIL / 听歌识曲的 shazamio 链路 / 实时识别的 dashscope 链路；包含 Qt DLL
+后体积明显增大），排除 scipy 等无关库：
 
 ```bash
 uv run pyinstaller renpy_overlay.spec --noconfirm
 ```
 
-产物为 `dist/renpy-overlay.exe`，可复制到任意 Windows 机器直接运行（无需 Python）。
+产物为 `dist/renpy-overlay/` 目录（`renpy-overlay.exe` + `_internal/` 资源目录），
+**整个目录一起分发**、复制到任意 Windows 机器后运行其中 `renpy-overlay.exe`
+（无需 Python；只拷 exe 不拷 `_internal/` 无法运行）。
 
-- 首次运行会在 **exe 同目录**自动生成 `config.json`（打包后配置固定跟随 exe，
-  不受启动目录 / 快捷方式影响）；日志默认写入当前工作目录的 `logs/`
+- 首次运行会在 **exe 同目录**（`dist/renpy-overlay/` 内）自动生成 `config.json`
+  （打包后配置固定跟随 exe，不受启动目录 / 快捷方式影响；从旧单文件版迁移时
+  把旧 `config.json` 拷入新目录即可）；日志默认写入当前工作目录的 `logs/`
   （双击运行时即 exe 同目录）；
 - 注入、悬浮窗、翻译等行为与 `uv run renpy-overlay` 完全一致，命令行参数相同；
 - 打包配置见 `renpy_overlay.spec`：`payload/agent.py`（注入到游戏进程内执行的
-  源码）作为数据文件随包分发，运行时经 `importlib.resources` 读取；未启用 UPX
-  （避免放大杀软对远程注入工具的误报）；想要启动更快的目录版（onedir），按
-  spec 顶部注释切换即可。
+  源码）与 `assets/`（入口图标、预构建外部工具 unrpyc.exe / rpaextract.exe）
+  作为数据文件随包分发，运行时经 `importlib.resources` / 相对包路径定位；
+  未启用 UPX（避免放大杀软对远程注入工具的误报）；
+- **单文件版（onefile）备选**：需要「单个 exe」分发形态时，把 `renpy_overlay.spec`
+  顶部的 `ONEFILE = False` 改为 `True` 再执行同一构建命令，产物为
+  `dist/renpy-overlay.exe` 单文件（行为与目录版一致；代价是每次启动需把内嵌
+  资源解压到临时目录，启动明显变慢，且自解压行为更易被杀软启发式关注）。
 
 ## 快速开始
 
@@ -637,7 +645,7 @@ uv run ruff check .    # 静态检查
 ```
 renpygameread/
 ├─ pyproject.toml              # uv 项目配置 / 依赖 / 入口脚本
-├─ renpy_overlay.spec          # PyInstaller 打包配置（生成 dist/renpy-overlay.exe）
+├─ renpy_overlay.spec          # PyInstaller 打包配置（默认 onedir，产物 dist/renpy-overlay/）
 ├─ pyinstaller_entry.py        # PyInstaller 专用入口（绝对导入）
 ├─ .python-version             # 工具端 Python 版本
 ├─ README.md
