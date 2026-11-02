@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置：生成单文件 exe，且只打包运行必需的模块。
+"""PyInstaller 打包配置：默认目录版（onedir，启动更快），只打包运行必需的模块。
 
 要点说明：
 
@@ -16,11 +16,16 @@
 4. Analysis 后按名单过滤 datas / binaries，剔除非必需的静态资源与二进制
    （Qt 翻译文件、Tcl 时区库、软件渲染 OpenGL、Qt PDF、罕见图像格式插件），
    这些在运行链上均无引用；
-5. 单文件（onefile）模式：EXE 直接收全部 binaries 与 datas。若想要启动更快的
-   目录版，把 EXE 的 ``a.binaries`` / ``a.datas`` 换成 ``exclude_binaries=True``，
-   并追加 ``COLLECT(exe, a.binaries, a.datas, name="renpy-overlay")`` 即可。
+5. 目录版（onedir，默认）：EXE 用 ``exclude_binaries=True`` 只保留引导与
+   元信息，binaries / datas 经 ``COLLECT`` 收集到 ``dist/renpy-overlay/``
+   （免每次启动解压，冷启动显著快于单文件版）；单文件版（onefile）由
+   顶部 ``ONEFILE = True`` 切换保留为备选——EXE 直接收全部 binaries 与
+   datas（每次启动解压到临时目录，分发为单个 exe）。两种模式共用同一套
+   Analysis / 过滤 / datas 配置，资源定位同构（frozen 运行时
+   ``sys._MEIPASS`` 分别指向 _MEI 临时目录与 _internal 目录）。
 
-构建命令（产物在 dist/renpy-overlay.exe）：::
+构建命令（目录版产物：dist/renpy-overlay/renpy-overlay.exe + _internal/；
+单文件版产物：dist/renpy-overlay.exe）：::
 
     uv run pyinstaller renpy_overlay.spec --noconfirm
 """
@@ -130,19 +135,18 @@ a.binaries = [
 
 pyz = PYZ(a.pure)  # noqa: F821 - PyInstaller 注入
 
-exe = EXE(  # noqa: F821 - PyInstaller 注入
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+#: 打包形态开关：False = 目录版 onedir（默认，启动更快）；
+#: True = 单文件 onefile（备选：分发为单个 exe，每次启动解压到临时目录）
+ONEFILE = False
+
+# 两种模式一致的 EXE 选项（console / upx / name 等既有取值保持不变）
+_EXE_OPTIONS = dict(
     name="renpy-overlay",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,  # 不启用 UPX：压缩会加剧杀软对远程注入工具的误报
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,  # 保留控制台：命令行参数、日志输出与控制台命令都依赖它
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -151,3 +155,35 @@ exe = EXE(  # noqa: F821 - PyInstaller 注入
     entitlements_file=None,
     icon=None,
 )
+
+if ONEFILE:
+    # 单文件版（备选）：EXE 直接收全部 binaries 与 datas，
+    # 每次启动解压到 %TEMP%/_MEIxxxx 临时目录
+    exe = EXE(  # noqa: F821 - PyInstaller 注入
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        runtime_tmpdir=None,
+        **_EXE_OPTIONS,
+    )
+else:
+    # 目录版（默认）：EXE 只保留引导与元信息，binaries / datas 由
+    # COLLECT 统一收集到 dist/renpy-overlay/（exe 与 _internal/ 同级）
+    exe = EXE(  # noqa: F821 - PyInstaller 注入
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        **_EXE_OPTIONS,
+    )
+    coll = COLLECT(  # noqa: F821 - PyInstaller 注入
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="renpy-overlay",
+    )
