@@ -30,13 +30,16 @@ from dataclasses import dataclass
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QSplitter,
     QStackedWidget,
@@ -45,6 +48,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import config
+from .color_picker_dialog import ColorPickerDialog, normalize_hex_color
 
 logger = logging.getLogger("renpy_overlay.settings_window")
 
@@ -56,6 +60,7 @@ KIND_STR = "str"            # QLineEdit（API 地址 / 模型 / Key / 快捷键�
 KIND_TEXT = "text"          # QPlainTextEdit（系统提示词）
 KIND_ENUM = "enum"          # QComboBox（choices）
 KIND_LANGS = "langs"        # QLineEdit 逗号分隔语言列表
+KIND_COLOR = "color"        # _ColorField（调色盘对话框取色）
 
 
 @dataclass(frozen=True)
@@ -379,6 +384,11 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 note="1=透明双窗（默认）；2=半透明黑色悬浮窗；修改后需重启生效",
                 restart=True,
             ),
+            SettingSpec(
+                "body_fill_color", "正文文字颜色", KIND_COLOR,
+                config.DEFAULT_BODY_FILL_COLOR,
+                note="标题与正文文字填充色（仅样式 1）；点确定后即时生效",
+            ),
         ),
     ),
     (
@@ -476,6 +486,8 @@ def raw_value_for(spec: SettingSpec, raw: dict):
     if kind == KIND_ENUM:
         text = str(value)
         return text if text in spec.choices else str(spec.default)
+    if kind == KIND_COLOR:
+        return config._read_color(raw, spec.key, spec.default)
     if kind == KIND_LANGS:
         return tuple(value) if isinstance(value, list) else tuple(spec.default)
     return value if isinstance(value, str) else str(spec.default)
@@ -493,6 +505,9 @@ def commit_value(spec: SettingSpec, widget_value):
         return float(widget_value)
     if spec.kind == KIND_LANGS:
         return parse_langs(str(widget_value))
+    if spec.kind == KIND_COLOR:
+        normalized = normalize_hex_color(widget_value)
+        return normalized if normalized else str(spec.default)
     return widget_value
 
 
@@ -641,6 +656,45 @@ def _read_raw_for_labels() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+class _ColorField(QWidget):
+    """颜色配置控件：色块按钮 + 十六进制文本；点击按钮弹调色盘对话框。
+
+    取色、预览、确认回写交互沿用参考实现（test/palette/color_picker.py
+    的 PyQt6 移植，见 :mod:`color_picker_dialog`）：确定后经 ``on_change``
+    走既有合并写盘链路。``set_value`` 直接刷新显示不经回调（等价其它
+    控件的 blockSignals），天然避免刷新回环。
+    """
+
+    def __init__(self, on_change) -> None:
+        super().__init__()
+        self._on_change = on_change
+        self._color = ""
+        self._button = QPushButton()
+        self._button.setFixedSize(56, 22)
+        self._button.clicked.connect(self._pick_color)
+        self._hex_label = QLabel()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._button)
+        row.addWidget(self._hex_label)
+        row.addStretch(1)
+
+    def value(self) -> str:
+        return self._color
+
+    def set_value(self, color: str) -> None:
+        self._color = str(color)
+        self._button.setStyleSheet(f"background: {self._color};")
+        self._hex_label.setText(self._color)
+
+    def _pick_color(self) -> None:
+        dialog = ColorPickerDialog(self._color, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            color = dialog.selected_color()
+            self.set_value(color)
+            self._on_change(color)
+
+
 class _SectionStack(QWidget):
     """右侧设置页栈：每栏目一页（QFormLayout），支持按栏目刷新控件值。"""
 
@@ -717,6 +771,8 @@ class _SectionStack(QWidget):
                 lambda s=spec, w=widget: self._on_change(s, w.text())
             )
             return widget
+        if spec.kind == KIND_COLOR:
+            return _ColorField(lambda color, s=spec: self._on_change(s, color))
         # KIND_STR（含快捷键 / API 地址 / 模型 / Key）
         widget = QLineEdit()
         widget.editingFinished.connect(
@@ -767,6 +823,8 @@ class _SectionStack(QWidget):
             else:
                 widget.setText(str(value))
             widget.blockSignals(False)
+        elif isinstance(widget, _ColorField):
+            widget.set_value(str(value))
 
     def current_section_name(self) -> str | None:
         return self._current

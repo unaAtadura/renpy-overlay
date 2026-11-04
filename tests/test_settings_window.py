@@ -12,6 +12,7 @@ import json
 from renpy_overlay import config
 from renpy_overlay.settings_window import (
     KIND_BOOL,
+    KIND_COLOR,
     KIND_ENUM,
     KIND_FLOAT,
     KIND_INT,
@@ -147,6 +148,18 @@ def test_enum_specs_have_choices():
     assert style.choices == ("1", "2")
 
 
+def test_body_fill_color_spec_registered_in_stream_style_section():
+    """颜色配置项登记在「流式窗口样式」栏：取色控件 + 默认同源 config 常量。"""
+    spec = spec_by_key("body_fill_color")
+    assert spec is not None
+    assert spec.kind == KIND_COLOR
+    assert spec.default == config.DEFAULT_BODY_FILL_COLOR
+    assert not spec.restart, "纯绘制参数可热应用，不得标注需重启"
+    assert "body_fill_color" not in restart_keys()
+    keys = {s.key for s in specs_for_section("流式窗口样式")}
+    assert "body_fill_color" in keys
+
+
 def test_prebuild_section_has_concurrency_and_scan_keys():
     keys = {spec.key for spec in specs_for_section("预构建翻译缓存")}
     assert {
@@ -208,6 +221,23 @@ def test_raw_value_for_enum_invalid_falls_back():
     assert raw_value_for(spec, {"k": "vulkan"}) == "sdl"
 
 
+def test_raw_value_for_color_falls_back_on_invalid():
+    """颜色键刷新走 config._read_color 同一校验（缺键/非法均回退默认）。"""
+    spec = SettingSpec("k", "名", KIND_COLOR, "#ADD8E6")
+    assert raw_value_for(spec, {"k": "#FF8000"}) == "#FF8000"
+    assert raw_value_for(spec, {}) == "#ADD8E6"
+    assert raw_value_for(spec, {"k": "red"}) == "#ADD8E6"
+    assert raw_value_for(spec, {"k": 16711680}) == "#ADD8E6"
+
+
+def test_commit_value_color_normalizes_uppercase():
+    """写盘值规范化为 #RRGGBB 大写；非法输入回退 spec 默认（与控件无非法输出）。"""
+    spec = SettingSpec("k", "名", KIND_COLOR, "#ADD8E6")
+    assert commit_value(spec, "#ff8000") == "#FF8000"
+    assert commit_value(spec, "#abc") == "#AABBCC"
+    assert commit_value(spec, "red") == "#ADD8E6"
+
+
 # ------------------------------------------------------------------ 合并写盘
 
 
@@ -254,6 +284,7 @@ def test_written_values_pass_load_config_validation(tmp_path):
         ("tl_langs", "zh, ja"),
         ("api_timeout", 45.0),
         ("recording_duration", 10),
+        ("body_fill_color", "#ff8000"),
     ):
         spec = spec_by_key(spec_key)
         assert spec is not None
@@ -266,6 +297,7 @@ def test_written_values_pass_load_config_validation(tmp_path):
     assert loaded.tl_langs == ("zh", "ja")
     assert loaded.api_timeout == 45.0
     assert loaded.recording_duration == 10
+    assert loaded.body_fill_color == "#FF8000"  # 规范化后通过严格校验（闭环）
 
 
 # ------------------------------------------------------------------ 键冲突优先级
