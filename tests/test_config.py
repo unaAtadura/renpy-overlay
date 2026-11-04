@@ -46,6 +46,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "stream_window_title_font_size": 12,
         "stream_window_title_gap": 2,
         "translate_window_style": 1,
+        "body_fill_color": "#ADD8E6",
         "chat_window_width": 1760,
         "chat_window_height": 200,
         "screenshot_compress_percent": 10,
@@ -111,6 +112,7 @@ def test_default_file_key_order_matches_target(tmp_path):
         "stream_window_title_font_size",
         "stream_window_title_gap",
         "translate_window_style",
+        "body_fill_color",
         "chat_window_width",
         "chat_window_height",
         "screenshot_compress_percent",
@@ -748,6 +750,41 @@ def test_translate_window_style_invalid_falls_back(tmp_path, caplog):
         loaded = config.load_config(target)
         assert loaded.translate_window_style == 1, f"{bad!r} 应回退默认"
         assert "translate_window_style" in caplog.text
+
+
+# ------------------------------------------------------------ 流式文字填充色
+
+
+def test_body_fill_color_defaults_loaded(tmp_path):
+    """缺键回退默认淡蓝（与 stream.visual.BODY_FILL_COLOR 同源，外观不变）。"""
+    target = tmp_path / "config.json"
+    target.write_text("{}", encoding="utf-8")
+    loaded = config.load_config(target)
+    assert loaded.body_fill_color == "#ADD8E6"
+    assert loaded.body_fill_color == config.DEFAULT_BODY_FILL_COLOR
+
+
+def test_body_fill_color_valid_values_loaded(tmp_path):
+    """合法十六进制生效：6 位大小写、3 位短格式、首尾空白容忍（不回写坏文件）。"""
+    target = tmp_path / "config.json"
+    for good, expected in (
+        ("#FF8000", "#FF8000"),
+        ("#ff8000", "#ff8000"),
+        ("#abc", "#abc"),
+        ("  #00FF7F  ", "#00FF7F"),
+    ):
+        target.write_text(json.dumps({"body_fill_color": good}), encoding="utf-8")
+        assert config.load_config(target).body_fill_color == expected, f"{good!r}"
+
+
+def test_body_fill_color_invalid_falls_back(tmp_path, caplog):
+    """非字符串 / 非法颜色格式一律回退默认并记警告日志（配置问题不崩溃）。"""
+    target = tmp_path / "config.json"
+    for bad in ("red", "#12345", "#GGGGGG", "", "ADD8E6", 16711680, True, None, []):
+        target.write_text(json.dumps({"body_fill_color": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.body_fill_color == "#ADD8E6", f"{bad!r} 应回退默认"
+        assert "body_fill_color" in caplog.text
 
 
 # ---------------------------------------------------------------- AI 对话窗口

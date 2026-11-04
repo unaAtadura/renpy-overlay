@@ -25,6 +25,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "stream_window_title_font_size": 8, # 流式标题窗字号（像素）
       "stream_window_title_gap": 4,       # 标题窗与正文窗的间距（像素）
       "translate_window_style": 1,        # 流式输出窗口样式（1=当前样式；2=半透明黑色悬浮窗新样式）
+      "body_fill_color": "#ADD8E6",       # 流式文字填充色（样式 1 的标题与正文；十六进制 #RGB/#RRGGBB）
       "chat_window_width": 1760,          # AI 对话窗宽度（像素；缺省回退流式正文窗宽度）
       "chat_window_height": 200,          # AI 对话窗高度（像素；缺省回退流式正文窗高度）
       "screenshot_compress_percent": 10,  # 截图翻译发送 API 前的等比压缩百分比（像素面积比）
@@ -70,11 +71,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from .screenshot.hotkeys import DEFAULT_WINDOW_HOTKEYS, parse_hotkey
+from .stream.visual import BODY_FILL_COLOR
 from .translator import (
     DEFAULT_BASE_URL,
     DEFAULT_REASONING_EFFORT,
@@ -103,6 +106,11 @@ DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE = 12  # 标题窗字号（像素）
 DEFAULT_STREAM_WINDOW_TITLE_GAP = 2  # 标题窗与正文窗间距（像素）
 #: 流式输出窗口样式：1=当前样式（默认）；2=半透明黑色悬浮窗新样式；非法值回退 1
 DEFAULT_TRANSLATE_WINDOW_STYLE = 1
+#: 流式文字填充色（样式 1 的标题与正文）：默认值同源 stream.visual.BODY_FILL_COLOR，
+#: 该常量继续作为视觉层的事实来源；非法配置值回退此处
+DEFAULT_BODY_FILL_COLOR = BODY_FILL_COLOR
+#: 十六进制颜色合法格式：#RGB 或 #RRGGBB（大小写不敏感；渲染层 QColor 直接可用）
+COLOR_HEX_PATTERN = re.compile(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$")
 #: AI 对话窗尺寸：缺省时使用流式正文窗的（配置后）值，默认常量同源
 DEFAULT_CHAT_WINDOW_WIDTH = DEFAULT_STREAM_WINDOW_WIDTH
 DEFAULT_CHAT_WINDOW_HEIGHT = DEFAULT_STREAM_WINDOW_HEIGHT
@@ -195,6 +203,7 @@ class AppConfig:
     stream_window_title_font_size: int = DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE
     stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
     translate_window_style: int = DEFAULT_TRANSLATE_WINDOW_STYLE
+    body_fill_color: str = DEFAULT_BODY_FILL_COLOR
     # AI 对话（尺寸缺省时回退流式正文窗的配置值）
     chat_window_width: int = DEFAULT_CHAT_WINDOW_WIDTH
     chat_window_height: int = DEFAULT_CHAT_WINDOW_HEIGHT
@@ -316,6 +325,7 @@ def _write_defaults(target: Path) -> None:
         "stream_window_title_font_size": DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
         "translate_window_style": DEFAULT_TRANSLATE_WINDOW_STYLE,
+        "body_fill_color": DEFAULT_BODY_FILL_COLOR,
         "chat_window_width": DEFAULT_CHAT_WINDOW_WIDTH,
         "chat_window_height": DEFAULT_CHAT_WINDOW_HEIGHT,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
@@ -481,6 +491,24 @@ def _read_window_style(raw: dict) -> int:
     return int(value)
 
 
+def _read_color(raw: dict, key: str, default: str) -> str:
+    """十六进制颜色字段校验（#RGB/#RRGGBB）：类型不对或格式非法 → 回退默认值。"""
+    value = raw.get(key, default)
+    if not isinstance(value, str):
+        logger.warning("%s 不是字符串（%r），回退默认颜色 %r", key, value, default)
+        return default
+    color = value.strip()
+    if COLOR_HEX_PATTERN.match(color) is None:
+        logger.warning(
+            "%s 不是合法颜色值（%r，需 #RGB/#RRGGBB 十六进制），回退默认 %r",
+            key,
+            value,
+            default,
+        )
+        return default
+    return color
+
+
 def _read_percent(raw: dict, key: str, default: int) -> int:
     """百分数字段校验（1..100）：类型不对或越界 → 回退默认值。"""
     value = raw.get(key, default)
@@ -599,6 +627,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             raw, "stream_window_title_gap", DEFAULT_STREAM_WINDOW_TITLE_GAP
         ),
         translate_window_style=_read_window_style(raw),
+        body_fill_color=_read_color(raw, "body_fill_color", DEFAULT_BODY_FILL_COLOR),
         # 对话窗尺寸缺省（键不存在或类型非法）时回退流式正文窗的配置值（需求）
         chat_window_width=_read_positive_int(
             raw, "chat_window_width", stream_width, MIN_STREAM_WINDOW_WIDTH
@@ -687,7 +716,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
         "cache_size=%dKB，api_base_url=%s，api_timeout=%.1fs，model=%s，"
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
-        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d，style=%d），"
+        "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d，style=%d，fill=%s），"
         "chat_window（size=%dx%d），"
         "screenshot（compress=%d%%），"
         "vision（base_url=%s，model=%s，api_key=%s），"
@@ -717,6 +746,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.stream_window_title_font_size,
         app_config.stream_window_title_gap,
         app_config.translate_window_style,
+        app_config.body_fill_color,
         app_config.chat_window_width,
         app_config.chat_window_height,
         app_config.screenshot_compress_percent,
