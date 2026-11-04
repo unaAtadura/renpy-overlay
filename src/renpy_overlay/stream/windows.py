@@ -30,7 +30,6 @@ from .scroll_logic import (
 )
 from .text_logic import plan_stream_replace
 from .visual import (
-    BODY_FILL_COLOR,
     BODY_MARGIN,
     MASK_ALPHA,
     MASK_COLOR,
@@ -62,7 +61,7 @@ def _stream_font(font_px: int) -> QFont:
 class _StreamWindowBase(QWidget):
     """标题窗与正文窗的公共底座：全透明无边框置顶 + 鼠标事件转发给宿主。"""
 
-    def __init__(self, title: str, font: QFont, host) -> None:
+    def __init__(self, title: str, font: QFont, host, fill_color: str) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self.setWindowFlags(
@@ -77,6 +76,9 @@ class _StreamWindowBase(QWidget):
         self._font = font
         self._host = host  # StreamOverlayWindow：业务事件的唯一处理者
         self._font_metrics = QFontMetricsF(font)
+        # 文字填充色（config.body_fill_color）：paintEvent 每帧现取，
+        # 宿主热重载时经 set_fill_color 更新（无状态风险，无需重启）
+        self._fill_color = QColor(fill_color)
 
     @property
     def hwnd(self) -> int:
@@ -88,6 +90,14 @@ class _StreamWindowBase(QWidget):
 
     def dpr(self) -> float:
         return max(1.0, self.devicePixelRatioF())
+
+    def set_fill_color(self, color: str) -> None:
+        """热应用文字填充色（与当前值相同则跳过；纯绘制参数，重绘即生效）。"""
+        updated = QColor(color)
+        if updated == self._fill_color:
+            return
+        self._fill_color = updated
+        self.update()
 
     # ---- 鼠标事件统一转发：窗口不含业务逻辑 ----
 
@@ -121,9 +131,9 @@ class TitleWindow(_StreamWindowBase):
     渲染帧实时跟随文本长度，点击图标分发入口回调，不参与窗口拖动/单击翻译。
     """
 
-    def __init__(self, font_px: int, host) -> None:
+    def __init__(self, font_px: int, host, fill_color: str) -> None:
         font = _stream_font(font_px)
-        super().__init__("renpy-overlay · stream title", font, host)
+        super().__init__("renpy-overlay · stream title", font, host, fill_color)
         self._layout: list[tuple[str, float]] = []  # (字符, x 起点)，单行排版
         self._entry_strip = TitleEntryStrip()
         self._entry_rect: QRect | None = None  # 入口条热区（本地坐标，命中测试用）
@@ -236,9 +246,9 @@ class TitleWindow(_StreamWindowBase):
             MASK_RADIUS,
         )
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        # 常规字体直绘：统一淡蓝色纯色，基线取"字形盒垂直居中"对应的 ascent 偏移
+        # 常规字体直绘：统一填充色纯色，基线取"字形盒垂直居中"对应的 ascent 偏移
         painter.setFont(self._font)
-        painter.setPen(QColor(BODY_FILL_COLOR))
+        painter.setPen(self._fill_color)
         for ch, x in self._layout:
             painter.drawText(QPointF(x, baseline_y), ch)
         # 入口条：紧跟标题文本右侧（同一渲染帧，实时随文本长度移动）
@@ -270,9 +280,9 @@ class _Glyph:
 class BodyWindow(_StreamWindowBase):
     """正文窗：打字机式逐字弹出的流式文本，固定显示第一行 + 滚轮回看。"""
 
-    def __init__(self, font_px: int, line_spacing: float, host) -> None:
+    def __init__(self, font_px: int, line_spacing: float, host, fill_color: str) -> None:
         font = _stream_font(font_px)
-        super().__init__("renpy-overlay · stream body", font, host)
+        super().__init__("renpy-overlay · stream body", font, host, fill_color)
         self._font_px = font_px
         self._line_h = font_px * max(1.0, line_spacing)
 
@@ -486,7 +496,7 @@ class BodyWindow(_StreamWindowBase):
             painter.translate(center_x, center_y + dy)
             painter.scale(scale, scale)
             painter.setOpacity(alpha)
-            painter.setPen(QColor(BODY_FILL_COLOR))
+            painter.setPen(self._fill_color)
             painter.drawText(QPointF(-glyph.advance / 2.0, ascent - height / 2.0), glyph.ch)
             painter.restore()
 

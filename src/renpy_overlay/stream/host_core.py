@@ -94,9 +94,12 @@ class StreamOverlayCore:
             self._config.stream_window_font_size,
             self._config.stream_window_line_spacing,
             host=self,
+            fill_color=self._config.body_fill_color,
         )
         self._title_window = title_cls(
-            self._config.stream_window_title_font_size, host=self
+            self._config.stream_window_title_font_size,
+            host=self,
+            fill_color=self._config.body_fill_color,
         )
         self._body_window.resize(width, height)
         self._title_window.resize(width, 10)  # 真实高度随字体计算后由跟随循环设定
@@ -343,6 +346,7 @@ class StreamOverlayCore:
         新配置不受影响，运行时整体回退旧配置）。热应用范围：
 
         - API 参数 / 截图压缩比 / 识曲时长等现取键：引用替换即生效；
+        - 流式文字填充色（body_fill_color）：纯绘制参数，重绘即生效；
         - 自动翻译轮询间隔：重设定时器（开关是运行时状态，保留用户
           当前选择不覆盖，下次启动读新值）；
         - 全局热键组 / 锁鼠标逃脱键：重建控制器并重注册；
@@ -374,6 +378,11 @@ class StreamOverlayCore:
     def _apply_runtime_config(self, cfg: config.AppConfig) -> list[str]:
         """把 ``cfg`` 热应用到运行时组件（热键/鼠标锁重建 + 定时器间隔）。"""
         errors: list[str] = []
+        try:
+            self._body_window.set_fill_color(cfg.body_fill_color)
+            self._title_window.set_fill_color(cfg.body_fill_color)
+        except Exception as exc:  # pragma: no cover - 纯绘制参数异常极罕见
+            errors.append(f"文字填充色应用失败：{exc}")
         try:
             self._auto_timer.setInterval(self._auto_interval_ms())
             if self._auto_translate_on:
