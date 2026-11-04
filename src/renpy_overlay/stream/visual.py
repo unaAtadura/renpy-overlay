@@ -18,5 +18,5 @@ BODY_FILL_COLOR = "#ADD8E6"  # 标题与正文统一的淡蓝色填充
 MASK_COLOR = "#000000"
 MASK_ALPHA = 110
 MASK_PAD_X = 6.0  # 条带水平内边距：文字与蒙版边缘不直接贴合
-MASK_PAD_Y = 3.0  # 条带垂直内收：保证相邻两行蒙版之间留出空隙
+MASK_PAD_Y = 1.0  # 条带垂直内收：保证相邻两行蒙版之间留出空隙
 MASK_RADIUS = 4.0  # 条带圆角半径
