@@ -181,6 +181,7 @@ uv run renpy-overlay
   "stream_window_height": 200,       // 正文窗高度
   "stream_window_font_size": 16,     // 正文字号
   "translate_window_style": 1,       // 1=淡蓝打字机样式；2=半透明黑底整段样式
+  "body_fill_color": "#ADD8E6",      // 样式 1 的标题/正文文字颜色（十六进制，点设置窗口「确定」后即时生效）
   "screenshot_compress_percent": 10, // 截图发送前压缩比例（省流量）
   "recording_duration": 8,           // 听歌识曲录音秒数
   "hotkey_main": "alt+t",            // 快捷键模式主开关键

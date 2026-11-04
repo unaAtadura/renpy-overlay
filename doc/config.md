@@ -49,6 +49,7 @@
 | `stream_window_title_font_size` | `12` | 6 | 标题字号 |
 | `stream_window_title_gap` | `2` | ≥0 | 标题窗与正文窗间距 |
 | `translate_window_style` | `1` | 仅 1/2 | 悬浮窗样式（非法值回退 1） |
+| `body_fill_color` | `"#ADD8E6"` | #RGB/#RRGGBB | 流式文字填充色（样式 1 的标题与正文；非法值回退默认；点设置窗口「确定」后即时生效） |
 | `chat_window_width` / `chat_window_height` | 同流式正文窗配置值 | 240 / 80 | AI 对话窗尺寸（键不存在或非法时**回退流式正文窗的配置值**） |
 | `fullscreen_mode` | `"sdl"` | 仅 sdl/qt | 视频剪辑全屏渲染路径；非法值回退 **qt**（attach 保底） |
 

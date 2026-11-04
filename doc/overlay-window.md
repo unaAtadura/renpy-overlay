@@ -50,9 +50,9 @@
 | `SPAWN_DURATION` | 0.55s | 单字出现动画时长 |
 | `TYPE_INTERVAL_MS` | 16 | 打字机节拍（~60 字/秒，积压越多消化越快） |
 | `RENDER_INTERVAL_MS` | 16 | 动画刷新周期 |
-| `BODY_FILL_COLOR` | `#ADD8E6` | 标题与正文统一淡蓝色 |
+| `BODY_FILL_COLOR` | `#ADD8E6` | 标题与正文统一淡蓝色（`config.body_fill_color` 的默认值来源，运行时以配置为准） |
 | `MASK_COLOR` / `MASK_ALPHA` | `#000000` / 110 | 行蒙版（约 43% 不透明度，仅覆盖有文字的行，行距留空隙） |
-| `MASK_PAD_X/Y` / `MASK_RADIUS` | 6.0 / 3.0 / 4.0 | 条带内边距与圆角 |
+| `MASK_PAD_X/Y` / `MASK_RADIUS` | 6.0 / 1.0 / 4.0 | 条带内边距与圆角 |
 | `TITLE_MARGIN_X` / `TITLE_GLOW_FACTOR` | 16.0 / 1.7 | 标题左起点 / 标题窗高度余量字号倍数 |
 
 ## 3. 双窗口与定位（geometry.py / follow.py）
