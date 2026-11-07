@@ -141,6 +141,7 @@ class StreamOverlayCore:
         self._drag_origin = (0, 0)
         self._user_offset: tuple[int, int] | None = None
         self._last_topmost_log = 0.0
+        self._last_minimize_log = 0.0  # 最小化隐藏节流日志（follow.py）
         self._press_pos: tuple[int, int] | None = None
         self._click_suppress_until = 0.0
         self._title_text = ""

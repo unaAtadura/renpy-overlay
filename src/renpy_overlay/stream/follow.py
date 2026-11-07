@@ -7,6 +7,7 @@
 ``_dragging`` / ``width`` / ``height`` / ``_title_h`` / ``_title_gap`` /
 ``dock`` / ``_user_offset`` / ``_visible`` / ``_body_hwnd`` /
 ``_title_hwnd`` / ``_body_window`` / ``_last_topmost_log`` /
+``_last_minimize_log`` /
 ``_quick_menu`` / ``_remote_screenshot``，以及 ``_update_title`` /
 ``_set_visible``。
 """
@@ -67,12 +68,21 @@ class WindowFollowMixin:
             self._hide_if_visible()
             return
         if win32api.is_minimized(hwnd):
+            self._log_minimized_hidden()
             self._hide_if_visible()
             return
         if self._locked or self._dragging:
             # 位置已锁定 / 拖动中：跟随逻辑不移动窗口，但锁定态必须周期性对两窗
             # 重申 TOPMOST（独占全屏的游戏窗口被激活时会盖住其它 topmost 窗口）。
             if self._locked and not self._dragging:
+                if not self._visible:
+                    # 游戏最小化期间被本循环 _hide_if_visible 隐藏，恢复后必须
+                    # 补重显：走 Qt show() 流程（下方常规路径注释同样适用），
+                    # 否则 set_topmost 作用于隐藏窗口毫无效果，窗口将永久不可见
+                    # （实测缺陷：日志 20261107_221504 22:52:29 起可见性 False，
+                    # 重申照打但屏幕空空，托盘恢复 0 项，直到游戏退出）。
+                    logger.info("锁定态检测到窗口不可见，恢复显示（游戏窗口已回到前台）")
+                    self._set_visible(True)
                 self._reassert_topmost()
             return
 
@@ -140,6 +150,20 @@ class WindowFollowMixin:
             round((geo.y() + geo.height()) * dpr),
         )
 
+    def _log_minimized_hidden(self) -> None:
+        """游戏窗口最小化/不可见触发隐藏时刻的节流日志（10 秒节流）。
+
+        仅在 ``_visible`` 仍为 True（隐藏即将发生）时打一次；最小化持续期间
+        本就隐藏，不再刷屏。供排查「锁定态被最小化隐藏后无法自愈」类问题。
+        """
+        if not self._visible:
+            return
+        now = time.time()
+        if now - self._last_minimize_log < 10.0:
+            return
+        self._last_minimize_log = now
+        logger.debug("游戏窗口最小化/不可见，隐藏悬浮窗（locked=%s）", self._locked)
+
     def _reassert_topmost(self) -> None:
         """把两窗重新压回最顶层（不改位置/尺寸/焦点）；日志节流避免刷屏。"""
         if self._context_menu_open:
@@ -154,7 +178,10 @@ class WindowFollowMixin:
         now = time.time()
         if now - self._last_topmost_log > 10.0:
             self._last_topmost_log = now
-            logger.debug("锁定态周期性重申置顶（应对独占全屏被激活时的覆盖）")
+            logger.debug(
+                "锁定态周期性重申置顶（应对独占全屏被激活时的覆盖，visible=%s）",
+                self._visible,
+            )
 
     def _reset_to_dock(self) -> None:
         """清除手动拖动的位置，回到自动停靠。"""
