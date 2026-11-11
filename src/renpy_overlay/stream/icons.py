@@ -25,6 +25,11 @@ BOUND_MODE_MANUAL_ICON = str(
 BOUND_MODE_AUTO_ICON = str(
     Path(__file__).parent.parent / "assets" / "icons" / "重新播放_replay-music.svg"
 )
+#: 「选项副作用日志」入口图标（淡蓝色对话气泡提示，与既有入口同一视觉语言；
+#: 原素材描边 #333 在入口条半透明黑底上不可辨，已统一改为主题淡蓝）
+CHOICE_LOG_ICON = str(
+    Path(__file__).parent.parent / "assets" / "icons" / "提示_tips-one.svg"
+)
 
 
 def translation_mode_icon(auto_translate_on: bool) -> str:
