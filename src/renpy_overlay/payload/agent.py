@@ -684,11 +684,15 @@ def _publish_choice(items, source="exports_menu", force=False):
     _STATE["last_menu"] = items  # 原始 items 留给结果匹配（见 _publish_choice_pick）
     _STATE["last_choice_captions"] = fingerprint
     prompt_who, prompt_what = _resolve_menu_prompt()
+    # 副作用采集（事前全量）：从 Menu AST 节点提取各选项 $ 语句原文；失败为
+    # None，工具端条目仅记录选项文本（静默降级，绝不抛回游戏）
+    effects = _collect_effects(_menu_node_at_menu(), captions)
     _STATE["captured"] = _STATE["captured"] + 1
     return _emit(
         {
             "t": "choice",
             "items": captions,
+            "effects": effects,
             "who": prompt_who,
             "what": prompt_what,
             "src": source,
@@ -742,7 +746,7 @@ def _exports_menu_wrapper(*args, **kwargs):
     try:
         items = args[0] if args else kwargs.get("items")
         # force=True：主 hook 意味着 menu 语句真的执行了（首次/回退重放/存档载入），
-        # 每次都视为新的选项事件重新上报；轮询兑底的指纹去重不受影响
+        # 每次都视为新的选项事件重新上报；轮询兜底的指纹去重不受影响
         _publish_choice(items, force=True)
     except BaseException as exc:
         _note_error("choice_capture", exc)
@@ -800,6 +804,241 @@ def _scan_choice_screen():
         return False
     _publish_choice(items, source="choice_screen")
     return True
+
+
+def _source_lines(source):
+    """把 PyCode.source 拆成非空行列表（strip 后保留原文；非文本返回空）。"""
+    if not isinstance(source, (bytes, type(""))):
+        return []
+    text = _to_text(source).replace("\r\n", "\n").replace("\r", "\n")
+    return [line.strip() for line in text.split("\n") if line.strip()]
+
+
+def _extract_effect_lines(stmt, out, stats):
+    """从单个语句节点提取副作用语句行（按 PyCode.source 语义判别）。
+
+    规则：``code.source`` 逐行 strip 后以 ``$`` 开头的行各记一条
+    （``$ xxx = True`` / ``$ xxx += 1`` 必命中，保留 ``$`` 前缀——摘要
+    解析已兼容两种来源）；无 ``$`` 行但类名为 ``Python``（无前缀的版本
+    形态 / ``python:`` 块）整条折叠收入。``Say``（无 code）、
+    ``UserStatement``（play/queue 等，source 不以 $ 开头）、``Show``/
+    ``Hide``/``With`` 等混排语句按此语义天然排除——``$`` 与混排语句
+    同块并存不再互相干扰。只读文本、绝不求值（求值会真实触发游戏
+    副作用，红线）。
+    """
+    lines = _source_lines(getattr(getattr(stmt, "code", None), "source", None))
+    dollar = [line for line in lines if line.startswith("$")]
+    if dollar:
+        out.extend(dollar)
+        stats["py"] = stats.get("py", 0) + len(dollar)
+        return
+    name = type(stmt).__name__
+    if name == "Python":
+        if lines:
+            out.append(" ; ".join(lines))
+        else:
+            stats["missing"] = stats.get("missing", 0) + 1
+        stats["py"] = stats.get("py", 0) + 1
+    elif lines:
+        stats["mixed"] = stats.get("mixed", 0) + 1
+
+
+def _if_entry_blocks(stmt):
+    """If 节点的分支块列表：entries=[(cond, block)…] 为主，旧 block 属性兼容。"""
+    blocks = []
+    entries = getattr(stmt, "entries", None)
+    if isinstance(entries, (list, tuple)):
+        for entry in entries:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                blocks.append(entry[1])
+    if not blocks:
+        block = getattr(stmt, "block", None)
+        if block is not None:
+            blocks.append(block)
+    return blocks
+
+
+def _safe_child_nodes(stmt):
+    """引擎自带子节点迭代（Node.get_children）的防御包装：异常/空安全。"""
+    getter = getattr(stmt, "get_children", None)
+    if not callable(getter):
+        return []
+    try:
+        children = getter()
+    except BaseException:
+        return []
+    if children is None:
+        return []
+    try:
+        return list(children)
+    except BaseException:
+        return []
+
+
+def _walk_effect_block(block, out, stats, depth):
+    """递归遍历选项 block：逐节点按语义提取副作用行。
+
+    ``$`` 与 ``mc`` / ``play`` / ``show`` / ``hide`` / ``with`` 混排时各
+    语句是独立的兄弟节点，非副作用语句由 :func:`_extract_effect_lines`
+    按语义排除，不再影响采集。``If`` 按分支块向下递归（entries 为主、
+    旧 block 属性兼容）；嵌套 ``Menu`` 的选项 block 归属内层菜单，不并入
+    外层选项；其余带子块的语句（While 等）经 ``get_children`` 取一层子
+    节点提取。递归限深，只读结构、绝不求值。
+    """
+    if not isinstance(block, (list, tuple)) or depth > 2:
+        return
+    for stmt in block:
+        _extract_effect_lines(stmt, out, stats)
+        name = type(stmt).__name__
+        if name == "If":
+            for sub in _if_entry_blocks(stmt):
+                _walk_effect_block(sub, out, stats, depth + 1)
+            continue
+        if name == "Menu":
+            continue  # 嵌套菜单：归属内层菜单，不并入外层选项
+        if depth < 2:
+            for child in _safe_child_nodes(stmt):
+                _extract_effect_lines(child, out, stats)
+
+
+def _find_statement_block(elements, fallback_index):
+    """在 items 每项的元素序列里定位语句块；失败回退旧口径 [1]。
+
+    判据：元素本身是序列且首元素像语句节点（带 ``location`` 或 ``next``
+    属性——renpy.ast.Node 的公共特征）。对 ``(caption, block, label)``
+    与任何位序/结构变体稳健；全部探测失败时回退 ``elements[1]``（旧行
+    为），并在 ``stats`` 记 fallback 供观测摘要携带。
+    """
+    fallback = elements[fallback_index] if fallback_index < len(elements) else None
+    for position, element in enumerate(elements):
+        if position == 0 or not isinstance(element, (list, tuple)) or not element:
+            continue  # [0] 是 caption 文本；空序列不像语句块
+        first = element[0]
+        if hasattr(first, "location") or hasattr(first, "next"):
+            return element, False
+    return fallback, True
+
+
+def _match_blocks_by_caption(visible, captions):
+    """按 caption 精确匹配：全部一一命中才返回元素序列列表，否则 None。"""
+    pool = list(visible)
+    matched = []
+    for caption in captions:
+        hit = None
+        for j, pair in enumerate(pool):
+            if pair[0] == caption:
+                hit = j
+                break
+        if hit is None:
+            return None
+        matched.append(pool[hit][1])
+        pool.pop(hit)
+    return matched
+
+
+def _collect_effects(node, captions):
+    """从当前 Menu AST 节点提取各选项对应的 $ 语句源码列表（事前全量）。
+
+    数据来源：:func:`_menu_node_at_menu`（menu 交互期间 current 即 Menu 节点），
+    节点 ``items`` 每项含 caption 与**选项 block**（真实位序按
+    :func:`_find_statement_block` 探测：序列且首元素为语句节点的元素；
+    探测失败回退 ``[1]`` 旧口径），caption 为纯字符串或 ``(cond, text)``
+    元组（带 ``if`` 条件的隐藏项，已被引擎过滤不在运行时 items 中）。
+
+    语句判别：按 ``PyCode.source`` 逐行匹配 ``$`` 前缀（:func:
+    `_extract_effect_lines`），类名 ``Python`` 的节点整条兜底、``If``
+    分支递归、其余带子块语句取一层子节点——``$`` 与 show / play / with
+    等混排不影响采集。
+
+    对齐策略（AST items 含隐藏项、caption 可能与玩家所见语言不一致——
+    translate 块下 AST 是脚本原文语言）：可见项数与运行时选项数相等时按
+    顺序贪心对齐；不等时仅接受 caption 完全一一命中的形态；仍不中返回
+    None——宁可整条降级也不输出错位的副作用。
+
+    覆盖条件：副作用写在选项 block 内 + ``PyCode.source`` 保留 + 引擎未魔
+    改；任何一环不满足即返回 None（静默降级，工具端条目仅记录选项文本）。
+
+    观测日志：每个降级分支回灌一条 warning（带具体原因），成功采集回灌
+    一条 info 摘要（选项数 / 每项语句数 / 对齐与 block 定位方式 / 计数）
+    ——仅在菜单真正执行时各输出一次（主 hook 每菜单一次；轮询兜底被指纹
+    去重挡住不会重复），不读取任何游戏状态、绝不影响游戏。
+    """
+    try:
+        node_name = type(node).__name__ if node is not None else "None"
+        if node is None or node_name != "Menu":
+            _log(
+                "warning",
+                "[agent] effects 采集降级：当前执行点非 Menu 节点（type=%s）" % node_name,
+            )
+            return None
+        ast_items = getattr(node, "items", None)
+        if not isinstance(ast_items, (list, tuple)) or not ast_items:
+            _log(
+                "warning",
+                "[agent] effects 采集降级：Menu 节点 items 形态异常（type=%s）"
+                % type(ast_items).__name__,
+            )
+            return None
+        visible = []
+        for item in ast_items:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            caption = item[0]
+            if isinstance(caption, (list, tuple)):
+                if len(caption) < 2:
+                    continue
+                caption = caption[1]
+            visible.append((_to_text(caption), list(item)))
+        if not visible:
+            _log("warning", "[agent] effects 采集降级：AST items 全部形态异常")
+            return None
+        matched = None
+        if len(visible) == len(captions):
+            matched = [visible[i][1] for i in range(len(captions))]
+            align_mode = "顺序贪心（可见 %d 项 = 选项 %d 项）" % (len(visible), len(captions))
+        else:
+            matched = _match_blocks_by_caption(visible, captions)
+            align_mode = "caption 精确匹配（可见 %d 项 / 选项 %d 项）" % (
+                len(visible),
+                len(captions),
+            )
+        if matched is None:
+            _log(
+                "warning",
+                "[agent] effects 采集降级：对齐失败（%s；宁整条降级不错位）" % align_mode,
+            )
+            return None
+        effects = []
+        stats = {"py": 0, "missing": 0, "mixed": 0, "fallback": 0}
+        for elements in matched:
+            block, is_fallback = _find_statement_block(elements, 1)
+            if is_fallback:
+                stats["fallback"] = stats.get("fallback", 0) + 1
+            lines = []
+            _walk_effect_block(block, lines, stats, 0)
+            effects.append(lines)
+        _log(
+            "info",
+            "[agent] effects 上报摘要：%d 选项，语句数 %s（对齐=%s；block=探测 %d/回退 %d；"
+            "$ 节点 %d 个，source 缺失 %d 个，混排排除 %d 个）"
+            % (
+                len(captions),
+                [len(lines) for lines in effects],
+                align_mode,
+                len(captions) - stats.get("fallback", 0),
+                stats.get("fallback", 0),
+                stats.get("py", 0),
+                stats.get("missing", 0),
+                stats.get("mixed", 0),
+            ),
+        )
+        return effects
+    except BaseException as exc:
+        _log(
+            "warning",
+            "[agent] effects 采集异常降级：%s: %s" % (type(exc).__name__, exc),
+        )
+        return None
 
 
 # ------------------------------------------------------------------ Hook 安装

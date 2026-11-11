@@ -203,10 +203,13 @@ def test_menu_choice_replay_reports_again_with_force(agent_text):
     items = [("Yes", "True", "y"), ("No", "True", "n")]
     assert module._publish_choice(items, force=True) is True
     assert module._publish_choice(items, force=True) is True  # 重放：不被指纹拦截
-    assert len(module._STATE["queue"]) == 2
+    # effects 观测回灌日志（t=log）不算业务消息，两次 force 重放各一条 choice
+    business = [m["t"] for m in module._STATE["queue"] if m["t"] != "log"]
+    assert business == ["choice", "choice"]
     # 轮询兜底路径：同一菜单仍在屏时仍按指纹去重
     assert module._publish_choice(items, source="choice_screen") is False
-    assert len(module._STATE["queue"]) == 2
+    business = [m["t"] for m in module._STATE["queue"] if m["t"] != "log"]
+    assert business == ["choice", "choice"]
 
 
 def test_menu_captions_skips_malformed_items(agent_text):
@@ -244,7 +247,11 @@ def test_exports_menu_wrapper_captures_and_forwards(agent_text):
     result = module._exports_menu_wrapper(items, None)
     assert result == "label_b"
     assert calls == [(items, None, {})]
-    kinds = [message["t"] for message in module._STATE["queue"]]
+    kinds = [
+        message["t"]
+        for message in module._STATE["queue"]
+        if message["t"] != "log"  # effects 观测回灌日志不算业务消息
+    ]
     assert kinds == ["choice", "choice_pick"]
     pick = module._STATE["queue"][-1]
     assert pick["index"] == 1 and pick["caption"] == "No"
@@ -260,7 +267,8 @@ def test_exports_menu_wrapper_propagates_game_exception(agent_text):
     module._STATE["exports_menu_prev"] = boom
     with pytest.raises(RuntimeError, match="game error"):
         module._exports_menu_wrapper([("A", "True", "a")])
-    assert [message["t"] for message in module._STATE["queue"]] == ["choice"]
+    business = [m["t"] for m in module._STATE["queue"] if m["t"] != "log"]
+    assert business == ["choice"]
 
 
 def test_menu_choice_screen_fallback_poll(agent_text, monkeypatch):
@@ -283,7 +291,8 @@ def test_menu_choice_screen_fallback_poll(agent_text, monkeypatch):
 
     # 同一菜单仍在屏：返回值仍为 True（表示在屏），但指纹去重不重复上报
     assert module._scan_choice_screen() is True
-    assert len(module._STATE["queue"]) == 1
+    business = [m["t"] for m in module._STATE["queue"] if m["t"] != "log"]
+    assert business == ["choice"]
 
     # 菜单关闭：清指纹
     fake.get_screen = lambda name: None
@@ -810,6 +819,250 @@ def test_periodic_scan_falls_back_to_history_when_current_sources_empty(
     assert len(says) == 1
     assert says[0]["what"] == "上一句。"
     assert says[0]["src"] == "poll"
+
+
+# ------------------------------------------------- 选项副作用采集（effects）
+
+
+def _fake_stmt(name: str, **attrs):
+    """创建类名恰为 ``name`` 的替身实例（_walk_effect_block 按类名字符串判别）。"""
+    return type(name, (), attrs)()
+
+
+def test_collect_effects_reads_python_source_in_blocks(agent_text):
+    """从 Menu 节点各选项 block 内提取 Python 节点的 code.source。"""
+    module = _load_agent_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "接受",
+                [
+                    _fake_stmt("Python", code=_fake_stmt("PyCode", source="$ affection += 1")),
+                    _fake_stmt("Say"),  # 非副作用语句：跳过
+                ],
+                "value_a",
+            ),
+            (
+                "拒绝",
+                [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ affection -= 1"))],
+                "value_b",
+            ),
+        ],
+    )
+    assert module._collect_effects(node, ["接受", "拒绝"]) == [
+        ["$ affection += 1"],
+        ["$ affection -= 1"],
+    ]
+
+
+def test_collect_effects_hidden_items_use_caption_exact_match(agent_text):
+    """AST 含条件隐藏项（caption 为 (cond, text) 元组）：可见项数与运行时
+    选项数不等，仅接受 caption 完全一一命中的形态。"""
+    module = _load_agent_module(agent_text)
+    block = [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ x = True"))]
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (("cond_var", "接受"), list(block), "v1"),
+            ("隐藏项", list(block), "v2"),
+            ("拒绝", list(block), "v3"),
+        ],
+    )
+    assert module._collect_effects(node, ["接受", "拒绝"]) == [
+        ["$ x = True"],
+        ["$ x = True"],
+    ]
+
+
+def test_collect_effects_aligns_by_order_when_captions_differ(agent_text):
+    """translate 块场景：AST caption 是脚本原文语言、运行时是玩家语言；
+    数量相等时按顺序贪心对齐（绝不因语言差异整条降级）。"""
+    module = _load_agent_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "Accept",
+                [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ a += 1"))],
+                "v1",
+            ),
+            (
+                "Reject",
+                [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ a -= 1"))],
+                "v2",
+            ),
+        ],
+    )
+    assert module._collect_effects(node, ["接受", "拒绝"]) == [
+        ["$ a += 1"],
+        ["$ a -= 1"],
+    ]
+
+
+def test_collect_effects_degrades_on_structural_mismatch(agent_text):
+    """数量不等且 caption 无法完全命中：宁整条降级也不输出错位副作用。"""
+    module = _load_agent_module(agent_text)
+    block = [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ x += 1"))]
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            ("甲", list(block), "v1"),
+            ("乙", list(block), "v2"),
+            ("丙", list(block), "v3"),
+        ],
+    )
+    assert module._collect_effects(node, ["一", "二"]) is None
+
+
+def test_collect_effects_multiline_source_and_if_recursion(agent_text):
+    """多行 python: 块折叠为 `` ; `` 分隔；If 内再探一层；source 缺失为空。"""
+    module = _load_agent_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "唯一",
+                [
+                    _fake_stmt(
+                        "Python",
+                        code=_fake_stmt("PyCode", source="a = 1\n    b = 2"),
+                    ),
+                    _fake_stmt(
+                        "If",
+                        block=[
+                            _fake_stmt("Python", code=_fake_stmt("PyCode", source="$ c = True"))
+                        ],
+                    ),
+                    _fake_stmt("Python", code=None),  # source 缺失：跳过
+                ],
+                "v",
+            )
+        ],
+    )
+    assert module._collect_effects(node, ["唯一"]) == [["a = 1 ; b = 2", "$ c = True"]]
+
+
+def test_collect_effects_rejects_non_menu_node(agent_text):
+    module = _load_agent_module(agent_text)
+    assert module._collect_effects(None, ["A"]) is None
+    assert module._collect_effects(_fake_stmt("Say"), ["A"]) is None
+
+
+def test_publish_choice_emits_effects_none_without_renpy(agent_text):
+    """本机无 renpy：采集静默降级，choice 事件 effects 为 None。"""
+    module = _fresh_queue_module(agent_text)
+    assert module._publish_choice([("接受", "True", "a")]) is True
+    shown = module._STATE["queue"][-1]
+    assert shown["t"] == "choice"
+    assert shown["effects"] is None
+
+
+def test_collect_effects_logs_degradation_reason(agent_text):
+    """降级分支回灌 warning 观测日志（带具体原因），供日志定位到具体环节。"""
+    module = _fresh_queue_module(agent_text)
+    assert module._collect_effects(_fake_stmt("Say"), ["A"]) is None
+    logs = [m for m in module._STATE["queue"] if m["t"] == "log"]
+    assert logs, "降级分支应产生回灌日志"
+    assert any(
+        m["level"] == "warning" and "effects 采集降级：当前执行点非 Menu 节点" in m["msg"]
+        for m in logs
+    )
+
+
+def test_collect_effects_logs_success_summary(agent_text):
+    """成功采集回灌 info 上报摘要（选项数 / 每项语句数 / 对齐方式 / 缺失计数）。"""
+    module = _fresh_queue_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "接受",
+                [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ a += 1"))],
+                "v1",
+            ),
+            ("拒绝", [], "v2"),
+        ],
+    )
+    assert module._collect_effects(node, ["接受", "拒绝"]) == [["$ a += 1"], []]
+    logs = [m for m in module._STATE["queue"] if m["t"] == "log"]
+    summary = [m for m in logs if m["level"] == "info" and "effects 上报摘要" in m["msg"]]
+    assert len(summary) == 1
+    assert "语句数 [1, 0]" in summary[0]["msg"]
+    assert "顺序贪心" in summary[0]["msg"]
+
+
+def test_collect_effects_mixed_statements(agent_text):
+    """$ 与 Say / UserStatement(play) / Show / Hide / With 混排：非副作用
+    语句按语义排除，$ 行（含无 $ 前缀的 Python 兜底形态）全部命中。"""
+    module = _fresh_queue_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "Dalia's brownies",
+                [
+                    _fake_stmt("Python", code=_fake_stmt("PyCode", source="$ daliabrowniesyes = True")),
+                    _fake_stmt("Say", with_="dis08"),
+                    _fake_stmt("Python", code=_fake_stmt("PyCode", source="dalia_points += 1")),
+                    _fake_stmt(
+                        "UserStatement",
+                        code=_fake_stmt("PyCode", source='play sound "beat.ogg"'),
+                    ),
+                    _fake_stmt("Show"),
+                    _fake_stmt("With", expr="dis"),
+                    _fake_stmt("Hide"),
+                ],
+                "label_db",
+            ),
+            (
+                "Alex's bagels",
+                [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ alex_points += 1"))],
+                "label_ab",
+            ),
+        ],
+    )
+    effects = module._collect_effects(node, ["Dalia's brownies", "Alex's bagels"])
+    assert effects == [
+        ["$ daliabrowniesyes = True", "dalia_points += 1"],
+        ["$ alex_points += 1"],
+    ]
+
+
+def test_collect_effects_block_position_probe(agent_text):
+    """items 每项的语句块不在 [1]（位序/结构变体）：按「首元素带 location
+    的序列」探测命中，不再固定取 [1] 导致漏采。"""
+    module = _fresh_queue_module(agent_text)
+    block = [
+        _fake_stmt(
+            "Python",
+            location=(("s.rpy", 1, 0), 1),
+            code=_fake_stmt("PyCode", source="$ met = True"),
+        )
+    ]
+    node = _fake_stmt("Menu", items=[("接受", "value_a", block)])
+    assert module._collect_effects(node, ["接受"]) == [["$ met = True"]]
+
+
+def test_collect_effects_if_entries_form(agent_text):
+    """If 节点的 entries=[(cond, block)…] 形态（非旧 block 属性）同样递归命中。"""
+    module = _fresh_queue_module(agent_text)
+    node = _fake_stmt(
+        "Menu",
+        items=[
+            (
+                "唯一",
+                [
+                    _fake_stmt(
+                        "If",
+                        entries=[("cond", [_fake_stmt("Python", code=_fake_stmt("PyCode", source="$ flag = True"))])],
+                    )
+                ],
+                "v",
+            )
+        ],
+    )
+    assert module._collect_effects(node, ["唯一"]) == [["$ flag = True"]]
 
 
 # ------------------------------------------------------------------ 版本推断
