@@ -16,6 +16,7 @@ from renpy_overlay.stream.choice_log import (
 )
 from renpy_overlay.stream.choice_log_window import (
     DRAG_START_THRESHOLD_PX,
+    RESIZE_EDGE_PX,
     exceeds_drag_threshold,
     render_entries_html,
     scroll_drag_rate,
@@ -251,6 +252,87 @@ def test_scroll_drag_rate_fast_gear_monotonic():
     slow = abs(scroll_drag_rate(60.0, 14.0))
     fast = abs(scroll_drag_rate(200.0, 14.0))
     assert fast >= slow > 0.0
+
+
+# -------------------------------------------------------------- 八向拉伸
+
+
+def test_edge_at_corners_and_edges_table():
+    """全区域判定表：角优先；四边；北向热区加宽后覆盖把手 y<12（其剩余
+    2px 仍为移动窗口）、滚动条排除、内部均返回 None。模拟宽 12px 的滚动
+    条：东向热区带 = [132, 138)。"""
+    from renpy_overlay.stream.choice_log_window import edge_at
+
+    def at(x, y):
+        return edge_at(x, y, 150, 300, 14, RESIZE_EDGE_PX, 132, 138)
+
+    assert at(2, 2) == "nw"
+    assert at(133, 2) == "ne"
+    assert at(2, 297) == "sw"
+    assert at(135, 297) == "se"
+    assert at(70, 2) == "n"
+    assert at(70, 297) == "s"
+    assert at(2, 150) == "w"
+    assert at(135, 150) == "e"
+    # 北向热区加宽（y < 12）覆盖把手大部，剩余 2px 仍为移动窗口
+    assert at(70, 10) == "n"
+    assert at(70, 13) is None
+    # 滚动条区域（x ≥ 138）：不参与东向拉伸（保持原生事件）
+    assert at(145, 150) is None
+    # 内部非边缘：None
+    assert at(75, 150) is None
+
+
+def test_edge_at_default_right_band_when_scrollbar_hidden():
+    """未传 right band（滚动条隐藏）时右带 = 最右 edge_px（12px）窄带。"""
+    from renpy_overlay.stream.choice_log_window import edge_at
+
+    assert edge_at(147, 150, 150, 300) == "e"
+    assert edge_at(130, 150, 150, 300) is None  # 热区左界之外（150-12=138）
+
+
+def test_apply_resize_delta_edges_corners_and_min_clamp():
+    """八方向几何换算：对边/对角固定、左上方向原点平移、最小尺寸钳制时
+    原点补偿保证固定侧不动。"""
+    from renpy_overlay.stream.choice_log_window import apply_resize_delta
+
+    x, y, w, h = 100, 200, 150, 300
+    assert apply_resize_delta(x, y, w, h, "e", 20, 0) == (100, 200, 170, 300)
+    assert apply_resize_delta(x, y, w, h, "e", -60, 0) == (100, 200, 100, 300)  # 钳 min_w=100
+    assert apply_resize_delta(x, y, w, h, "w", 30, 0) == (130, 200, 120, 300)
+    assert apply_resize_delta(x, y, w, h, "w", -30, 0) == (70, 200, 180, 300)
+    assert apply_resize_delta(x, y, w, h, "s", 0, 40) == (100, 200, 150, 340)
+    assert apply_resize_delta(x, y, w, h, "n", 0, 30) == (100, 230, 150, 270)
+    assert apply_resize_delta(x, y, w, h, "n", 0, -50) == (100, 150, 150, 350)
+    assert apply_resize_delta(x, y, w, h, "ne", 20, 30) == (100, 230, 170, 270)
+    assert apply_resize_delta(x, y, w, h, "sw", 30, 40) == (130, 200, 120, 340)
+    assert apply_resize_delta(x, y, w, h, "se", -60, -80) == (100, 200, 100, 220)
+
+
+def test_should_begin_resize_locked_guard():
+    """锁定态不触发拉伸；未锁定命中热区才启动。"""
+    from renpy_overlay.stream.choice_log_window import should_begin_resize
+
+    assert should_begin_resize(True, "e") is False
+    assert should_begin_resize(False, "nw") is True
+    assert should_begin_resize(False, None) is False
+
+
+def test_cursor_for_edge_mapping():
+    """边缘/角 → 光标映射口径与截图窗口一致（nw/se → SizeFDiag 等）。"""
+    from PyQt6.QtCore import Qt
+
+    from renpy_overlay.stream.choice_log_window import cursor_for_edge
+
+    assert cursor_for_edge("nw") == Qt.CursorShape.SizeFDiagCursor
+    assert cursor_for_edge("se") == Qt.CursorShape.SizeFDiagCursor
+    assert cursor_for_edge("ne") == Qt.CursorShape.SizeBDiagCursor
+    assert cursor_for_edge("sw") == Qt.CursorShape.SizeBDiagCursor
+    assert cursor_for_edge("n") == Qt.CursorShape.SizeVerCursor
+    assert cursor_for_edge("s") == Qt.CursorShape.SizeVerCursor
+    assert cursor_for_edge("e") == Qt.CursorShape.SizeHorCursor
+    assert cursor_for_edge("w") == Qt.CursorShape.SizeHorCursor
+    assert cursor_for_edge(None) == Qt.CursorShape.ArrowCursor
 
 
 # ------------------------------------------------------------------ 解耦钉子

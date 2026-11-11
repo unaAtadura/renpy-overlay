@@ -106,9 +106,10 @@
 
 标题窗图标在「打开 / 关闭」两态间切换（`injection_flow._toggle_choice_log`），**仅人工触发**，默认不弹出、不随选项自动展开；关闭即清空已累积日志，下次打开从空白开始（托盘隐藏/恢复为 hide/show 语义，不清空）。
 
-- **弹窗形态**：独立置顶覆盖窗（Frameless + Tool + 半透明黑圆角底板，与入口条同一视觉语言），固定尺寸 `choice_log_window_width/height`（默认 150×300，需重启键）；`WA_ShowWithoutActivating` 不抢游戏焦点；顶部拖动把手 + 内容区（除滚动条）全域可拖动——`_LogBrowser` 接管鼠标事件转发窗口拖动，文本交互整体禁用（`NoTextInteraction`：无 I 形光标/选中/双击选词/右键编辑菜单），拖动中光标为移动样式；滚轮与滚动条不受拖动影响（滚轮事件未接管、滚动条是兄弟子控件）；
+- **弹窗形态**：独立置顶覆盖窗（Frameless + Tool + 半透明黑圆角底板，与入口条同一视觉语言），初始尺寸 `choice_log_window_width/height`（默认 150×300，需重启键；尺寸不持久化，关闭再打开仍按配置默认打开）；`WA_ShowWithoutActivating` 不抢游戏焦点；顶部拖动把手 + 内容区（除滚动条）全域可拖动——`_LogBrowser` 接管鼠标事件转发窗口拖动，文本交互整体禁用（`NoTextInteraction`：无 I 形光标/选中/双击选词/右键编辑菜单），拖动中光标为移动样式；滚轮与滚动条不受拖动影响（滚轮事件未接管、滚动条是兄弟子控件）；
+- **八向拉伸**：未锁定态下边缘/角热区（6px 窄带，角优先）拖拽调整窗口大小——与截图窗口同口径（对边/对角固定、最小 100×150 钳制、光标映射 nw/se → SizeFDiag 等）；滚动条区域不参与东向拉伸（保持原生事件），把手内最靠上的窄带优先作北向拉伸、其余把手区域仍为移动窗口；拉伸仅在未锁定时可用，锁定态不响应尺寸调整；
 - **锚定**：打开时经 `TitleWindow.entry_top_right_global("choice-log")` 取图标右上角全局坐标，弹窗左下角贴合并钳在屏内（`anchored_position` 纯函数）；仅打开时计算一次，打开期间不自动跟随标题窗移动，拖动位置保持到关闭；
-- **内容与双态区分**：数据来自 `t=choice` 的 `effects` 字段（agent 端 AST 采集，见 [dialogue-capture.md](dialogue-capture.md) §4）与 `choice_pick` 的状态翻转，经 `ChoiceEffectLog` 独立累积（同指纹 0.5s 内合并去重；effects 长度与选项数不齐时整体降级为仅选项文本，绝不错位展示）。每菜单一块：时间 + 上文预览 + 各选项（摘要 ｜ 原文语句）；「预测」（灰）与「已发生」（淡蓝）用前缀徽标 + 文字色双重标识；
+- **内容与双态区分**：数据来自 `t=choice` 的 `effects` 字段（agent 端 AST 采集，见 [dialogue-capture.md](dialogue-capture.md) §4）与 `choice_pick` 的状态翻转，经 `ChoiceEffectLog` 独立累积（同指纹 0.5s 内合并去重；effects 长度与选项数不齐时整体降级为仅选项文本，绝不错位展示）。每菜单一块：时间 + 上文预览 + 各选项；语句行条件单栏——解析成功（`+=`/`-=`/`= True|False` 三类）仅显示极简摘要，未命中（函数调用/条件表达式等动态行）显示完整原文并标注「动态」语义；「预测」（灰）与「已发生」（淡蓝）用前缀徽标 + 文字色双重标识；
 - **与翻译/去重解耦**：该数据是纯旁路——不进 `choice_translation_text` 翻译键、不写 `_last_say` / `_last_translation_input`、不参与 say 去重，正文窗展示完全不受影响（钉子测试 `test_choice_log.py::test_effects_never_enter_choice_translation_key`）。
 
 ## 9. 右键快捷菜单（quick_menu.py）
