@@ -10,7 +10,7 @@
    ``datas``；同时 ``renpy_overlay.payload`` 要进 ``hiddenimports``
    （``files("renpy_overlay.payload")`` 会先 import 该包再定位资源）；
 3. ``excludes`` 只做保险：运行链上真实依赖仅 psutil / pywin32(win32con、
-   win32gui、win32process) / tkinter / sqlite3 / PyQt6（流式悬浮窗）/
+   win32gui、win32process) / sqlite3 / PyQt6（悬浮窗与进程选择窗）/
    requests+websocket（实时识别 dashscope 链路，见 asr_rt），其余大体积库
    一律排除；
 4. Analysis 后按名单过滤 datas / binaries，剔除非必需的静态资源与二进制
@@ -55,8 +55,9 @@ SDL2_BINARIES = [
 EXCLUDES = [
     # 科学计算 / 图像（PIL / numpy 已被真实运行链引入，不能排除）
     "scipy", "pandas", "matplotlib", "sympy", "cv2", "torch",
-    # 其它 GUI 框架（悬浮窗用 PyQt6，内置 hook 收集；选择窗用 tkinter）
-    "PyQt5", "PySide2", "PySide6", "wx",
+    # 其它 GUI 框架（悬浮窗与进程选择窗统一用 PyQt6，内置 hook 收集；
+    # tkinter 已移出运行链，排除以防将来被连带引入）
+    "PyQt5", "PySide2", "PySide6", "wx", "tkinter",
     # 交互式环境与网络库（翻译走标准库 urllib；aiohttp 已被 shazamio 引入；
     # requests / urllib3 已被 dashscope 引入，不能排除）
     "IPython", "jupyter", "notebook", "httpx",
@@ -110,8 +111,8 @@ def _norm(name: str) -> str:
 # Qt 翻译文件（~180 个 .qm）：界面文案硬编码中文，不加载 Qt 翻译系统
 a.datas = [entry for entry in a.datas if not _norm(entry[0]).endswith(".qm")]
 
-# Tcl 时区数据（tzdata ~600 个文件）：仅 Tcl clock 命令的时区库，
-# tkinter 目录/文件选择对话框用不到。（前导加 / 统一为绝对形态，
+# Tcl 时区数据（tzdata ~600 个文件）：tkinter 已移出运行链（进程选择窗改用
+# PyQt6），此过滤仅为防连带收集的保险。（前导加 / 统一为绝对形态，
 # 避免清单首段无斜杠时前缀匹配漏网）
 a.datas = [
     entry for entry in a.datas
