@@ -21,12 +21,15 @@
 - ``config.say_arguments_callback``：链式包装以取得当前发言角色对象。
 - ``config.say_menu_text_filter``：链式包装，在 Say.execute 进正文显示之前拿到
   当句原文（旧版本引擎上 ``_history_list`` 要等交互结束才入账，靠它保证
-  「显示即达」；预测路径的调用已判别排除，不会提前上报未来台词）。
+  「显示即达」；预测路径的调用已判别排除，不会提前上报未来台词）。静态
+  next 是 Menu 的提问句（紧邻分支选项）被挂起不单独上报，由 choice 事件
+  合并呈现。
 - ``renpy.store._last_say_what``：轮询直读，Say.execute 写入的当前句原文显示
   期间常驻（finally 只清 _last_raw_what），可覆盖「注入时该句已在屏」的盲区
   （该句执行早于注入，过滤器不会再触发；偏移 0，不前后取句）。
 - ``renpy.exports.menu``：链式包装，所有 menu 语句（分支选项）的唯一入口 ——
-  进入时捕获选项原文（玩家当前语言下所见文本）与触发对话上下文，返回时
+  进入时捕获选项原文（玩家当前语言下所见文本）与该菜单的紧邻提问对白
+  （前置 say 挂起、menu 自带 caption 行或 AST 静态前驱，无则为空），返回时
   捕获玩家所选；游戏自定义 choice screen 也经过它。
 - ``say`` 界面作用域：``renpy.get_screen("say").scope["who" / "what"]``。
 - 对话历史：``renpy.store._history_list[-1].who / .what``。
@@ -84,6 +87,8 @@ _STATE = {
     "exports_menu_prev": None,
     "last_menu": None,
     "last_choice_captions": None,
+    "pending_prompt": None,  # 挂起的 menu 提问对白 (who, what)，choice 事件消费
+    "menu_prompt_cache": {},  # id(Menu 节点) -> (who, what)，AST 反查按菜单缓存
 }
 
 _TAG_RE = re.compile(r"\{[^{}]*\}")
@@ -296,6 +301,10 @@ def _publish(who, what, source, force=False):
         what = _clean_text(_to_text(what))
         if not what:
             return False
+        pending = _STATE.get("pending_prompt")
+        if pending is not None and pending[1] == what:
+            # 该句已挂起为 menu 提问：其余捕获源（含 begin 事件的 force=True）不重复上报
+            return False
         who = _clean_text(_to_text(who))
         if not force and what == _STATE["last_what"] and who == _STATE["last_who"]:
             return False
@@ -328,7 +337,9 @@ def _character_callback(event, **kwargs):
     """config.all_character_callbacks 的接收端。"""
     try:
         if event == "begin":
-            # begin 事件携带完整台词；即使与上一句完全相同也应输出，所以 force=True
+            # begin 事件携带完整台词；即使与上一句完全相同也应输出，所以 force=True。
+            # Menu caption 的旁白（narration）在此挂起，由随后的 choice 事件合并呈现
+            _maybe_suspend_menu_narration(kwargs.get("what"))
             _publish(_resolve_who(kwargs.get("who")), kwargs.get("what"), "callback", force=True)
             return
         if event == "show":
@@ -378,6 +389,20 @@ def _who_from_statement(node):
     return _who_from_raw(getattr(node, "who", None))
 
 
+def _consume_stale_prompt(current_what):
+    """挂起的提问没等到 menu（如全部选项被条件排除、menu 块被跳过）：补报后清空。
+
+    若挂起句与当前句是同一句（回退重放同一提问），静默清空交由重新挂起，
+    不产生重复上报。
+    """
+    pending = _STATE.get("pending_prompt")
+    if not pending:
+        return
+    _STATE["pending_prompt"] = None
+    if pending[1] and pending[1] != current_what:
+        _publish(pending[0], pending[1], "pending_prompt", force=True)
+
+
 def _say_text_filter(text):
     """链式包装 say_menu_text_filter：在台词显示瞬间捕获文本（「落后一句」根治）。
 
@@ -389,6 +414,10 @@ def _say_text_filter(text):
     - 传入文本与当前节点原文必须一致（预测路径会用未来节点调用本过滤器，
       不一致即预测调用，跳过以免提前上报未显示的台词）。
 
+    特例：当前 Say 的静态 next 是 Menu（提问紧邻分支选项）时挂起该句
+    （``pending_prompt``）不单独上报，由随后的 choice 事件合并呈现——
+    避免「提问先上屏、又被选项整段替换清掉」的两拍观感。
+
     文本按原始原文上报（与既有扫描源一致，由 _clean_text 去标签）。
     """
     try:
@@ -396,7 +425,14 @@ def _say_text_filter(text):
 
         node = renpy.game.context().current
         if type(node).__name__ == "Say" and getattr(node, "what", None) == text:
-            _publish(_who_from_statement(node), _to_text(text), "text_filter")
+            who = _who_from_statement(node)
+            what = _to_text(text)
+            _consume_stale_prompt(_clean_text(what))
+            nxt = getattr(node, "next", None)
+            if nxt is not None and type(nxt).__name__ == "Menu":
+                _STATE["pending_prompt"] = (who, _clean_text(what))
+            else:
+                _publish(who, what, "text_filter")
     except BaseException:
         pass
     prev = _STATE.get("say_text_filter_prev")
@@ -476,14 +512,166 @@ def _menu_captions(items):
     return captions
 
 
+def _menu_node_at_menu():
+    """解析当前执行点上的 Menu 节点对象，兼容两种引擎形态。
+
+    旧引擎 ``context().current`` 是节点对象；8.3+ 是节点名字符串
+    （execution.py：``self.current = node.name``），经 script.namemap
+    （lookup 的底层数据）回查。menu 语句执行期间（exports_menu 主 hook 与
+    choice screen 轮询兜底、以及 Menu.execute 内 narration 的旁白上报点）
+    current 均停留在 Menu 节点上，不随 next_node 提前移动。
+    """
+    try:
+        import renpy
+
+        cur = renpy.game.context().current
+    except BaseException:
+        return None
+    if cur is not None and type(cur).__name__ == "Menu":
+        return cur
+    if cur:
+        try:
+            found = renpy.game.script.lookup(cur)
+        except BaseException:
+            return None
+        if found is not None and type(found).__name__ == "Menu":
+            return found
+    return None
+
+
+def _menu_narration(menu_node):
+    """提取 Menu 节点自带的 caption/narration 条目，按引擎口径合并成单条文本。
+
+    引擎 Menu.execute 把 ``block is None`` 且 ``config.narrator_menu`` 开启
+    的条目收集为 narration，在选项出现前以 ``renpy.exports.say(None, join,
+    interact=False)`` 旁白形式说出（menu 块的提问对白本体）。这里复刻同一
+    收集条件；narration 不属于任何分支 block，只取 menu 显示前必然说出的
+    内容，绝不预读分支体。
+    """
+    try:
+        import renpy
+
+        if not getattr(renpy.config, "narrator_menu", False):
+            return ""
+        items = getattr(menu_node, "items", None)
+        if not isinstance(items, (list, tuple)):
+            return ""
+        narration = []
+        for entry in items:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+                continue
+            if entry[2] is not None:
+                continue  # 有 block 的条目是真选项，block 体内内容绝不预读
+            label = _clean_text(_to_text(entry[0]))
+            if label:
+                narration.append(label)
+        if not narration:
+            return ""
+        return "\n".join(narration)
+    except BaseException:
+        return ""
+
+
+def _maybe_suspend_menu_narration(text):
+    """挂起 Menu caption：narration 经 exports.say 直调发出，与选项几乎同时
+    发布，应随 choice 事件合并呈现而非单独上屏。
+
+    begin 事件触发时当前执行点仍在 Menu 上（current 不变），文本与该菜单
+    的 narration 汇总一致即挂起；随后 _publish 的挂起拦截会抑制这条上报。
+    """
+    try:
+        menu_node = _menu_node_at_menu()
+        if menu_node is None:
+            return
+        narration = _menu_narration(menu_node)
+        if narration and narration == _clean_text(_to_text(text)):
+            _STATE["pending_prompt"] = ("", narration)
+    except BaseException:
+        pass
+
+
+def _menu_prompt_from_ast(menu_node):
+    """反查 AST：静态 next 指向该 Menu 的前驱语句是 Say 才算提问（前置 say 形态）。
+
+    只向前看（已显示的过去）：不读 Menu 分支体、不沿 next 向后遍历；jump 的
+    next 指向静态下一节点而非跳转目标，jump 干扰会自然判否。语句表优先取
+    script.namemap（节点名 → 节点对象的全量映射，8.3+ 移除 all_stmts 方法后
+    仍可用；新引擎上 all_stmts 是列表属性，callable 判别排除），兼容旧引擎
+    的 script.all_stmts()；结果由调用方按菜单节点缓存。
+    """
+    try:
+        import renpy
+
+        namemap = getattr(renpy.game.script, "namemap", None)
+        if isinstance(namemap, dict):
+            stmts = list(namemap.values())
+        else:
+            all_stmts = getattr(renpy.game.script, "all_stmts", None)
+            stmts = all_stmts() if callable(all_stmts) else None
+        if not stmts:
+            return ("", "")
+        for stmt in stmts:
+            if getattr(stmt, "next", None) is menu_node:
+                if type(stmt).__name__ != "Say":
+                    return ("", "")
+                what = _clean_text(_to_text(getattr(stmt, "what", "")))
+                if not what:
+                    return ("", "")
+                return (_who_from_statement(stmt), what)
+    except BaseException:
+        pass
+    return ("", "")
+
+
+def _resolve_menu_prompt():
+    """解析该 menu 块的紧邻提问对白 ``(who, what)``，供 choice 事件合并呈现。
+
+    优先级：挂起句（前置 say 紧邻 menu 由 _say_text_filter 挂起；caption 由
+    _maybe_suspend_menu_narration 挂起）→ Menu 自带 caption（menu 内无 block
+    字符串行，引擎在选项出现前以旁白说出）→ AST 静态前驱 Say（新引擎上
+    current 是节点名字符串、text_filter 挂起不生效，由 lookup 回查节点后
+    反查兜底）。都取不到返回空串——工具端维持仅显示选项列表的现状，绝不拿
+    对话历史旧台词冒充提问。
+    """
+    pending = _STATE.get("pending_prompt")
+    _STATE["pending_prompt"] = None
+    menu_node = _menu_node_at_menu()
+    if menu_node is not None:
+        narration = _menu_narration(menu_node)
+        if narration:
+            # caption 是 menu 自带提问，优先合并；此前挂起的普通对话照常补报，不丢句
+            if pending and pending[1] and pending[1] != narration:
+                _publish(pending[0], pending[1], "pending_prompt", force=True)
+            _log("info", "[agent] menu 提问合并（caption）：%s" % narration[:40])
+            return ("", narration)
+    if pending and pending[1]:
+        _log("info", "[agent] menu 提问合并（挂起）：%s" % pending[1][:40])
+        return (_clean_text(_to_text(pending[0])), pending[1])
+    if menu_node is None:
+        return ("", "")
+    cache = _STATE.get("menu_prompt_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        _STATE["menu_prompt_cache"] = cache
+    if id(menu_node) in cache:
+        return cache[id(menu_node)]
+    found = _menu_prompt_from_ast(menu_node)
+    cache[id(menu_node)] = found
+    if found[1]:
+        _log("info", "[agent] menu 提问合并（前驱）：%s：%s" % (found[0] or "-", found[1][:40]))
+    return found
+
+
 def _publish_choice(items, source="exports_menu", force=False):
-    """菜单出现：上报选项原文列表与触发该菜单的对话上下文。
+    """菜单出现：上报选项原文列表与该菜单的紧邻提问对白。
 
     以选项文本组合作指纹去重：choice screen 轮询兜底 20Hz 重复扫同一屏时
     只报一次；exports_menu 主 hook 以 ``force=True`` 调用 —— 回退重放、从
     选项节点存档载入等场景会重新执行 menu 语句，必须视为新的选项事件重新
     上报（否则工具端停留在重放的旧句上、选项被忽略）。菜单关闭后由轮询
-    清空指纹。实测验证的引擎版本与测试游戏见 _install_now 的 exports_menu 注释。
+    清空指纹。``who``/``what`` 经 _resolve_menu_prompt 解析（挂起句 + AST
+    静态前驱，仅认紧邻提问；无则为空串，绝不取对话历史旧台词填充）。
+    实测验证的引擎版本与测试游戏见 _install_now 的 exports_menu 注释。
     """
     if not isinstance(items, (list, tuple)):
         return False
@@ -495,14 +683,14 @@ def _publish_choice(items, source="exports_menu", force=False):
         return False
     _STATE["last_menu"] = items  # 原始 items 留给结果匹配（见 _publish_choice_pick）
     _STATE["last_choice_captions"] = fingerprint
-    context = _scan_history() or ("", "")
+    prompt_who, prompt_what = _resolve_menu_prompt()
     _STATE["captured"] = _STATE["captured"] + 1
     return _emit(
         {
             "t": "choice",
             "items": captions,
-            "who": _clean_text(context[0]),
-            "what": _clean_text(context[1]),
+            "who": prompt_who,
+            "what": prompt_what,
             "src": source,
             "ts": time.time(),
         }
@@ -905,6 +1093,8 @@ def start(config_json=None):
     _STATE["exports_menu_prev"] = None
     _STATE["last_menu"] = None
     _STATE["last_choice_captions"] = None
+    _STATE["pending_prompt"] = None
+    _STATE["menu_prompt_cache"] = {}
     _STATE["started_at"] = time.time()
 
     thread = threading.Thread(target=_sender_loop, name="renpy-overlay-sender")
