@@ -410,8 +410,12 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
     ),
 )
 
-#: 不在界面展示的键（记忆型 / 系统维护）：键冲突优先级测试钉住其存在
-_HIDDEN_KEYS: frozenset[str] = frozenset({"last_game_dir"})
+#: 不在界面展示的键（记忆型 / 系统维护）：键冲突优先级测试钉住其存在。
+#: 副作用日志弹窗尺寸属于该弹窗自身的启动参数（choice_log_window.py），
+#: 不进入设置窗口（消费入口仅 injection_flow._toggle_choice_log）
+_HIDDEN_KEYS: frozenset[str] = frozenset(
+    {"last_game_dir", "choice_log_window_width", "choice_log_window_height"}
+)
 
 
 # ------------------------------------------------------------------ 纯函数层

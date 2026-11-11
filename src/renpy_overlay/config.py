@@ -154,6 +154,11 @@ MIN_STREAM_LINE_SPACING = 1.0
 #: 正文窗尺寸下限：过小无法阅读（与 compute_geometry 的最小宽/高对齐）
 MIN_STREAM_WINDOW_WIDTH = 240
 MIN_STREAM_WINDOW_HEIGHT = 80
+#: 选项副作用日志弹窗尺寸：默认 150×300（窄幅侧栏日志），下限防不可用
+DEFAULT_CHOICE_LOG_WINDOW_WIDTH = 150
+DEFAULT_CHOICE_LOG_WINDOW_HEIGHT = 300
+MIN_CHOICE_LOG_WINDOW_WIDTH = 100
+MIN_CHOICE_LOG_WINDOW_HEIGHT = 150
 #: 轮询间隔的下限（秒）：过小的值会让 after 循环空转
 MIN_AUTO_TRANSLATE_INTERVAL = 0.1
 #: 遥控器自动化（future_截图翻译功能补充_遥控截图自动化）：周期截图间隔（秒）
@@ -204,6 +209,9 @@ class AppConfig:
     stream_window_title_gap: int = DEFAULT_STREAM_WINDOW_TITLE_GAP
     translate_window_style: int = DEFAULT_TRANSLATE_WINDOW_STYLE
     body_fill_color: str = DEFAULT_BODY_FILL_COLOR
+    # 选项副作用日志弹窗（固定尺寸，需重启键：与双窗尺寸同类）
+    choice_log_window_width: int = DEFAULT_CHOICE_LOG_WINDOW_WIDTH
+    choice_log_window_height: int = DEFAULT_CHOICE_LOG_WINDOW_HEIGHT
     # AI 对话（尺寸缺省时回退流式正文窗的配置值）
     chat_window_width: int = DEFAULT_CHAT_WINDOW_WIDTH
     chat_window_height: int = DEFAULT_CHAT_WINDOW_HEIGHT
@@ -326,6 +334,8 @@ def _write_defaults(target: Path) -> None:
         "stream_window_title_gap": DEFAULT_STREAM_WINDOW_TITLE_GAP,
         "translate_window_style": DEFAULT_TRANSLATE_WINDOW_STYLE,
         "body_fill_color": DEFAULT_BODY_FILL_COLOR,
+        "choice_log_window_width": DEFAULT_CHOICE_LOG_WINDOW_WIDTH,
+        "choice_log_window_height": DEFAULT_CHOICE_LOG_WINDOW_HEIGHT,
         "chat_window_width": DEFAULT_CHAT_WINDOW_WIDTH,
         "chat_window_height": DEFAULT_CHAT_WINDOW_HEIGHT,
         "screenshot_compress_percent": DEFAULT_SCREENSHOT_COMPRESS_PERCENT,
@@ -628,6 +638,18 @@ def load_config(path: Path | None = None) -> AppConfig:
         ),
         translate_window_style=_read_window_style(raw),
         body_fill_color=_read_color(raw, "body_fill_color", DEFAULT_BODY_FILL_COLOR),
+        choice_log_window_width=_read_positive_int(
+            raw,
+            "choice_log_window_width",
+            DEFAULT_CHOICE_LOG_WINDOW_WIDTH,
+            MIN_CHOICE_LOG_WINDOW_WIDTH,
+        ),
+        choice_log_window_height=_read_positive_int(
+            raw,
+            "choice_log_window_height",
+            DEFAULT_CHOICE_LOG_WINDOW_HEIGHT,
+            MIN_CHOICE_LOG_WINDOW_HEIGHT,
+        ),
         # 对话窗尺寸缺省（键不存在或类型非法）时回退流式正文窗的配置值（需求）
         chat_window_width=_read_positive_int(
             raw, "chat_window_width", stream_width, MIN_STREAM_WINDOW_WIDTH
