@@ -19,15 +19,15 @@
 
 | 层 | Hook 点 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| 主 | `config.all_character_callbacks` | 列表 append | `event == "begin"` 时 `kwargs["what"]` 是完整对话文本（`force=True`：即使与上一句相同也输出）；`event == "show"` 时按 `start/end` 切片上报 `{w}/{p}` 分段（`callback-segment`） |
+| 主 | `config.all_character_callbacks` | 列表 append | `event == "begin"` 时 `kwargs["what"]` 是完整对话文本（`force=True`：即使与上一句相同也输出；Menu caption 的 narration 旁白在此挂起不单独上报，由 choice 事件合并呈现）；`event == "show"` 时按 `start/end` 切片上报 `{w}/{p}` 分段（`callback-segment`） |
 | 主 | `config.say_arguments_callback` | 链式包装 | 单个函数（非列表），只借用第一个入参取当前发言角色名进 `who_hint`，原值记入 `say_arguments_prev`，卸载时还原（原不存在则删除属性） |
-| 主 | `config.say_menu_text_filter` | 链式包装 | **「显示即达」层**：`Say.execute` 进正文显示之前被调用，比 `_history_list` 入账（do_done）早一个交互周期——旧引擎（7.3/8.0/8.1）上唯一能拿到显示瞬间当前句的公开钩子。双重判别：当前节点必须是 `Say`（排除 Menu 选项文本等过滤调用），且传入文本与当前节点 `what` 一致（预测路径会用未来节点调用，不一致即跳过，防止提前上报未显示台词） |
+| 主 | `config.say_menu_text_filter` | 链式包装 | **「显示即达」层**：`Say.execute` 进正文显示之前被调用，比 `_history_list` 入账（do_done）早一个交互周期——旧引擎（7.3/8.0/8.1）上唯一能拿到显示瞬间当前句的公开钩子。双重判别：当前节点必须是 `Say`（排除 Menu 选项文本等过滤调用），且传入文本与当前节点 `what` 一致（预测路径会用未来节点调用，不一致即跳过，防止提前上报未显示台词）。特例：当前 Say 的静态 `next` 是 Menu（提问紧邻分支选项）时挂起该句不单独上报（`pending_prompt`），由 choice 事件合并呈现；挂起期间其余捕获源不再重复上报该句，menu 未出现时由下一句 say 触发补报（`src=pending_prompt`） |
 | 主 | `renpy.exports.menu` | 模块属性替换 | **分支选项唯一入口**：进入时 `_publish_choice`（force=True：menu 语句真执行了——首次 / 回退重放 / 存档载入都视为新事件），原函数返回后 `_publish_choice_pick` 上报玩家所选。原函数的异常原样抛回（那是游戏自己的流程） |
 | 备 | `config.periodic_callbacks` | 列表 append | 引擎约 20Hz 调用，内部按 `poll_hz`（默认 7.0）限流后做两层扫描 + 选项屏幕兜底 + 注册看门狗 |
 | 备 | `renpy.store._last_say_what` 直读 | 轮询扫描 | 引擎写入的当前句原文显示期间常驻（finally 只清 `_last_raw_what`），覆盖「注入时该句已在屏」的盲区（该句执行早于注入，过滤器不会再触发）；偏移 0，who 取配套 `_last_say_who` 经 store 解析为展示名 |
 | 备 | `renpy.get_screen("say").scope` | 轮询扫描 | say 界面作用域的 `who/what` |
 | 备 | `renpy.store._history_list[-1]` | 轮询扫描 | 对话历史兜底（旧引擎当前句要交互结束才入账，只作兜底源） |
-| 备 | `renpy.game.context().current` | 轮询扫描 | 当前语句节点上的 `who/what` |
+| 备 | `renpy.game.context().current` | 轮询扫描 | 当前语句节点上的 `who/what`（8.3+ 引擎上 current 是节点名字符串而非对象，该备源安全降级为无值；Menu 节点需经 `script.lookup` 回查，见 §4） |
 | 备 | `renpy.get_screen("choice").scope` | 轮询扫描 | choice screen 选项兜底（详见 §4） |
 | 退出 | `config.python_exit_callbacks` | 列表 append | 游戏正常退出时自动执行 `shutdown()` 清理 |
 
@@ -43,7 +43,7 @@
 
 ## 4. 分支选项捕获
 
-- `_publish_choice(items)`：解析 display_menu 的 items（`(caption, label, chosen)` 三元组取第一项；choice screen 传带 `caption` 属性的条目对象）→ 以选项文本组合作**指纹去重**（choice screen 轮询 20Hz 重复扫同一屏只报一次；主 hook 以 `force=True` 绕过指纹）→ 上报 `t=choice`（items、触发对话上下文取 `_scan_history()`、src、ts）；
+- `_publish_choice(items)`：解析 display_menu 的 items（`(caption, label, chosen)` 三元组取第一项；choice screen 传带 `caption` 属性的条目对象）→ 以选项文本组合作**指纹去重**（choice screen 轮询 20Hz 重复扫同一屏只报一次；主 hook 以 `force=True` 绕过指纹）→ 上报 `t=choice`（items、`who/what` 为该菜单的**紧邻提问对白**，按优先级解析：①挂起句（前置 say 紧邻 menu 由 `_say_text_filter` 挂起；Menu caption 的 narration 旁白由 begin 事件的 `_maybe_suspend_menu_narration` 挂起）；②Menu 自带 **caption 行**（`items` 内 `block is None` 且 `config.narrator_menu` 开启的条目——引擎在选项出现前以 `renpy.exports.say(None, join, interact=False)` 旁白说出，即 menu 块的提问对白本体；节点对象由 `_menu_node_at_menu` 获取，兼容 current 为节点对象与节点名字符串（8.3+ 经 `script.lookup` 回查）两种形态）；③AST 静态前驱 Say（`stmt.next is Menu 节点`，语句表优先取 `script.namemap`，兼容旧 `script.all_stmts()`，按菜单节点缓存）——三者都取不到则为空串，工具端维持仅显示选项列表；caption 与挂起的前置 say 并存时 caption 优先、前置 say 照常补报（`src=pending_prompt`）不丢句；绝不取对话历史旧台词冒充提问、绝不预读分支体内容；src、ts）；
 - `_publish_choice_pick(result)`：把 `exports.menu` 返回值映射回选项序号与文本——8.x menu_actions 形态在三元组第三位、旧二组形态在第二位，两处都尝试匹配（caption 相等也算）；都匹配不上降级为仅上报返回值文本。上报 `t=choice_pick`；
 - `_scan_choice_screen()`：每轮轮询检查 choice screen 在屏状态；**菜单关闭即清空指纹**，允许同一菜单下次出现时重新上报。覆盖两类场景：exports_menu 替换未生效、从停在选项节点的存档载入。
 

@@ -37,7 +37,7 @@
 | --- | --- | --- | --- |
 | `hello` | `token, proto, pid, py, hooks, cwd` | 建连后首个报文（同步直发，不经队列） | 认证后 `on_connect`；标题显示「已连接」 |
 | `say` | `who, what, src, ts, pid` | 捕获到新对话 | `overlay.push_say`；未就绪则暂存 `_pending_say`（只留最新）；`--no-overlay` 时打印 |
-| `choice` | `items[], who, what, src, ts` | 菜单出现 | `overlay.push_choice`（正文整段替换为编号选项列表，标题显示预览） |
+| `choice` | `items[], who, what, src, ts` | 菜单出现 | `overlay.push_choice`（正文整段替换为「提问对白 + 编号选项列表」——`what` 为该菜单的紧邻提问，无则为空仅显示选项；标题显示预览） |
 | `choice_pick` | `index, caption, src, ts` | 菜单关闭 | `overlay.push_choice_pick`（正文追加「→ 已选择：×××」） |
 | `hooks` | `layers[], stats` | Hook 安装完成（priority 插队） | 日志确认 Hook 层；`overlay.mark_injected()`（入口条并入标题窗） |
 | `log` | `level, msg` | agent 内部日志 | `log_from_game` 写入同一 logger（`renpy_overlay.game`） |
