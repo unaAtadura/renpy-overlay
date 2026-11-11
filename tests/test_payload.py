@@ -393,13 +393,13 @@ def _node(class_name: str, what, who=""):
     return node
 
 
-def _fake_renpy(current_node, store=None):
+def _fake_renpy(current_node, store=None, script=None):
     import types
 
     context = types.SimpleNamespace(current=current_node)
     return types.SimpleNamespace(
         store=store or types.SimpleNamespace(),
-        game=types.SimpleNamespace(context=lambda: context),
+        game=types.SimpleNamespace(context=lambda: context, script=script),
         config=types.SimpleNamespace(say_menu_text_filter=None),
     )
 
@@ -447,6 +447,288 @@ def test_say_text_filter_skips_predict_and_menu_and_chains(agent_text, monkeypat
     fake.game.context().current = _node("Say", "当前句。", who="c")
     assert module._say_text_filter("当前句。") == "当前句。!"
     assert calls == ["当前句。"]
+
+
+# ---- menu 提问合并：挂起 + AST 静态前驱反查 -------------------------------
+
+
+def _stmt(class_name: str, what, who="", nxt=None):
+    """带 next 指针的伪 AST 语句：类名即判别依据，next 用于静态前驱验证。"""
+    node = _node(class_name, what, who)
+    node.next = nxt
+    return node
+
+
+def test_say_prompt_before_menu_suspends_and_merges_into_choice(agent_text, monkeypatch):
+    """紧邻 menu 的提问：挂起不单独上报；choice 事件合并提问且 pending 清空。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _node("Menu", "")
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Eileen"))
+    fake = _fake_renpy(_stmt("Say", "Do you want to go?", who="c", nxt=menu_node), store)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    # 挂起：不发布 say
+    assert module._say_text_filter("Do you want to go?") == "Do you want to go?"
+    assert len(module._STATE["queue"]) == 0
+    assert module._STATE["pending_prompt"] == ("Eileen", "Do you want to go?")
+
+    # menu 执行：choice 事件合并提问，pending 被消费
+    fake.game.context().current = menu_node
+    assert module._publish_choice([("Yes", "yes"), ("No", "no")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["t"] == "choice"
+    assert message["what"] == "Do you want to go?"
+    assert message["who"] == "Eileen"
+    assert module._STATE["pending_prompt"] is None
+
+
+def test_say_not_adjacent_to_menu_publishes_normally(agent_text, monkeypatch):
+    """next 不是 Menu（普通台词）：照常单独上报，不挂起。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Eileen"))
+    fake = _fake_renpy(_stmt("Say", "普通台词。", who="c", nxt=_node("Say", "下一句。")), store)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._say_text_filter("普通台词。") == "普通台词。"
+    assert module._STATE["pending_prompt"] is None
+    assert module._STATE["queue"][-1]["what"] == "普通台词。"
+
+
+def test_menu_prompt_resolved_from_ast_predecessor(agent_text, monkeypatch):
+    """无挂起（如从选项节点存档载入）：AST 静态前驱是 Say 才合并，按菜单缓存只遍历一次。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _node("Menu", "")
+    prompt = _stmt("Say", "Where to?", who="c", nxt=menu_node)
+    calls = []
+
+    def all_stmts():
+        calls.append(1)
+        return [prompt, _stmt("Say", "更早台词。", nxt=_node("Say", ""))]
+
+    script = types.SimpleNamespace(all_stmts=all_stmts)
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Eileen"))
+    fake = _fake_renpy(menu_node, store, script=script)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._publish_choice([("Left", "l"), ("Right", "r")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["t"] == "choice"
+    assert message["what"] == "Where to?"
+    assert message["who"] == "Eileen"
+    assert len(calls) == 1
+
+    # 缓存命中：同一菜单节点再次 force 上报（回退重放）不再遍历语句表
+    assert module._publish_choice([("Left", "l"), ("Right", "r")], force=True) is True
+    assert len(calls) == 1
+    again = module._STATE["queue"][-1]
+    assert again["what"] == "Where to?"
+
+
+def test_menu_prompt_absent_when_predecessor_not_say(agent_text, monkeypatch):
+    """静态前驱非 Say（if/jump 等）：不合并仅选项列表；绝不取历史旧台词冒充。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _node("Menu", "")
+    if_node = _stmt("If", "", nxt=menu_node)
+    script = types.SimpleNamespace(
+        all_stmts=lambda: [if_node, _stmt("Say", "更早台词。", nxt=_node("Say", ""))]
+    )
+    fake = _fake_renpy(menu_node, types.SimpleNamespace(), script=script)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._publish_choice([("Yes", "yes")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["what"] == "" and message["who"] == ""
+
+
+def test_stale_prompt_reported_when_menu_never_comes(agent_text, monkeypatch):
+    """挂起的提问没等到 menu（下一句不同文本的 say 到来）：补报后清空。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="Eileen"))
+    fake = _fake_renpy(_stmt("Say", "Do you want to go?", who="c", nxt=_node("Menu", "")), store)
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+    module._say_text_filter("Do you want to go?")
+    assert module._STATE["pending_prompt"] is not None
+
+    # menu 被跳过，下一句 say 到来：先补报提问再正常上报本句
+    fake.game.context().current = _stmt("Say", "Menu skipped.", who="c", nxt=_node("Say", ""))
+    module._say_text_filter("Menu skipped.")
+    says = [m for m in module._STATE["queue"] if m["t"] == "say"]
+    assert [m["what"] for m in says] == ["Do you want to go?", "Menu skipped."]
+    assert [m["src"] for m in says] == ["pending_prompt", "text_filter"]
+    assert module._STATE["pending_prompt"] is None
+
+
+def test_publish_suppressed_while_prompt_pending(agent_text):
+    """挂起期间其余捕获源重复扫到同一句（含 begin 的 force=True）不再上报。"""
+    module = _fresh_queue_module(agent_text)
+    module._STATE["pending_prompt"] = ("Eileen", "Do you want to go?")
+
+    assert module._publish("Eileen", "Do you want to go?", "poll") is False
+    assert module._publish("Eileen", "Do you want to go?", "callback", force=True) is False
+    assert len(module._STATE["queue"]) == 0
+
+    # 不同文本不受影响
+    assert module._publish("Eileen", "Other.", "poll") is True
+
+
+# ---- Menu caption（narrator_menu 提问行）+ 新引擎节点名字符串形态 ----------------
+
+
+def _caption_menu_node():
+    """Ripples 场景的伪 Menu 节点：无 block 字符串行（caption）+ 两个真选项。"""
+    menu_node = _stmt("Menu", "", nxt=_node("Say", ""))
+    menu_node.items = [
+        ("Practice with Darci?", "True", None),
+        ("Yes.", "True", ["stmt"]),
+        ("No.", "True", ["stmt"]),
+    ]
+    return menu_node
+
+
+def _string_current_renpy(menu_node, extra_config=None):
+    """新引擎形态：context().current 是节点名字符串，script.lookup 回查节点。"""
+    import types
+
+    config = types.SimpleNamespace(narrator_menu=True)
+    if extra_config:
+        for key, value in extra_config.items():
+            setattr(config, key, value)
+    return types.SimpleNamespace(
+        store=types.SimpleNamespace(),
+        game=types.SimpleNamespace(
+            context=lambda: types.SimpleNamespace(current="menu_1"),
+            script=types.SimpleNamespace(lookup=lambda name: menu_node),
+        ),
+        config=config,
+    )
+
+
+def test_menu_caption_extracted_with_string_current(agent_text, monkeypatch):
+    """新引擎 current 是节点名字符串：lookup 回查 Menu 后提取 caption 合并。"""
+    import sys
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _caption_menu_node()
+    monkeypatch.setitem(sys.modules, "renpy", _string_current_renpy(menu_node))
+
+    assert module._publish_choice([("Yes.", "yes"), ("No.", "no")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["t"] == "choice"
+    assert message["what"] == "Practice with Darci?"
+    assert message["who"] == ""
+    assert module._STATE["pending_prompt"] is None
+
+
+def test_menu_caption_suspended_at_begin_and_merged(agent_text, monkeypatch):
+    """Menu caption 的旁白（exports.say 直调）在 begin 事件挂起，随 choice 合并呈现。"""
+    import sys
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _caption_menu_node()
+    monkeypatch.setitem(sys.modules, "renpy", _string_current_renpy(menu_node))
+
+    # begin 事件（caption narration）被挂起不发布
+    module._character_callback("begin", who=None, what="Practice with Darci?")
+    assert len(module._STATE["queue"]) == 0
+    assert module._STATE["pending_prompt"] == ("", "Practice with Darci?")
+
+    # menu 执行：caption 合并进 choice 事件
+    assert module._publish_choice([("Yes.", "yes"), ("No.", "no")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["what"] == "Practice with Darci?"
+    assert module._STATE["pending_prompt"] is None
+
+
+def test_menu_caption_mismatched_begin_publishes(agent_text, monkeypatch):
+    """begin 文本与 caption 不一致（普通对话）：不挂起，照常发布。"""
+    import sys
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _caption_menu_node()
+    monkeypatch.setitem(sys.modules, "renpy", _string_current_renpy(menu_node))
+
+    module._character_callback("begin", who=None, what="普通台词。")
+    assert module._STATE["pending_prompt"] is None
+    message = module._STATE["queue"][-1]
+    assert message["t"] == "say" and message["what"] == "普通台词。"
+
+
+def test_pending_say_reported_when_caption_takes_over(agent_text, monkeypatch):
+    """caption 与此前挂起的前置 say 并存：caption 合并，前置 say 补报不丢句。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _caption_menu_node()
+    store = types.SimpleNamespace(c=types.SimpleNamespace(name="mcT"))
+    context_holder = types.SimpleNamespace(
+        current=_stmt("Say", "What should I say?", who="c", nxt=menu_node)
+    )
+    fake = types.SimpleNamespace(
+        store=store,
+        game=types.SimpleNamespace(
+            context=lambda: context_holder,
+            script=types.SimpleNamespace(lookup=lambda name: menu_node),
+        ),
+        config=types.SimpleNamespace(say_menu_text_filter=None, narrator_menu=True),
+    )
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    # 前置 say 挂起（对象形态 current，text_filter 生效的引擎）
+    module._say_text_filter("What should I say?")
+    assert module._STATE["pending_prompt"] == ("mcT", "What should I say?")
+
+    # 切到 menu 执行点（字符串形态 current）：caption 优先合并，前置 say 补报
+    context_holder.current = "menu_1"
+    assert module._publish_choice([("Yes.", "yes"), ("No.", "no")]) is True
+    kinds = [(m["t"], m.get("src"), m.get("what")) for m in module._STATE["queue"]]
+    assert ("say", "pending_prompt", "What should I say?") in kinds
+    assert ("choice", "exports_menu", "Practice with Darci?") in kinds
+
+
+def test_menu_prompt_resolved_from_namemap(agent_text, monkeypatch):
+    """新引擎语句表（namemap）：前驱 Say 直连 Menu 时反查命中并缓存。"""
+    import sys
+    import types
+
+    module = _fresh_queue_module(agent_text)
+    menu_node = _stmt("Menu", "", nxt=_node("Say", ""))
+    prompt = _stmt("Say", "Where to?", who="c", nxt=menu_node)
+    fake = types.SimpleNamespace(
+        store=types.SimpleNamespace(c=types.SimpleNamespace(name="mcT")),
+        game=types.SimpleNamespace(
+            context=lambda: types.SimpleNamespace(current=menu_node),
+            script=types.SimpleNamespace(namemap={"m": menu_node, "s": prompt}),
+        ),
+        config=types.SimpleNamespace(narrator_menu=True),  # menu 无 items → caption 空
+    )
+    monkeypatch.setitem(sys.modules, "renpy", fake)
+
+    assert module._publish_choice([("Left", "l"), ("Right", "r")]) is True
+    message = module._STATE["queue"][-1]
+    assert message["what"] == "Where to?"
+    assert message["who"] == "mcT"
+
+    # 缓存：反查数据源失效后同菜单 force 上报仍返回缓存结果
+    fake.game.script.namemap = None
+    assert module._publish_choice([("Left", "l"), ("Right", "r")], force=True) is True
+    again = module._STATE["queue"][-1]
+    assert again["what"] == "Where to?"
 
 
 # ---- store 直读与两层扫描（「注入时已在屏」盲区 + 防翻旧账） -----------------
