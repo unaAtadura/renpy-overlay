@@ -79,6 +79,12 @@ def should_begin_resize(locked: bool, edge: str | None) -> bool:
     return not locked and edge is not None
 
 
+def shows_resize_hints(locked: bool) -> bool:
+    """是否绘制可拉伸视觉提示（四角手柄 + 悬停边缘高亮）：锁定态不可拉
+    伸，手柄与高亮全部隐藏（纯函数，离线测试用；paintEvent 按此判定）。"""
+    return not locked
+
+
 #: 主色（淡蓝，与标题/正文文字同一视觉语言）与预测态灰色
 _COLOR_ACCENT = "#ADD8E6"
 _COLOR_PREDICTED = "#9AA0A6"
@@ -563,9 +569,17 @@ class ChoiceLogWindow(QWidget):
         bar.setValue(bar.value() + int(self._scroll_rate * DRAG_SCROLL_INTERVAL_MS / 1000.0))
 
     def _set_locked(self, locked: bool) -> None:
-        """切换锁定态并恢复空闲光标（锁定 = 可滚动手形；解锁 = 移动样式）。"""
+        """切换锁定态：翻转状态、恢复空闲光标并**立即触发重绘**。
+
+        重绘必须显式触发：Qt 窗口静止时不自发重绘，缺省 update 会让画面
+        停留在锁定前旧帧——四角手柄（常驻绘制）残留可见，而边缘高亮因双
+        击时鼠标多半不在热区、本就未画，形成「高亮消失、手柄残留」的不对
+        称观感（实测根因）；且锁定态下 edge 恒为 None，后续鼠标移动不会
+        造成 hover 变化，残留帧将无限期持续。
+        """
         self._locked = locked
         self._apply_idle_cursor()
+        self.update()
         logger.info(
             "选项副作用日志%s",
             "已锁定（按住左键拖动滚动日志，窗口不动）" if locked else "已解锁（按住左键拖动移动窗口）",
@@ -653,9 +667,11 @@ class ChoiceLogWindow(QWidget):
         painter.drawRoundedRect(
             QRectF(self.rect()), ENTRY_BACKDROP_RADIUS, ENTRY_BACKDROP_RADIUS
         )
-        # 可拉伸视觉提示（移植自 screenshot.window_visual）：未锁定时四角
-        # 常驻半透明白短线 + 悬停边缘亮白反馈线；锁定态不可拉伸，不绘制
-        if not self._locked:
+        # 可拉伸视觉提示（移植自 screenshot.window_visual）：判定见
+        # shows_resize_hints——锁定态不可拉伸，手柄与悬停高亮全部隐藏；
+        # 未锁定时四角常驻半透明白短线 + 悬停边缘亮白反馈线（resize 进行
+        # 中不画高亮，避免与实时尺寸干扰）
+        if shows_resize_hints(self._locked):
             draw_grip_handles(painter, self.rect())
             if self._hover_edge is not None and self._gesture != "resize":
                 draw_edge_highlight(painter, self.rect(), self._hover_edge)

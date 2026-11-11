@@ -20,6 +20,7 @@ from renpy_overlay.stream.choice_log_window import (
     exceeds_drag_threshold,
     render_entries_html,
     scroll_drag_rate,
+    shows_resize_hints,
 )
 
 # ------------------------------------------------------------------ 摘要解析
@@ -333,6 +334,35 @@ def test_cursor_for_edge_mapping():
     assert cursor_for_edge("e") == Qt.CursorShape.SizeHorCursor
     assert cursor_for_edge("w") == Qt.CursorShape.SizeHorCursor
     assert cursor_for_edge(None) == Qt.CursorShape.ArrowCursor
+
+
+def test_shows_resize_hints_hidden_when_locked():
+    """锁定态隐藏全部可拉伸视觉提示（四角手柄 + 悬停高亮），解锁态显示。"""
+    assert shows_resize_hints(False) is True
+    assert shows_resize_hints(True) is False
+
+
+def test_set_locked_triggers_repaint(monkeypatch):
+    """锁定/解锁切换必须显式触发重绘：Qt 静止时不自发重绘，缺省 update
+    会让画面停留在锁定前旧帧（四角手柄残留的实测根因）。
+
+    以 __new__ 绕过 QWidget 构造（不创建任何真实窗口/Qt 对象），并拦截
+    update 与 _apply_idle_cursor 记录调用。"""
+    from renpy_overlay.stream import choice_log_window as module
+
+    window = module.ChoiceLogWindow.__new__(module.ChoiceLogWindow)
+    window._locked = False
+    repaint_calls: list[bool] = []
+    monkeypatch.setattr(window, "update", lambda: repaint_calls.append(True))
+    monkeypatch.setattr(window, "_apply_idle_cursor", lambda: None)
+
+    window._set_locked(True)
+    assert window._locked is True
+    assert repaint_calls == [True]  # 锁定切换立即重绘（手柄随即消失）
+
+    window._set_locked(False)
+    assert window._locked is False
+    assert repaint_calls == [True, True]  # 解锁同样触发重绘（手柄恢复）
 
 
 # ------------------------------------------------------------------ 解耦钉子
