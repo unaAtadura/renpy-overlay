@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 BODY_MARGIN = 24.0  # 正文窗文本边距（逻辑像素，参考项目全屏窗用 64）
-SPAWN_DURATION = 0.55  # 单字出现动画时长（秒）
+SPAWN_DURATION = 0.0  # 已废弃置 0：正文窗逐字出现动画已移除，字符直接在最终
+# 位置绘制；保留符号维持 stream_window 门面的历史公开符号兼容
 TYPE_INTERVAL_MS = 16  # 打字机节拍（~60 字/秒，积压越多消化越快）
-RENDER_INTERVAL_MS = 16  # 动画刷新周期
+RENDER_INTERVAL_MS = 16  # 重绘刷新周期（驱动平滑滚动与滚动插值）
 TITLE_MARGIN_X = 16.0  # 标题文本左起点（逻辑像素）
 TITLE_GLOW_FACTOR = 1.7  # 标题窗高度余量的字号倍数（保持既有几何外观）
 BODY_FILL_COLOR = "#ADD8E6"  # 标题与正文统一的淡蓝色填充

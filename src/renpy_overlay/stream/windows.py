@@ -4,7 +4,8 @@
 
 - ``_StreamWindowBase``：全透明无边框置顶底座 + 鼠标事件统一转发宿主；
 - ``TitleWindow``：一次性整显标题（随交互状态动态更新），内嵌图标入口条；
-- ``BodyWindow``：打字机逐字弹出、平滑滚动、滚轮回看、锁定态拖拽滚动。
+- ``BodyWindow``：打字机逐字上屏（字符直接在最终位置绘制，无出现动画）、
+  平滑滚动、滚轮回看、锁定态拖拽滚动。
 
 滚动/蒙版/替换的计算逻辑在 :mod:`.scroll_logic` 与 :mod:`.text_logic`，
 视觉常量在 :mod:`.visual`。窗口不含业务逻辑，全部经 ``host`` 回调。
@@ -13,8 +14,6 @@
 from __future__ import annotations
 
 import logging
-import math
-import time
 
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
@@ -37,7 +36,6 @@ from .visual import (
     MASK_PAD_Y,
     MASK_RADIUS,
     RENDER_INTERVAL_MS,
-    SPAWN_DURATION,
     TITLE_MARGIN_X,
     TYPE_INTERVAL_MS,
 )
@@ -287,7 +285,7 @@ class TitleWindow(_StreamWindowBase):
 class _Glyph:
     """一个已排版字符（坐标为窗口内容坐标系，不含滚动偏移）。"""
 
-    __slots__ = ("ch", "x", "baseline", "advance", "spawn", "row")
+    __slots__ = ("ch", "x", "baseline", "advance", "row")
 
     def __init__(
         self, ch: str, x: float, baseline: float, advance: float, row: int
@@ -296,12 +294,11 @@ class _Glyph:
         self.x = x
         self.baseline = baseline
         self.advance = advance
-        self.spawn = time.monotonic()
         self.row = row
 
 
 class BodyWindow(_StreamWindowBase):
-    """正文窗：打字机式逐字弹出的流式文本，固定显示第一行 + 滚轮回看。"""
+    """正文窗：打字机式逐字上屏的流式文本，固定显示第一行 + 滚轮回看。"""
 
     def __init__(self, font_px: int, line_spacing: float, host, fill_color: str) -> None:
         font = _stream_font(font_px)
@@ -375,7 +372,7 @@ class BodyWindow(_StreamWindowBase):
         """以整段文本替换当前流内容（实时语音识别专用：支持增加与修正）。
 
         依 :func:`plan_stream_replace` 差分：公共前缀的已排版字形原样保留，
-        仅撤销/重喂差异尾部——已显示部分不重播出现动画，观感为整段连续
+        仅撤销/重喂差异尾部——已显示部分原地保留，观感为整段连续
         文字原地增长与修正（需求：不将每次修正结果直接追加在后面）。
         """
         old = self._stream_text
@@ -493,35 +490,12 @@ class BodyWindow(_StreamWindowBase):
                 painter.drawRoundedRect(QRectF(x, y, w, h), MASK_RADIUS, MASK_RADIUS)
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        now = time.monotonic()
-        ascent = fm.ascent()
-        height = fm.height()
-        c1, c3 = 1.70158, 2.70158  # easeOutBack 参数（弹出时轻微过冲）
+        # 逐字直绘：轮到显示的那一帧直接以最终位置与颜色呈现——无位移/缩放/
+        # 透明度过渡，不产生半透明或偏移的中间帧（出现动画已移除）
         painter.setFont(self._font)
+        painter.setPen(self._fill_color)
         for glyph in self._glyphs:
-            age = now - glyph.spawn
-            p = min(1.0, max(0.0, age / SPAWN_DURATION))
-            if p < 1.0:  # 出现动画：放大过冲 + 跳起 + 淡入
-                q = p - 1.0
-                ease = 1.0 + c3 * q * q * q + c1 * q * q
-                scale = 0.25 + 0.75 * ease
-                dy = -30.0 * math.sin(math.pi * p) * (1.0 - p)
-                alpha = min(1.0, 0.15 + p * 1.6)
-            else:  # 静止：位置与外观完全固定（无漂浮动画）
-                scale, dy, alpha = 1.0, 0.0, 1.0
-
-            # 局部原点取"字形盒中心"（与原精灵中心对齐）：drawText 画在
-            # (-advance/2, ascent - height/2)，scale=1/dy=0/alpha=1 时数学上
-            # 等价于直接 drawText(glyph.x, glyph.baseline)
-            center_x = glyph.x + glyph.advance / 2.0
-            center_y = glyph.baseline - ascent + height / 2.0
-            painter.save()
-            painter.translate(center_x, center_y + dy)
-            painter.scale(scale, scale)
-            painter.setOpacity(alpha)
-            painter.setPen(self._fill_color)
-            painter.drawText(QPointF(-glyph.advance / 2.0, ascent - height / 2.0), glyph.ch)
-            painter.restore()
+            painter.drawText(QPointF(glyph.x, glyph.baseline), glyph.ch)
 
     # ---- 滚轮回看 ----------------------------------------------------------
 
