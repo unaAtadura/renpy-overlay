@@ -21,7 +21,7 @@ from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import QApplication, QFrame, QTextBrowser, QVBoxLayout, QWidget
 
 from ..bound_window import ENTRY_BACKDROP_COLOR, ENTRY_BACKDROP_RADIUS
-from .choice_log import ANCHOR_GAP, anchored_position
+from .choice_log import ANCHOR_GAP, anchored_position, is_effect_parsed
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -119,9 +119,12 @@ class _DragHandle(QWidget):
 def render_entries_html(entries) -> str:
     """把日志条目渲染为弹窗 HTML（纯函数，离线测试用）。
 
-    每菜单一块：时间 + 上文预览 + 选项行（序号 + 徽标 + caption）+ 语句行
-    （摘要 ｜ 原文）。视觉区分（双重标识）：预测态 = 灰色 + 「预测」徽标；
-    已发生态 = 淡蓝主色 + 「已发生」徽标。空日志给引导文案。
+    每菜单一块：时间 + 上文预览 + 选项行（序号 + 徽标 + caption）+ 语句行。
+    语句行按「是否解析成功」逐行二选一（条件单栏，互斥）：命中三类正则的
+    行只显示摘要（沿用该选项预测/已发生配色，一眼可辨加减方向与布尔置
+    位）；未命中（函数调用/条件表达式/多语句折叠等动态行）只显示完整原文
+    （保留 $ 前缀与采集原样，不展示被截断的摘要而丢失语义）——不再出现
+    「摘要 ｜ 原文」并列与孤立管道符。空日志给引导文案。
     """
     parts: list[str] = []
     for entry in entries:
@@ -139,9 +142,13 @@ def render_entries_html(entries) -> str:
             )
             # summaries 与 effects 生成时一一对应；strict=False 容忍数据异常不崩渲染
             for summary, raw in zip(item.summaries, item.effects, strict=False):
+                # quote=False：语句行是 div 文本内容而非属性，单引号无需转义
+                if is_effect_parsed(raw):
+                    text = html.escape(summary, quote=False)  # 解析成功：仅摘要
+                else:
+                    text = html.escape(raw, quote=False)  # 动态/未命中：仅完整原文（不截断）
                 parts.append(
-                    f"<div style='color:{color};margin-left:14px;'>"
-                    f"{html.escape(summary)} ｜ {html.escape(raw)}</div>"
+                    f"<div style='color:{color};margin-left:14px;'>{text}</div>"
                 )
     if not parts:
         parts.append(

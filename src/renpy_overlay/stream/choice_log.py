@@ -36,18 +36,20 @@ def _truncate(text: str, limit: int = _MAX_TEXT_CHARS) -> str:
     return text[: limit - 1] + "…"
 
 
-def summarize_effect(text: str) -> str:
-    """把一条 ``$`` 语句解析为极简摘要；解析不了回退原文截断。
-
-    识别形态：``$ var += n`` → ``var +n``、``$ var -= n`` → ``var -n``、
-    ``$ flag = True/False`` → ``flag = True``。变量名保留游戏原名（语义
-    翻译不可靠，需求仅要求看清加减方向与布尔目标值）；带空格的复杂表达式
-    （下标运算、函数调用等）不属于此三类，回退原文展示。``$`` 前缀可选
-    （PyCode.source 的真实形态通常不含它，兼容两种来源）。
-    """
+def _strip_dollar(text: str) -> str:
+    """剥离可选的 ``$`` 语句前缀（PyCode.source 的真实形态通常不含它）。"""
     body = (text or "").strip()
     if body.startswith("$"):
         body = body[1:].strip()
+    return body
+
+
+def _parse_effect(body: str) -> str | None:
+    """三类正则的核心判定：命中返回摘要，未命中返回 None。
+
+    summarize_effect 与 is_effect_parsed 共用本函数，保证「摘要内容」与
+    「是否解析成功」永远同口径（无两处逻辑漂移）。
+    """
     match = _PLUS_RE.match(body)
     if match:
         return _truncate(f"{match.group(1)} +{match.group(2).strip()}")
@@ -57,7 +59,31 @@ def summarize_effect(text: str) -> str:
     match = _BOOL_RE.match(body)
     if match:
         return _truncate(f"{match.group(1)} = {match.group(2)}")
-    return _truncate(body)
+    return None
+
+
+def is_effect_parsed(text: str) -> bool:
+    """与 :func:`summarize_effect` 同口径判定该行是否解析成功（纯函数）。
+
+    渲染层据此逐行二选一：解析成功只显示摘要（不再并列原文），未命中
+    （函数调用/条件表达式/多语句折叠等）只显示完整原文——不展示被截断
+    的摘要而丢失原文语义。
+    """
+    return _parse_effect(_strip_dollar(text)) is not None
+
+
+def summarize_effect(text: str) -> str:
+    """把一条 ``$`` 语句解析为极简摘要；解析不了回退原文截断。
+
+    识别形态：``$ var += n`` → ``var +n``、``$ var -= n`` → ``var -n``、
+    ``$ flag = True/False`` → ``flag = True``。变量名保留游戏原名（语义
+    翻译不可靠，需求仅要求看清加减方向与布尔目标值）；带空格的复杂表达式
+    （下标运算、函数调用等）不属于此三类，回退原文展示。``$`` 前缀可选
+    （PyCode.source 的真实形态通常不含它，兼容两种来源）。
+    """
+    body = _strip_dollar(text)
+    parsed = _parse_effect(body)
+    return parsed if parsed is not None else _truncate(body)
 
 
 @dataclass

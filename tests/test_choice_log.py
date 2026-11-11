@@ -11,6 +11,7 @@ from renpy_overlay.stream.choice_log import (
     DUPLICATE_WINDOW_SECONDS,
     ChoiceEffectLog,
     anchored_position,
+    is_effect_parsed,
     summarize_effect,
 )
 from renpy_overlay.stream.choice_log_window import render_entries_html
@@ -44,6 +45,18 @@ def test_summarize_truncates_long_text():
 def test_summarize_empty():
     assert summarize_effect("") == ""
     assert summarize_effect(None) == ""
+
+
+def test_is_effect_parsed_matches_summarize_three_rules():
+    """三类正则命中 → True（含 $ 前缀兼容）；其余形态 → False（回退原文）。"""
+    assert is_effect_parsed("$ affection += 1") is True
+    assert is_effect_parsed("affection -= 3") is True
+    assert is_effect_parsed("$ met_lizzie = True") is True
+    assert is_effect_parsed("$ death_flag = False") is True
+    assert is_effect_parsed("$ add_affection('e', 5)") is False
+    # 三元右侧由 += 规则承载原样保留（与 summarize_effect 同口径）
+    assert is_effect_parsed("$ v += 1 if cond else -1") is True
+    assert is_effect_parsed("") is False
 
 
 # ------------------------------------------------------------------ 累积与去重
@@ -145,8 +158,30 @@ def test_render_html_marks_predicted_and_happened():
     html_text = render_entries_html([_entry_with_states()])
     assert "[预测]" in html_text
     assert "[已发生]" in html_text
-    assert "a +1" in html_text and "$ a += 1" in html_text
+    # 条件单栏：解析成功行仅显示摘要，不再并列原文（$ a += 1 不再出现）
+    assert "a +1" in html_text
+    assert "$ a += 1" not in html_text
     assert "去哪里？" in html_text
+
+
+def test_render_html_conditional_single_column_mixed_lines():
+    """混合行逐行二选一：解析成功仅摘要、动态/未命中仅完整原文（不截断），
+    语句行不再出现「摘要 ｜ 原文」并列。"""
+    log = ChoiceEffectLog()
+    log.append_menu(
+        ["接受"],
+        [["$ met = True", "add_affection('e', 5)"]],
+        who="",
+        what="",
+        ts=100.0,
+    )
+    html_text = render_entries_html(log.entries())
+    assert "met = True" in html_text  # 解析成功：仅摘要（无 $ 前缀）
+    assert "$ met = True" not in html_text  # 成功行不再并列原文
+    assert "add_affection('e', 5)" in html_text  # 动态行：完整原文
+    # 无「摘要 ｜ 原文」并列与孤立管道符（时间行的 ｜ 为既有分隔符，非语句行）
+    assert "met = True ｜" not in html_text
+    assert "｜ add_affection" not in html_text
 
 
 def test_render_html_empty_log_hint():
