@@ -86,7 +86,7 @@ x64 用 `sub rsp,0x28` 预留影子空间并对齐 16 字节；gil 暂存在影�
 
 ## 6. 目标选择与跳过注入（picker.py / folder_dialog.py）
 
-- `choose_target(candidates, refresh, use_gui)`：优先 Tkinter 图形选择窗（`--no-gui` 或 Tcl/pywin32 异常时回退命令行菜单）；窗口带刷新按钮重新枚举；选中未检出 Python 运行库的进程时 CLI 层给 WARNING；
+- `choose_target(candidates, refresh, use_gui)`：优先 PyQt6 暗色图形选择窗（普通层级不置顶，配色为识曲/翻译/语音识别历史窗口同一套暗色调色板；`--no-gui` 或 Qt 界面异常时回退命令行菜单）；窗口带刷新按钮重新枚举；选中未检出 Python 运行库的进程时 CLI 层给 WARNING；
 - **跳过注入**：选择窗的「跳过注入」按钮经 `folder_dialog.py`（IFileOpenDialog，COM/ctypes 直调）选定数据目录——选择期间选择窗保持打开，取消则退回选择窗；随后关闭选择窗、以 `SkipSelection` 返回。缓存目录解析 `resolve_cache_dir` 三规则：目录名即为 `renpy_overlay_cache` → 直接用；其下已包含 → 用该子目录；否则自动创建（`game_dir` 取解析结果父目录）。既有数据库一律不覆盖；
 - 跳过注入模式运行 `_run_skip_injection_mode`：不启动 IPC 与进程监控，悬浮窗 `skip_injection=True`，关闭即退出；单击/自动翻译入口在 `translate_flow` 内被显式拦截。
 

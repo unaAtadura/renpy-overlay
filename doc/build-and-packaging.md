@@ -45,8 +45,8 @@ uv run pyinstaller renpy_overlay.spec --noconfirm   # 打包
 1. **入口**用根目录 `pyinstaller_entry.py`（绝对导入）——PyInstaller 把入口当顶层 `__main__` 执行，包内 `__main__.py` 因相对导入不可用；
 2. **`payload/agent.py` 是注入到游戏进程内执行的源码**，静态分析发现不了它：必须显式放进 `datas`（目标路径 `renpy_overlay/payload/`），且 `renpy_overlay.payload` 进 `hiddenimports`（运行时 `files("renpy_overlay.payload")` 定位资源前需先 import 该包）；`assets/`（入口图标 SVG + 预构建外部工具 unrpyc.exe / rpaextract.exe）同样随包分发，运行时经 `importlib.resources` / 相对包路径定位；
 3. **SDL2 手动收集**：pysdl2-dll 无 PyInstaller hook，其 `sdl2dll/dll/SDL2.dll` 必须手动加入 binaries；只收 SDL2 本体（render/audio/events），SDL2_image/mixer/ttf/gfx 扩展及第三方依赖链不打包；
-4. **excludes 只做保险**（运行链真实依赖：psutil / pywin32 / tkinter / sqlite3 / PyQt6 / requests+websocket / PIL / numpy / aiohttp 等）：剔除 scipy、pandas、matplotlib、cv2、torch、PyQt5/PySide、IPython、lxml、pytest、unittest 等；
-5. **Analysis 后按名单过滤**：剔 Qt 翻译文件（~180 个 .qm，界面硬编码中文）、Tcl 时区库 tzdata（~600 文件）、二进制黑名单（`opengl32sw.dll` 软件渲染 OpenGL ~20MB、`qt6pdf.dll`/`qpdf.dll`、罕见图像格式插件 qtiff/qtga/qwbmp/qicns；qsvgicon + Qt6Svg 保留——assets SVG 图标依赖）；
+4. **excludes 只做保险**（运行链真实依赖：psutil / pywin32 / sqlite3 / PyQt6 / requests+websocket / PIL / numpy / aiohttp 等）：剔除 scipy、pandas、matplotlib、cv2、torch、PyQt5/PySide、tkinter（进程选择窗已改用 PyQt6，不再依赖）、IPython、lxml、pytest、unittest 等；
+5. **Analysis 后按名单过滤**：剔 Qt 翻译文件（~180 个 .qm，界面硬编码中文）、Tcl 时区库 tzdata（~600 文件；tkinter 已移出运行链，此过滤仅为防连带收集的保险）、二进制黑名单（`opengl32sw.dll` 软件渲染 OpenGL ~20MB、`qt6pdf.dll`/`qpdf.dll`、罕见图像格式插件 qtiff/qtga/qwbmp/qicns；qsvgicon + Qt6Svg 保留——assets SVG 图标依赖）；
 6. **EXE 选项**：`console=True`（命令行参数、日志与控制台命令都依赖控制台）、**`upx=False`**（压缩会加剧杀软对远程注入工具的误报）。
 
 ## 4. 打包后的运行时行为
