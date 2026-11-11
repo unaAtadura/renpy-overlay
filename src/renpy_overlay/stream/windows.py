@@ -16,11 +16,11 @@ import logging
 import math
 import time
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QWidget
 
-from ..bound_window import BOUND_GAP, TitleEntryStrip, dispatch_action
+from ..bound_window import BOUND_GAP, ENTRY_GAP, TitleEntryStrip, dispatch_action
 from .scroll_logic import (
     DRAG_SCROLL_INTERVAL_MS,
     body_drag_scroll_rate,
@@ -221,6 +221,29 @@ class TitleWindow(_StreamWindowBase):
             return 0
         last_ch, last_x = self._layout[-1]
         return int(last_x + self.fm.horizontalAdvance(last_ch)) + TITLE_MARGIN_X
+
+    def entry_top_right_global(self, action_id: str) -> QPoint | None:
+        """指定入口图标的右上角全局坐标（弹窗锚定用）；不可用返回 None。
+
+        由入口条矩形（本地坐标）+ 条内 index 换算槽位右缘，再 mapToGlobal；
+        入口条尚未排版（未绘制过）或 action 不存在时返回 None，调用方降级
+        为默认位置。
+        """
+        if self._entry_rect is None:
+            return None
+        index = None
+        for position, action in enumerate(self._entry_strip.actions):
+            if action.id == action_id:
+                index = position
+                break
+        if index is None:
+            return None
+        slot = self._entry_strip.hotzone() + ENTRY_GAP
+        local = QPoint(
+            self._entry_rect.x() + index * slot + self._entry_strip.hotzone(),
+            self._entry_rect.y(),
+        )
+        return self.mapToGlobal(local)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._layout:

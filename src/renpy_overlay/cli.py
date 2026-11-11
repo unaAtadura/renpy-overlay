@@ -363,6 +363,7 @@ class Session:
                 }
         elif kind == "choice":
             items = [str(item) for item in message.get("items") or []]
+            effects = message.get("effects")
             if self.args.no_overlay:
                 printable = "  ".join(f"{idx}.{item}" for idx, item in enumerate(items, 1))
                 print(f"[选项] {printable}" if printable else "[选项]（空）")
@@ -371,6 +372,7 @@ class Session:
                     items,
                     who=str(message.get("who") or ""),
                     what=str(message.get("what") or ""),
+                    effects=effects if isinstance(effects, list) else None,
                 )
         elif kind == "choice_pick":
             index = message.get("index", -1)

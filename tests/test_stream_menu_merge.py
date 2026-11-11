@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from renpy_overlay.stream.choice_log import ChoiceEffectLog
 from renpy_overlay.stream.host_core import StreamOverlayCore
 from renpy_overlay.stream.translate_flow import StreamTranslateMixin
 from renpy_overlay.translation_cache import TranslationCache
@@ -70,6 +71,9 @@ class _MenuMergeHostStub(StreamTranslateMixin):
         self._menu_prompt_stop = None
         self._menu_choice_translated: str | None = None
         self._translation_cache = TranslationCache(max_bytes=64 * 1024)
+        # 副作用日志（_handle_choice 末尾的旁路写入）：独立累积，不影响正文断言
+        self._choice_log = ChoiceEffectLog()
+        self._choice_log_window = None
         self._queue: queue.Queue = queue.Queue()
         self.displayed: list[str] = []
         self.titles: list[str] = []

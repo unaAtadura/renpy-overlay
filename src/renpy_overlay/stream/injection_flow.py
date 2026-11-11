@@ -3,7 +3,8 @@
 宿主依赖（经 ``self`` 访问，由 :class:`StreamOverlayCore.__init__` 初始化）：
 ``_closed`` / ``skip_injection`` / ``_injected`` / ``_title_window`` /
 ``_auto_translate_on`` / ``_prebuild_window`` / ``_game_dir`` / ``_config`` /
-``_asr_rt`` / ``_queue``，以及 ``_update_title``。
+``_asr_rt`` / ``_queue`` / ``_choice_log`` / ``_choice_log_window``，以及
+``_update_title``。
 """
 
 from __future__ import annotations
@@ -12,7 +13,12 @@ import logging
 
 from ..bound_window import BoundAction
 from ..pretranslate.formatting import prebuild_initial_dir
-from .icons import BOUND_LOCATE_ICON, BOUND_PREBUILD_ICON, translation_mode_icon
+from .icons import (
+    BOUND_LOCATE_ICON,
+    BOUND_PREBUILD_ICON,
+    CHOICE_LOG_ICON,
+    translation_mode_icon,
+)
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
@@ -49,8 +55,10 @@ class InjectionFlowMixin:
         )
         # 「切换翻译模式」入口追加在既有入口条末端（图标由当前模式决定）
         self._sync_translation_mode_entry()
+        # 「选项副作用日志」入口同样追加在末端（开合状态由 label 同步）
+        self._sync_choice_log_entry(opened=False)
         logger.info(
-            "注入成功：预构建/定位/翻译模式切换入口已并入标题窗（图标跟随标题文本长度）"
+            "注入成功：预构建/定位/翻译模式切换/副作用日志入口已并入标题窗（图标跟随标题文本长度）"
         )
 
     def request_prebuild(self) -> None:
@@ -131,3 +139,57 @@ class InjectionFlowMixin:
             logger.info("翻译模式已切换：单击翻译（自动轮询停用；不写入 config.json）")
             self._update_title("翻译模式：单击翻译（锁定后单击触发翻译）")
         self._sync_translation_mode_entry()
+
+    # ------------------------------------------------------------ 选项副作用日志
+
+    def _sync_choice_log_entry(self, opened: bool) -> None:
+        """同步「选项副作用日志」入口 label（同 id 覆盖语义，开合状态一眼可辨）。"""
+        label = "选项副作用日志（已开启）" if opened else "选项副作用日志"
+        self._title_window.set_title_entries(
+            [
+                BoundAction(
+                    id="choice-log",
+                    label=label,
+                    on_click=self._toggle_choice_log,
+                    icon=CHOICE_LOG_ICON,
+                )
+            ]
+        )
+
+    def _toggle_choice_log(self) -> None:
+        """入口回调：在「打开 / 关闭」两态间切换；关闭即清空累积日志。
+
+        打开 = 创建单例半透明弹窗并锚定到本图标右上角（仅打开时计算一次，
+        打开期间不自动跟随标题窗移动，拖动位置保持到关闭）；关闭 = 销毁
+        弹窗并清空日志历史，下次打开从空白重新累积。构造失败兜底：引用
+        保持 None、label 还原、提示走标题窗唯一出口。
+        """
+        if self._closed:
+            return
+        window = self._choice_log_window
+        if window is not None:
+            window.close()
+            window.deleteLater()
+            self._choice_log_window = None
+            self._choice_log.clear()
+            self._sync_choice_log_entry(opened=False)
+            logger.info("选项副作用日志已关闭，累积日志已清空")
+            return
+        from .choice_log_window import ChoiceLogWindow  # 局部导入：仅入口时加载
+
+        try:
+            window = ChoiceLogWindow(
+                self._choice_log,
+                width=self._config.choice_log_window_width,
+                height=self._config.choice_log_window_height,
+            )
+            window.anchor_to(self._title_window.entry_top_right_global("choice-log"))
+            window.show()
+        except Exception:
+            logger.exception("选项副作用日志窗口打开失败")
+            self._update_title("副作用日志窗口打开失败")
+            self._sync_choice_log_entry(opened=False)
+            return
+        self._choice_log_window = window
+        self._sync_choice_log_entry(opened=True)
+        logger.info("选项副作用日志已打开（锚定到入口图标右上角）")

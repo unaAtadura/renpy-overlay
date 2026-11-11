@@ -41,6 +41,7 @@ from ..video import (
     open_asr_store,
     resolve_asr_rt_options,
 )
+from .choice_log import ChoiceEffectLog
 from .constants import (
     CLICK_DELAY_MS,
     DRAIN_INTERVAL_MS,
@@ -166,6 +167,10 @@ class StreamOverlayCore:
         self._chat_store = open_chat_store(game_dir or None)
         # 语音识别：成功识别的音频片段与文本落库（asr.db，与其它库同目录）
         self._asr_store = open_asr_store(game_dir or None)
+        # 选项副作用日志：纯逻辑累积（choice 事件旁路，独立于正文窗与翻译
+        # 链路）；弹窗视图由标题窗入口图标按需开合，关闭即清空累积
+        self._choice_log = ChoiceEffectLog()
+        self._choice_log_window = None
         # AI 对话（OCR/发送）与翻译/识曲共用「同时只允许一个 API 调用」互斥：
         # 对话侧经 _acquire/_release_chat_slot 占用，三个既有入口同样检查它
         self._chat_busy = False
@@ -311,9 +316,17 @@ class StreamOverlayCore:
     def push_say(self, who: str, what: str, source: str = "", ts: float | None = None) -> None:
         self._queue.put(("say", {"who": who, "what": what, "src": source, "ts": ts or time.time()}))
 
-    def push_choice(self, items: list[str], who: str = "", what: str = "") -> None:
+    def push_choice(
+        self,
+        items: list[str],
+        who: str = "",
+        what: str = "",
+        effects: list | None = None,
+    ) -> None:
         """分支选项出现（跨线程安全，经队列回主线程展示）。"""
-        self._queue.put(("choice", {"items": list(items), "who": who, "what": what}))
+        self._queue.put(
+            ("choice", {"items": list(items), "who": who, "what": what, "effects": effects})
+        )
 
     def push_choice_pick(self, index: int, caption: str) -> None:
         """玩家做出选择（跨线程安全，经队列回主线程展示）。"""
@@ -519,6 +532,12 @@ class StreamOverlayCore:
             except Exception:  # pragma: no cover
                 pass
             self._settings_window = None
+        if self._choice_log_window is not None:
+            try:
+                self._choice_log_window.close()
+            except Exception:  # pragma: no cover
+                pass
+            self._choice_log_window = None
         self._quick_menu.close_all()
         if self._history_window is not None:
             try:
@@ -607,6 +626,7 @@ class StreamOverlayCore:
             self._video_clip_window,
             self._prebuild_window,
             self._settings_window,
+            self._choice_log_window,
         ):
             if window is not None:
                 items.append(item(window.isVisible, window.hide, window.show))
@@ -791,14 +811,36 @@ class StreamOverlayCore:
                 "%s",
                 " / ".join(items) or "<空>",
             )
+        effects = payload.get("effects")
+        if not isinstance(effects, list):
+            effects_desc = "None（agent 端采集降级）"
+        else:
+            counts = [len(block) if isinstance(block, list) else -1 for block in effects]
+            effects_desc = f"{len(effects)} 项，语句数 {counts}"
         logger.info(
-            "出现分支选项（%d 项）：%s；提问/上下文：[%s] %s；翻译目标=%d 字",
+            "出现分支选项（%d 项）：%s；提问/上下文：[%s] %s；翻译目标=%d 字；effects=%s",
             len(items),
             " / ".join(items) or "<空>",
             who or "-",
             what[:60],
             len(choice_text),
+            effects_desc,
         )
+        # 选项副作用日志（纯旁路）：独立累积，不进正文窗、不进翻译缓存与
+        # 去重；effects=None（agent 端采集降级）时条目仅记录选项文本
+        appended = self._choice_log.append_menu(
+            items,
+            effects=effects,
+            who=who,
+            what=what,
+            ts=payload.get("ts"),
+        )
+        if not appended:
+            logger.debug(
+                "副作用日志：未新增条目（同指纹时间窗合并或选项为空）"
+            )
+        if self._choice_log_window is not None:
+            self._choice_log_window.refresh()
 
     def _handle_choice_pick(self, payload: dict) -> None:
         """玩家做出选择：正文追加结果提示行，标题同步更新（不清屏）。"""
@@ -811,7 +853,13 @@ class StreamOverlayCore:
         if not self._asr_rt.enabled:  # 实时识别开启期间抑制正文追加与标题预览（P3）
             self._body_window.feed_text(f"→ 已选择：{label}\n")
             self._update_title(f"已选择：{label}")
-        logger.info("玩家做出选择：%s", label)
+        logger.info(
+            "玩家做出选择：%s；预测翻转=%s",
+            label,
+            "成功" if self._choice_log.mark_picked(index, caption) else "未命中（停留预测态）",
+        )
+        if self._choice_log_window is not None:
+            self._choice_log_window.refresh()
 
     def _handle_chunk(self, payload: dict) -> None:
         seq = payload.get("seq")

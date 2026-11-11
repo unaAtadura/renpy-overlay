@@ -25,9 +25,13 @@ class _FakeOverlay:
         self.statuses: list[str] = []
         self.hints: list[str] = []
         self.injected_calls = 0
+        self.choices: list[dict] = []
 
     def push_say(self, who, what, source="", ts=None) -> None:
         self.pushed.append((who, what, source, ts))
+
+    def push_choice(self, items, who="", what="", effects=None) -> None:
+        self.choices.append({"items": items, "who": who, "what": what, "effects": effects})
 
     def set_status(self, text: str) -> None:
         self.statuses.append(text)
@@ -73,6 +77,38 @@ def test_say_after_overlay_ready_pushes_directly():
     # 就绪后的消息直接推送（时间戳由 push_say 内部取当前时刻，无需透传 ts）
     assert overlay.pushed == [("Charles", "Live.", "poll", None)]
     assert session._pending_say is None  # 就绪后不进入暂存
+
+
+def test_choice_effects_passthrough():
+    """choice 消息的 effects 字段原样透传给悬浮窗（副作用日志旁路数据）。"""
+    session = _make_session()
+    overlay = _FakeOverlay()
+    session.overlay = overlay
+    session._on_message(
+        {
+            "t": "choice",
+            "items": ["A", "B"],
+            "who": "",
+            "what": "",
+            "effects": [["$ a += 1"], []],
+        },
+        None,
+    )
+    assert overlay.choices == [
+        {"items": ["A", "B"], "who": "", "what": "", "effects": [["$ a += 1"], []]}
+    ]
+
+
+def test_choice_effects_missing_or_invalid_degrades_to_none():
+    """无 effects 字段（旧版 agent）或非列表形态：降级为 None，不抛异常。"""
+    session = _make_session()
+    overlay = _FakeOverlay()
+    session.overlay = overlay
+    session._on_message({"t": "choice", "items": ["A"], "who": "", "what": ""}, None)
+    session._on_message(
+        {"t": "choice", "items": ["A"], "who": "", "what": "", "effects": "bad"}, None
+    )
+    assert [choice["effects"] for choice in overlay.choices] == [None, None]
 
 
 # ---- hooks 注入确认竞态（绑定窗口显示前提） ---------------------------------
