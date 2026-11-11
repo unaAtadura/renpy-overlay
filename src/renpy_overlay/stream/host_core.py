@@ -265,6 +265,17 @@ class StreamOverlayCore:
         self._last_cache_hit_original: str | None = None  # 最近缓存命中原文（定位入口用）
         self._lock_started_at = 0.0
         self._auto_skip_reason: str | None = None
+        # Menu 合并译文呈现（show_original_text=false）：提问译文与选项译文
+        # 整合为一段整替上屏。提问经独立通道解析（两级缓存优先，未命中独立
+        # 线程，独立世代号作废迟到结果）；选项译文目标（编号拼接，兼作缓存
+        # 键）与既有翻译链路完全不变（见 translate_flow._present_menu_translation）
+        self._menu_prompt_pending_input: str | None = None  # choice 登记的提问原文
+        self._menu_prompt_input: str | None = None          # 已进入合并流程（""=无提问菜单）
+        self._menu_prompt_state: str = "idle"               # idle / pending / ready / failed
+        self._menu_prompt_translated: str | None = None     # 提问译文
+        self._menu_prompt_seq: int = 0                      # 世代号：作废在途线程的迟到结果
+        self._menu_prompt_stop: threading.Event | None = None
+        self._menu_choice_translated: str | None = None     # 已就绪待合并的选项译文
         # 运行时翻译模式（仅内存状态）：初值取自 config.json 的 auto_translate，
         # 标题窗「切换翻译模式」入口可随时切换，不回写配置文件
         self._auto_translate_on = self._config.auto_translate
@@ -452,6 +463,9 @@ class StreamOverlayCore:
         self._translation_seq += 1  # 在途翻译的结果作废
         if self._translating:
             self._abort_translation("窗口关闭")
+        stop = self._menu_prompt_stop
+        if stop is not None:
+            stop.set()  # Menu 提问独立翻译线程尽快结束（daemon，结果已作废）
         self._abort_song_recognition("窗口关闭")
         self._cancel_pending_click()
         for timer in (
@@ -621,6 +635,8 @@ class StreamOverlayCore:
                     self._handle_chunk(payload)
                 elif kind == "translation":
                     self._handle_translation(payload)
+                elif kind == "menu_prompt_result":
+                    self._handle_menu_prompt_result(payload)
                 elif kind == "screenshot_done":
                     self._handle_screenshot_done(payload)
                 elif kind == "screenshot_fail":
@@ -666,6 +682,18 @@ class StreamOverlayCore:
             self._shutdown()
 
     def _handle_say(self, payload: dict) -> None:
+        # 新对话到达：作废未完成的 Menu 合并（迟到的提问翻译结果不再整替
+        # 正文，逐条译文的既有呈现随即恢复常态）
+        if (
+            self._menu_prompt_input is not None
+            or self._menu_prompt_pending_input is not None
+        ):
+            self._menu_prompt_pending_input = None
+            self._menu_prompt_input = None
+            self._menu_prompt_state = "idle"
+            self._menu_prompt_translated = None
+            self._menu_choice_translated = None
+            self._menu_prompt_seq += 1
         who = str(payload.get("who") or "")
         what = str(payload.get("what") or "")
         self._last_say = {"who": who, "what": what}
@@ -716,12 +744,13 @@ class StreamOverlayCore:
     def _handle_choice(self, payload: dict) -> None:
         """分支选项出现：标题显示选项预览，翻译目标切换为选项文本本身。
 
-        正文展示与对话原文同受 ``show_original_text`` 约束：为 true 时整段替换
-        为「该菜单的提问对白 + 编号选项列表」（打字机呈现；提问由注入侧解析
-        紧邻 Say 节点得到，无前置提问时 what 为空、仅显示选项列表）；为 false
-        时选项原文不刷新到正文（正文保持上一条内容），但标题预览、翻译目标
-        （选项文本编号拼接，兼作缓存键）与去重重置照常进行 —— 玩家仍能拿到
-        选项译文，选择后的「→ 已选择：…」提示也不受影响。
+        正文呈现（两种模式译文侧一致）：提问由注入侧解析紧邻 Say/caption
+        得到（choice 事件的 what），先无条件登记进合并链路——与选项译文
+        整合为一段一次性整替（打字机呈现，见 translate_flow）；``show_original_text=true``
+        时额外先显示「提问原文 + 编号选项列表」的原文合并段，译文就绪后
+        被合并译文整段替换；false 时正文在译文就绪前保持上一条内容。
+        无前置提问时 what 为空、仅显示选项列表；选项翻译目标（编号拼接，
+        兼作缓存键）与去重重置照常；选择后的「→ 已选择：…」提示不受影响。
         """
         items = [
             str(item).strip()
@@ -736,6 +765,15 @@ class StreamOverlayCore:
             # 允许自动翻译重新评估该选项文本：同一菜单重放/载入时缓存命中
             # 直接上屏，首次出现则发起流式翻译（下个轮询间隔内生效）
             self._last_translation_input = None
+        # 两种模式统一登记该菜单提问（原文，空串=无提问菜单）：译文合并
+        # 共用同一套链路（解析/抑制/整合/呈现），show_original_text 仅决定
+        # 是否先显示一段原文合并
+        self._menu_prompt_pending_input = what
+        self._menu_prompt_seq += 1  # 新菜单：作废在途提问线程的迟到结果
+        self._menu_prompt_input = None
+        self._menu_prompt_state = "idle"
+        self._menu_prompt_translated = None
+        self._menu_choice_translated = None
         if self._config.show_original_text:
             lines = ([what] if what else []) + [
                 f"{number}. {item}" for number, item in enumerate(items, 1)
@@ -779,6 +817,10 @@ class StreamOverlayCore:
         seq = payload.get("seq")
         if seq != self._translation_seq:
             logger.debug("翻译增量已过期（seq=%s，当前=%s），丢弃", seq, self._translation_seq)
+            return
+        if self._menu_prompt_input is not None:
+            # Menu 合并期间增量不入正文：选项译文随 _handle_translation 与
+            # 提问译文整合后一次性整替上屏
             return
         if self._config.translate_window_style == 2:
             # style=2 整段汇总上屏（已确认决议）：增量不入正文，整条译文

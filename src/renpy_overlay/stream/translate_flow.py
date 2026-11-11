@@ -47,7 +47,18 @@ class StreamTranslateMixin:
         self._last_translation_input = what  # 记录已触发的原文，自动翻译据此去重
         logger.info("发起流式翻译请求（%s，seq=%d，原文 %d 字）：%s", label, seq, len(what), what[:40])
         self._update_title("翻译中...")
-        api_options = {  # 连接参数来自 config.json（未配置时为与历史一致的默认值）
+        api_options = self._api_options()
+        thread = threading.Thread(
+            target=self._translate_worker,
+            args=(seq, who, what, origin, api_options),
+            name=f"stream-translate-{seq}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _api_options(self) -> dict:
+        """API 连接参数（来自 config.json；未配置时为与历史一致的默认值）。"""
+        return {
             "base_url": self._config.api_base_url,
             "timeout": self._config.api_timeout,
             "model": self._config.model,
@@ -56,13 +67,6 @@ class StreamTranslateMixin:
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
         }
-        thread = threading.Thread(
-            target=self._translate_worker,
-            args=(seq, who, what, origin, api_options),
-            name=f"stream-translate-{seq}",
-            daemon=True,
-        )
-        thread.start()
 
     def _translate_worker(
         self, seq: int, who: str, what: str, origin: str, api_options: dict
@@ -111,9 +115,17 @@ class StreamTranslateMixin:
             return
         if self._stream_seq != seq or self._config.translate_window_style == 2:
             # 兜底：全程无有效增量时整段补显；style=2 整段汇总上屏（已确认
-            # 决议：增量不入正文，完成后整段替换显示）
-            self._display_text((who + "\n" if who else "") + text + "\n")
-            logger.info("翻译完成（seq=%s），译文整段上屏（%d 字）", seq, len(text))
+            # 决议：增量不入正文，完成后整段替换显示）。Menu 合并期间增量
+            # 已被抑制、必走本分支：选项译文不单独上屏，交给合并呈现器
+            if self._menu_prompt_input is not None:
+                self._menu_choice_translated = text
+                self._present_menu_translation()
+                logger.info(
+                    "翻译完成（seq=%s），选项译文并入 Menu 合并呈现（%d 字）", seq, len(text)
+                )
+            else:
+                self._display_text((who + "\n" if who else "") + text + "\n")
+                logger.info("翻译完成（seq=%s），译文整段上屏（%d 字）", seq, len(text))
         else:
             logger.info("翻译完成（seq=%s），译文已流式呈现（%d 字）", seq, len(text))
         self._update_title("翻译完成")
@@ -207,6 +219,10 @@ class StreamTranslateMixin:
             self._auto_note_skip("AI 对话请求在途")
             return
 
+        # Menu 合并：消费 choice 登记的提问原文（两级缓存/独立翻译线程），
+        # 与随后的选项译文共用同一守卫链（锁定/间隔/识曲/对话互斥）
+        self._begin_menu_prompt_merge()
+
         # 缓存命中优先：依次查内存与数据库，任一级命中则直接上屏并记录"已翻译"
         cached = self._translation_cache.get(what)
         if cached is not None:
@@ -238,6 +254,11 @@ class StreamTranslateMixin:
             self._abort_translation(f"自动翻译{source}命中")
         logger.info("自动翻译%s命中（原文 %d 字）：直接上屏，未发起网络请求", source, len(what))
         self._update_title("翻译完成")
+        if self._menu_prompt_input is not None:
+            # Menu 合并期间：选项译文暂存，与提问译文整合后一次性整替上屏
+            self._menu_choice_translated = translated
+            self._present_menu_translation()
+            return
         self._display_text((who + "\n" if who else "") + translated + "\n")
 
     def _auto_note_skip(self, reason: str) -> None:
@@ -245,3 +266,114 @@ class StreamTranslateMixin:
             return
         self._auto_skip_reason = reason
         logger.debug("自动翻译跳过：%s", reason)
+
+    # -- Menu 合并译文呈现（show_original_text=false） ------------------------
+
+    def _begin_menu_prompt_merge(self) -> None:
+        """消费 choice 登记的提问原文：两级缓存优先，未命中发起独立翻译线程。
+
+        在自动翻译守卫全部通过后调用（锁定/间隔/识曲/对话互斥共用同一守卫
+        链，实时语音识别开启期间不会进入）。选项译文目标与既有链路不变；
+        提问译文经独立世代号（``_menu_prompt_seq``）合并，迟到结果作废。
+        """
+        raw = self._menu_prompt_pending_input
+        self._menu_prompt_pending_input = None
+        if raw is None or self._menu_prompt_input is not None:
+            return
+        self._menu_prompt_input = raw  # ""=无提问菜单：合并器只呈现选项译文
+        if not raw:
+            return
+        cached = self._translation_cache.get(raw)
+        if cached is None and self._translation_store is not None:
+            cached = self._translation_store.get(raw)
+            if cached is not None:
+                if self._translation_cache.put(raw, cached):
+                    logger.info("已将数据库译文回填内存缓存（原文 %d 字）", len(raw))
+        if cached is not None:
+            self._menu_prompt_state = "ready"
+            self._menu_prompt_translated = cached
+            logger.info("Menu 提问译文缓存命中（原文 %d 字）", len(raw))
+            return
+        self._menu_prompt_state = "pending"
+        self._menu_prompt_seq += 1
+        seq = self._menu_prompt_seq
+        logger.info("发起 Menu 提问翻译（seq=%d，原文 %d 字）：%s", seq, len(raw), raw[:40])
+        thread = threading.Thread(
+            target=self._translate_menu_prompt_worker,
+            args=(seq, raw, self._api_options()),
+            name=f"menu-prompt-{seq}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _translate_menu_prompt_worker(self, seq: int, what: str, api_options: dict) -> None:
+        """后台线程：Menu 提问的非流式翻译（复用流式接口累积后一次入队）。
+
+        独立于选项翻译的世代号与单在途互斥；结果只经队列回主线程。
+        """
+        stop = threading.Event()
+        self._menu_prompt_stop = stop
+        chunks: list[str] = []
+        try:
+            for piece in translator.translate_text_stream(what, **api_options):
+                if stop.is_set():
+                    return
+                chunks.append(piece)
+            message = {"seq": seq, "ok": True, "what": "".join(chunks), "input": what}
+        except Exception as exc:  # 网络/协议错误统一收敛为失败结果
+            if stop.is_set():
+                return
+            logger.debug("Menu 提问翻译请求失败（seq=%d）：%s", seq, exc)
+            message = {"seq": seq, "ok": False, "error": str(exc), "input": what}
+        self._queue.put(("menu_prompt_result", message))
+
+    def _handle_menu_prompt_result(self, item: dict) -> None:
+        """主线程：Menu 提问独立翻译收尾（世代号校验；结果写两级缓存）。"""
+        seq = item.get("seq")
+        if seq != self._menu_prompt_seq:
+            logger.info(
+                "Menu 提问翻译结果已过期（seq=%s，当前=%s），丢弃", seq, self._menu_prompt_seq
+            )
+            return
+        text = str(item.get("what") or "").strip() if item.get("ok") else ""
+        if not text:
+            logger.warning("Menu 提问翻译失败：%s", item.get("error") or "返回空文本")
+            self._menu_prompt_state = "failed"
+        else:
+            self._menu_prompt_translated = text
+            self._menu_prompt_state = "ready"
+            input_text = str(item.get("input") or "").strip()
+            if input_text:
+                self._translation_cache.put(input_text, text)
+                if self._translation_store is not None:
+                    self._translation_store.put(input_text, text)
+            logger.info("Menu 提问翻译完成（seq=%s，%d 字）", seq, len(text))
+        self._present_menu_translation()
+
+    def _present_menu_translation(self) -> None:
+        """Menu 合并呈现：选项译文与提问译文都就绪后整合为一段整替上屏。
+
+        仅 ``show_original_text=false`` 的 Menu 合并期间有效（
+        ``_menu_prompt_input`` 非 None）；任一侧未就绪则保留状态等待——提问
+        线程必经 API 超时/中止回队，不会永久挂起。呈现后清空合并状态，
+        正文恢复逐条译文常态；无提问菜单只呈现选项译文，不用历史台词冒充。
+        """
+        if self._menu_prompt_input is None:
+            return
+        if self._menu_prompt_state == "pending":
+            return  # 提问在途：等待线程回队（API 超时兜底，不会无限等待）
+        choice_part = (self._menu_choice_translated or "").strip()
+        if not choice_part:
+            return  # 选项译文未就绪：保留状态，由选项链路就绪时再次进入
+        prompt_part = ""
+        if self._menu_prompt_state == "ready":
+            prompt_part = (self._menu_prompt_translated or "").strip()
+        merged = (prompt_part + "\n" if prompt_part else "") + choice_part + "\n"
+        self._menu_prompt_input = None
+        self._menu_prompt_state = "idle"
+        self._menu_prompt_translated = None
+        self._menu_choice_translated = None
+        logger.info(
+            "Menu 合并译文上屏（提问 %d 字 + 选项 %d 字）", len(prompt_part), len(choice_part)
+        )
+        self._display_text(merged)
