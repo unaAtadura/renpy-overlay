@@ -16,6 +16,8 @@
 | `text_logic.py` | 实时文本纯函数（实时 ASR 拼接 / 句末换行 / 锚点，见 [asr.md](asr.md)） |
 | `windows.py` | Qt 渲染层：`_StreamWindowBase` / `TitleWindow` / `BodyWindow`（样式 1） |
 | `windows_style2.py` | 样式 2（半透明黑色窗） |
+| `choice_log.py` | 选项副作用日志纯逻辑（条目模型 / 去重 / 状态翻转 / 摘要 / 定位钳制，无 Qt 可离线单测） |
+| `choice_log_window.py` | 副作用日志弹窗（半透明黑固定尺寸覆盖窗，纯视图） |
 | `host_core.py` | `StreamOverlayCore`：装配 / 生命周期 / 队列 / 显示出口 / 配置热重载 |
 | `follow.py` | 游戏窗口跟随定位 |
 | `interaction.py` | 鼠标交互（拖动 / 双击锁定 / 单击翻译 / 拖拽滚动） |
@@ -96,8 +98,18 @@
 | 预构建翻译缓存 | `BOUND_PREBUILD_ICON` | 打开三页签预构建主窗口（见 [pretranslate.md](pretranslate.md)） |
 | 定位翻译位置 | `BOUND_LOCATE_ICON` | 打开/刷新翻译历史窗口并定位最近一次缓存命中记录，随后清空内存缓存（见 [translation.md](translation.md)） |
 | 切换翻译模式（末端） | `translation_mode_icon()`：播放=单击 / 循环重播=自动 | 在两模式间切换并立即同步图标；只改运行时内存状态，不写回 `config.json`，重启后仍以配置文件原值（`auto_translate`）为准 |
+| 选项副作用日志（末端） | `CHOICE_LOG_ICON` | 开合副作用日志弹窗（见下文）；label 随开关状态同步（「已开启」） |
 
 入口条动作经 `dispatch_action(BoundAction)` 分发，`BOUND_GAP` 控制图标间距。
+
+### 8.1 选项副作用日志弹窗（choice_log.py / choice_log_window.py）
+
+标题窗图标在「打开 / 关闭」两态间切换（`injection_flow._toggle_choice_log`），**仅人工触发**，默认不弹出、不随选项自动展开；关闭即清空已累积日志，下次打开从空白开始（托盘隐藏/恢复为 hide/show 语义，不清空）。
+
+- **弹窗形态**：独立置顶覆盖窗（Frameless + Tool + 半透明黑圆角底板，与入口条同一视觉语言），固定尺寸 `choice_log_window_width/height`（默认 150×300，需重启键）；`WA_ShowWithoutActivating` 不抢游戏焦点；顶部拖动把手 + 内容区（除滚动条）全域可拖动——`_LogBrowser` 接管鼠标事件转发窗口拖动，文本交互整体禁用（`NoTextInteraction`：无 I 形光标/选中/双击选词/右键编辑菜单），拖动中光标为移动样式；滚轮与滚动条不受拖动影响（滚轮事件未接管、滚动条是兄弟子控件）；
+- **锚定**：打开时经 `TitleWindow.entry_top_right_global("choice-log")` 取图标右上角全局坐标，弹窗左下角贴合并钳在屏内（`anchored_position` 纯函数）；仅打开时计算一次，打开期间不自动跟随标题窗移动，拖动位置保持到关闭；
+- **内容与双态区分**：数据来自 `t=choice` 的 `effects` 字段（agent 端 AST 采集，见 [dialogue-capture.md](dialogue-capture.md) §4）与 `choice_pick` 的状态翻转，经 `ChoiceEffectLog` 独立累积（同指纹 0.5s 内合并去重；effects 长度与选项数不齐时整体降级为仅选项文本，绝不错位展示）。每菜单一块：时间 + 上文预览 + 各选项（摘要 ｜ 原文语句）；「预测」（灰）与「已发生」（淡蓝）用前缀徽标 + 文字色双重标识；
+- **与翻译/去重解耦**：该数据是纯旁路——不进 `choice_translation_text` 翻译键、不写 `_last_say` / `_last_translation_input`、不参与 say 去重，正文窗展示完全不受影响（钉子测试 `test_choice_log.py::test_effects_never_enter_choice_translation_key`）。
 
 ## 9. 右键快捷菜单（quick_menu.py）
 

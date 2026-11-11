@@ -37,8 +37,8 @@
 | --- | --- | --- | --- |
 | `hello` | `token, proto, pid, py, hooks, cwd` | 建连后首个报文（同步直发，不经队列） | 认证后 `on_connect`；标题显示「已连接」 |
 | `say` | `who, what, src, ts, pid` | 捕获到新对话 | `overlay.push_say`；未就绪则暂存 `_pending_say`（只留最新）；`--no-overlay` 时打印 |
-| `choice` | `items[], who, what, src, ts` | 菜单出现 | `overlay.push_choice`（正文整段替换为「提问对白 + 编号选项列表」——`what` 为该菜单的紧邻提问，无则为空仅显示选项；标题显示预览）。两种模式下分支选项的译文均为「提问译文 + 编号选项译文」整合段（提问经两级缓存/独立翻译解析，选项翻译目标与缓存键不变）；`show_original_text=true` 时先显示原文合并段，译文就绪后整段替换 |
-| `choice_pick` | `index, caption, src, ts` | 菜单关闭 | `overlay.push_choice_pick`（正文追加「→ 已选择：×××」） |
+| `choice` | `items[], effects, who, what, src, ts` | 菜单出现 | `overlay.push_choice`（正文整段替换为「提问对白 + 编号选项列表」——`what` 为该菜单的紧邻提问，无则为空仅显示选项；标题显示预览）。两种模式下分支选项的译文均为「提问译文 + 编号选项译文」整合段（提问经两级缓存/独立翻译解析，选项翻译目标与缓存键不变）；`show_original_text=true` 时先显示原文合并段，译文就绪后整段替换。`effects` 为 agent 端从 Menu AST 节点采集的各选项 `$` 语句原文（与 items 等长；采集失败为 null = 降级），**纯旁路**：写入选项副作用日志弹窗，不进正文窗、不进翻译缓存与去重 |
+| `choice_pick` | `index, caption, src, ts` | 菜单关闭 | `overlay.push_choice_pick`（正文追加「→ 已选择：×××」）；副作用日志把对应选项从「预测」态翻转为「已发生」态 |
 | `hooks` | `layers[], stats` | Hook 安装完成（priority 插队） | 日志确认 Hook 层；`overlay.mark_injected()`（入口条并入标题窗） |
 | `log` | `level, msg` | agent 内部日志 | `log_from_game` 写入同一 logger（`renpy_overlay.game`） |
 | `hb` | `uptime, stats{captured, sent, dropped, queued}` | 每 2s | 更新 `peer.stats`（DEBUG） |
