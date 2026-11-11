@@ -14,7 +14,12 @@ from renpy_overlay.stream.choice_log import (
     is_effect_parsed,
     summarize_effect,
 )
-from renpy_overlay.stream.choice_log_window import render_entries_html
+from renpy_overlay.stream.choice_log_window import (
+    DRAG_START_THRESHOLD_PX,
+    exceeds_drag_threshold,
+    render_entries_html,
+    scroll_drag_rate,
+)
 
 # ------------------------------------------------------------------ 摘要解析
 
@@ -213,6 +218,39 @@ def test_anchored_position_clamped_inside_screen():
 
 def test_anchored_position_ignores_invalid_screen_geometry():
     assert anchored_position(10, 10, 150, 300, 0, 0, 0, 0) == (18, -290)
+
+
+# -------------------------------------------------------------- 锁定拖拽滚动
+
+
+def test_exceeds_drag_threshold_separates_double_click_and_drag():
+    """双击/拖动互不误判：双击两次按击位移极低（≤阈值）不进入拖动；
+    真正的拖动位移超阈值才启动（任一轴超限即算）。"""
+    assert exceeds_drag_threshold(0, 0) is False
+    assert exceeds_drag_threshold(3, -3) is False  # 双击按击的典型微动
+    assert DRAG_START_THRESHOLD_PX == 12
+    assert exceeds_drag_threshold(DRAG_START_THRESHOLD_PX, 0) is False  # 阈值处不启动
+    assert exceeds_drag_threshold(DRAG_START_THRESHOLD_PX + 1, 0) is True
+    assert exceeds_drag_threshold(0, -(DRAG_START_THRESHOLD_PX + 1)) is True
+
+
+def test_scroll_drag_rate_direction_matches_stream_window():
+    """方向与流式正文窗一致：下拖（dy>0）速率为负 → 内容向上滚回看上文；
+    上拖（dy<0）速率为正 → 内容向下滚看后文；防抖区（|dy|≤12px）为 0。"""
+    assert scroll_drag_rate(0.0, 14.0) == 0.0
+    assert scroll_drag_rate(12.0, 14.0) == 0.0
+    down = scroll_drag_rate(60.0, 14.0)
+    up = scroll_drag_rate(-60.0, 14.0)
+    assert down < 0.0  # 下拖：内容向上滚
+    assert up > 0.0  # 上拖：内容向下滚
+    assert down == -up  # 对称偏移速率对称
+
+
+def test_scroll_drag_rate_fast_gear_monotonic():
+    """拖得越远速率不减（防抖→慢速→快速档单调）。"""
+    slow = abs(scroll_drag_rate(60.0, 14.0))
+    fast = abs(scroll_drag_rate(200.0, 14.0))
+    assert fast >= slow > 0.0
 
 
 # ------------------------------------------------------------------ 解耦钉子
