@@ -71,7 +71,12 @@ EPILOG = """\
               （始终走 API 不查缓存；成功显示在正文窗并存入 screenshot.db）
   截图配置    config.json 的 screenshot_compress_percent（发送 API 前等比压缩
               百分比，默认 10）/ model_vision（视觉识图模型，与文本模型独立，
-              空则自动发现首个可用模型，需 vision 多模态能力）
+              空则自动发现首个可用模型，需 vision 多模态能力）/
+              remote_cache_persist_enable（遥控器自动化持久化缓存开关，默认
+              false；开启后自动化截图翻译跨会话两级命中——内存优先、数据库
+              兜底；命中直接上屏不发 API 也不入历史，零差异画面才命中）/
+              remote_cache_db_size_count（持久化缓存条数上限，默认 40000，
+              超限时按冷端随机水位淘汰避免重玩旧章节整段未命中）
   听歌识曲    标题/正文窗文字处右键弹快捷菜单：录制 recording_duration（默认 8）
               秒系统音频交 Shazam 识别；标题窗显示录制倒计时（建议关闭游戏音效
               提升识别率）/录制失败/识曲中/成功/失败，成功时正文窗显示歌名与

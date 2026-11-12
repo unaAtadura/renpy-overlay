@@ -181,6 +181,15 @@ DEFAULT_REMOTE_CACHE_SIZE_COUNT = 50
 MIN_REMOTE_SCREENSHOT_INTERVAL = MIN_AUTO_TRANSLATE_INTERVAL
 #: 缓存条数下限：0 条缓存无意义
 MIN_REMOTE_CACHE_SIZE_COUNT = 1
+#: 遥控器自动化持久化缓存（feat/remote-cache-persist）：数据库缓存开关与条数上限。
+#: 默认关闭 = 控制器不接线持久层，「内存缓存 + API」既有行为零变化；持久化是
+#: 显式可选增强。上限 40000 覆盖 30000+ 文本量游戏的完整画面空间（每条签名
+#: 512B + 译文 < 1KB，满库约 40MB），配合冷端随机水位淘汰使重玩旧章节的
+#: 条目不被集中挤出。
+DEFAULT_REMOTE_CACHE_PERSIST_ENABLE = False
+DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT = 40000
+#: 持久化缓存条数下限：0 条无意义（与内存缓存下限同口径）
+MIN_REMOTE_CACHE_DB_SIZE_COUNT = 1
 # 预构建自适应并发默认值（移植自 renpy-overlay-batch-translator）
 DEFAULT_MAX_CONCURRENCY = 8
 DEFAULT_INITIAL_CONCURRENCY = 1
@@ -260,6 +269,9 @@ class AppConfig:
     # 遥控器自动化（周期截图翻译：间隔与内存缓存条数，紧跟 enable 之后，需求备注）
     remote_screenshot_interval: float = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     remote_cache_size_count: int = DEFAULT_REMOTE_CACHE_SIZE_COUNT
+    # 遥控器自动化持久化缓存（紧跟内存缓存条数）：数据库两级命中开关与上限
+    remote_cache_persist_enable: bool = DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+    remote_cache_db_size_count: int = DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT
     remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     remote_screenshot_diameter_b: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     # 预构建翻译缓存：自适应并发 / 重试 / 熔断 / 扫描范围 / 目录记忆
@@ -370,6 +382,8 @@ def _write_defaults(target: Path) -> None:
     payload["remote_screenshot_hide"] = DEFAULT_REMOTE_SCREENSHOT_HIDE
     payload["remote_screenshot_interval"] = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     payload["remote_cache_size_count"] = DEFAULT_REMOTE_CACHE_SIZE_COUNT
+    payload["remote_cache_persist_enable"] = DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+    payload["remote_cache_db_size_count"] = DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT
     payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["remote_screenshot_diameterB"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["max_concurrency"] = DEFAULT_MAX_CONCURRENCY
@@ -733,6 +747,15 @@ def load_config(path: Path | None = None) -> AppConfig:
             "remote_cache_size_count",
             DEFAULT_REMOTE_CACHE_SIZE_COUNT,
             MIN_REMOTE_CACHE_SIZE_COUNT,
+        ),
+        remote_cache_persist_enable=_read_bool(
+            raw, "remote_cache_persist_enable", DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+        ),
+        remote_cache_db_size_count=_read_positive_int(
+            raw,
+            "remote_cache_db_size_count",
+            DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT,
+            MIN_REMOTE_CACHE_DB_SIZE_COUNT,
         ),
         remote_screenshot_diameter_a=_read_positive_int(
             raw,
