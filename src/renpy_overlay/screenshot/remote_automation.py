@@ -265,7 +265,12 @@ class RemoteAutomationController:
     - ``get_windows_hidden`` / ``set_windows_hidden``：A/B 用户级显隐
       （「隐藏遥控器/显示遥控器」，RemoteScreenshotController 提供）；
     - ``capture_fn`` / ``bbox_provider`` / ``timer_factory``：截图函数、
-      区域换算与计时器工厂（离线测试注入 stub，缺省为真实实现）。
+      区域换算与计时器工厂（离线测试注入 stub，缺省为真实实现）；
+    - ``persistent_lookup`` / ``persistent_put``：数据库持久化缓存查询/写入
+      （feat/remote-cache-persist，可选，缺省 None = 不接线 = 行为与纯内存
+      时代一致）。查询 ``(signature) -> str | None``（异常由存储层吞噬，
+      None = 未命中）；写入 ``(signature, text, region_w, region_h,
+      screenshot_id)``（fire-and-forget，失败由存储层降级记日志）。
     """
 
     def __init__(
@@ -284,6 +289,8 @@ class RemoteAutomationController:
         capture_fn: Callable[[Rect], Image.Image] | None = None,
         bbox_provider: Callable[[object], Rect] | None = None,
         timer_factory: Callable[[int, Callable[[], None]], object] | None = None,
+        persistent_lookup: Callable[[Signature], str | None] | None = None,
+        persistent_put: Callable[[Signature, str, int | None, int | None, int | None], None] | None = None,
     ) -> None:
         # 注入契约（构造期 fail-fast，同 HotkeyMode 构造校验先例）：宿主误把
         # property 取值当回调传入（如 windows_created 不加括号/不包 lambda）时，
@@ -317,6 +324,19 @@ class RemoteAutomationController:
         self._capture_fn = capture_fn or _default_capture
         self._bbox_provider = bbox_provider or _default_bbox_provider
         self._timer_factory = timer_factory or _default_timer_factory
+        # 持久化缓存回调（可选注入；None = 不接线，仅内存级命中）
+        if persistent_lookup is not None and not callable(persistent_lookup):
+            raise TypeError(
+                "RemoteAutomationController 注入参数 persistent_lookup 必须可调用"
+                f"或 None（收到 {type(persistent_lookup).__name__}）"
+            )
+        if persistent_put is not None and not callable(persistent_put):
+            raise TypeError(
+                "RemoteAutomationController 注入参数 persistent_put 必须可调用"
+                f"或 None（收到 {type(persistent_put).__name__}）"
+            )
+        self._persistent_lookup = persistent_lookup
+        self._persistent_put = persistent_put
         # ---- 状态机 ----
         self._enabled = False  # 菜单开关「遥控器自动化: 关/开」
         self._running = False  # 自动状态：周期运行中（A 单击后进入）
@@ -324,6 +344,7 @@ class RemoteAutomationController:
         self._baseline: Signature | None = None  # 基准感知签名（首轮/命中/提交时更新）
         self._pending_change = False  # 截图变化状态（忙碌期间保持，恢复后提交）
         self._in_flight = False  # 本控制器提交的翻译在途中（宿主回执清除）
+        self._pending_region: tuple[int, int] | None = None  # 在途请求的抓屏区域尺寸（回执写入缓存用）
         self._timer: object | None = None
 
     # ---- 状态检视（QuickMenu 文案用） -------------------------------------------
@@ -491,6 +512,14 @@ class RemoteAutomationController:
         self._baseline = current
         self._pending_change = False
         hit = self._cache.lookup(current)
+        if hit is None and self._persistent_lookup is not None:
+            # 持久化二级命中（异常由存储层吞噬，None = 未命中）：命中直接上屏
+            # 并回填内存（同会话同画面再次出现走零 IO 路径）；不入历史库，
+            # 与内存命中语义一致（零写库：仅存储层内部刷 LRU 活性时间戳）
+            hit = self._persistent_lookup(current)
+            if hit is not None:
+                self._cache.put(current, hit)
+                logger.info("遥控器自动化：持久化缓存命中，直接上屏（不发 API、不入历史）")
         if hit is not None:
             logger.info("遥控器自动化：缓存命中，直接上屏（不发 API）")
             self._display(hit)
@@ -502,11 +531,17 @@ class RemoteAutomationController:
         self._submit_capture(image, current)
 
     def _submit_capture(self, image: Image.Image, current: Signature) -> None:
-        """提交翻译：宿主受理后标记在途（回执清除）；被拒则挂起变化状态。"""
+        """提交翻译：宿主受理后标记在途（回执清除）；被拒则挂起变化状态。
+
+        受理成功时记录抓屏区域尺寸（回执成功后随签名一并写入持久化缓存；
+        仅诊断列，不参与命中判定）。
+        """
         if self._submit(self._armed, image, current):
             self._in_flight = True
+            self._pending_region = (int(image.size[0]), int(image.size[1]))
             logger.info("遥控器自动化：截图已提交翻译（签名 %d 格）", len(current))
         else:
+            self._pending_region = None
             self._pending_change = True
             logger.info("遥控器自动化：宿主忙碌拒绝提交，保持变化状态等待恢复")
 
@@ -540,16 +575,28 @@ class RemoteAutomationController:
     # ---- 宿主回执与生命周期 ---------------------------------------------------------
 
     def on_translation_result(
-        self, signature: Signature | None, text: str | None
+        self,
+        signature: Signature | None,
+        text: str | None,
+        screenshot_id: int | None = None,
     ) -> None:
         """宿主回传自动化翻译结果（主线程）：成功回填缓存，并清除在途标记。
 
         中止/失败传 ``text=None``：不污染缓存；在途标记无论成败都必须清除，
         否则忙碌分支会永久跳过变化判定（自动化停在「在途」态）。
+
+        成功且持久化写入回调已注入时，同步写入数据库缓存（空白签名由存储
+        层准入拒绝；``screenshot_id`` 为宿主落库 game_screenshot 的溯源 id，
+        可为 None；写入失败由存储层降级记日志，不影响上屏与内存缓存）。
         """
         self._in_flight = False
+        region = self._pending_region
+        self._pending_region = None
         if text and signature is not None:
             self._cache.put(signature, text)
+            if self._persistent_put is not None:
+                width, height = region if region else (None, None)
+                self._persistent_put(signature, str(text), width, height, screenshot_id)
 
     def on_hotkey_mode_changed(self, enabled: bool) -> None:
         """快捷键模式开/关（经 RemoteScreenshotController 转发）。

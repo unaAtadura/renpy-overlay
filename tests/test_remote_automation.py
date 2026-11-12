@@ -858,6 +858,148 @@ def test_auto_cache_hit_writes_nothing(monkeypatch):
     assert store.inserts == []
 
 
+# ---- 持久化缓存接线（内存优先 → 数据库 → API；feat/remote-cache-persist） ----------
+
+
+def _make_controller(
+    displayed,
+    submitted,
+    *,
+    persistent_lookup=None,
+    persistent_put=None,
+    submit_ok=True,
+):
+    """接线测试共用控制器：图像/签名确定，提交与持久化回调可观测。"""
+    return RemoteAutomationController(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=displayed.append,
+        submit=lambda window, image, hash_value: (
+            submitted.append(hash_value) or True
+        )
+        if submit_ok
+        else False,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+        bbox_provider=lambda window: (0, 0, 100, 100),
+        capture_fn=lambda bbox: _gradient_image(),
+        timer_factory=lambda interval_ms, on_tick: _StubTimer(),
+        persistent_lookup=persistent_lookup,
+        persistent_put=persistent_put,
+    )
+
+
+def test_constructor_rejects_non_callable_persistent_callbacks():
+    """持久化回调注入契约：非 callable 非 None 时构造期报错（None 合法=不接线）。"""
+    base = dict(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=lambda text: None,
+        submit=lambda window, image, hash_value: True,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+    )
+    with pytest.raises(TypeError, match="persistent_lookup"):
+        RemoteAutomationController(**base, persistent_lookup="bad")
+    with pytest.raises(TypeError, match="persistent_put"):
+        RemoteAutomationController(**base, persistent_put=123)
+    # None 合法：不接线，构造成功且行为与纯内存时代一致
+    RemoteAutomationController(**base)
+
+
+def test_persistent_hit_displays_without_api_and_backfills_memory(monkeypatch):
+    """数据库命中：直接上屏不发 API、不入历史，且回填内存（二次命中零查询）。"""
+
+    def _forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("持久化缓存命中不应发起 API")
+
+    monkeypatch.setattr(flow_module, "translate_image_verified", _forbidden)
+    displayed, submitted, lookups = [], [], []
+    sig = grid_signature(_gradient_image())
+    controller = _make_controller(
+        displayed,
+        submitted,
+        persistent_lookup=lambda signature: (lookups.append(signature), "库译文")[1],
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert displayed == ["库译文"]  # 直接上屏
+    assert submitted == []  # 未发 API
+    assert lookups == [sig]  # 查询恰一次
+    controller.on_trigger_clicked(_StubWindow("w"))  # 第二轮：内存回填命中
+    assert displayed == ["库译文", "库译文"]
+    assert lookups == [sig]  # 持久层仅首次查询（回填生效）
+
+
+def test_persistent_miss_submits_then_put_with_region_and_screenshot_id():
+    """未命中：正常提交 API；成功回执触发恰一次持久化写入（含 region 与溯源 id）。"""
+    displayed, submitted, puts, lookups = [], [], [], []
+    sig = grid_signature(_gradient_image())
+    controller = _make_controller(
+        displayed,
+        submitted,
+        persistent_lookup=lambda signature: lookups.append(signature) or None,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert submitted == [sig]  # 未命中 → 提交
+    assert lookups == [sig]
+    assert displayed == []
+    controller.on_translation_result(sig, "API译文", screenshot_id=42)
+    assert puts == [(sig, "API译文", 64, 48, 42)]  # region 来自抓屏 image.size
+    assert displayed == []  # 写缓存不等于上屏（上屏由宿主收尾链负责）
+
+
+def test_persistent_put_skipped_on_abort_or_missing_text():
+    """中止/失败回执（text=None）：不触发持久化写入，pending_region 清空。"""
+    submitted, puts = [], []
+    sig = grid_signature(_gradient_image())
+    controller = _make_controller(
+        [],
+        submitted,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._pending_region == (64, 48)  # 受理成功已记录
+    controller.on_translation_result(sig, None)  # 中止：无译文
+    assert puts == []
+    assert controller._pending_region is None
+
+
+def test_pending_region_not_left_on_rejected_submit():
+    """提交被拒：不残留区域尺寸；后续防御性回执 region 兜底 None。"""
+    submitted, puts = [], []
+    sig = grid_signature(_gradient_image())
+    controller = _make_controller(
+        [],
+        submitted,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+        submit_ok=False,
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert submitted == []
+    assert controller._pending_region is None  # 被拒即清空
+    controller.on_translation_result(sig, "迟到的译文", 5)
+    assert puts == [(sig, "迟到的译文", None, None, 5)]
+
+
 def test_auto_store_degraded_keeps_display():
     """store 降级（insert 返回 None）：仅上屏不入库，回执照常送达。"""
     store = _StubStore(fail=True)
