@@ -45,6 +45,7 @@ class _FollowHostStub:
     _locked = True
     _dragging = False
     _visible = True
+    _layout_pending_position = False  # layout 恢复的一次性定位标志（默认已消费）
     _last_topmost_log = 0.0
     _last_minimize_log = 0.0
 

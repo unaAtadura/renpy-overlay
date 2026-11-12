@@ -7,7 +7,7 @@
 ``_dragging`` / ``width`` / ``height`` / ``_title_h`` / ``_title_gap`` /
 ``dock`` / ``_user_offset`` / ``_visible`` / ``_body_hwnd`` /
 ``_title_hwnd`` / ``_body_window`` / ``_last_topmost_log`` /
-``_last_minimize_log`` /
+``_last_minimize_log`` / ``_layout_pending_position`` /
 ``_quick_menu`` / ``_remote_screenshot``，以及 ``_update_title`` /
 ``_set_visible``。
 """
@@ -59,6 +59,11 @@ class WindowFollowMixin:
             # _set_visible(True) 把流式窗拉回；锁定态置顶重申同被短路
             # （窗口全隐时无意义），托盘恢复后周期自然接续
             return
+        if self._layout_pending_position:
+            # layout 恢复的一次性定位（需求 future_恢复布局.txt）：必须在
+            # 常规移动之外——锁定态的常规路径不移动窗口（只重申置顶），
+            # 恢复为锁定时不在此定位，两窗停留构造期默认位置
+            self._consume_pending_layout_position()
         if self.skip_injection:
             self._follow_once_skip_injection()
             return
@@ -101,6 +106,47 @@ class WindowFollowMixin:
             self._set_visible(True)
         win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
         win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
+
+    def _consume_pending_layout_position(self) -> None:
+        """layout 恢复的一次性定位（需求 future_恢复布局.txt）。
+
+        首个有效跟随 tick 按保存的尺寸/偏移经与跟随循环同源的
+        compute_geometry/pair_layout 摆好两窗（含显示：锁定态窗口在
+        游戏窗口出现后即恢复显示，与既有锁定语义一致）。跳过注入模式以
+        虚拟屏幕为参照（与 _follow_once_skip_injection 同一参照系）；偏移
+        语义与拖动结束记录的 _user_offset 完全一致（游戏窗口移位时相对
+        位置保持）。一次性：定位成功即清标志，后续完全回归既有跟随/锁定
+        逻辑；游戏窗口尚未出现时保留标志下个 tick 再试（期间窗口保持
+        隐藏，无闪烁）。
+        """
+        if not self._layout_pending_position:
+            # 幂等守卫（防御显式化）：标志已消费时直接跳过，未来直接调用
+            # 路径同样受守卫，不依赖 _follow_once 的调用点判断
+            return
+        if self.skip_injection:
+            rect = self._virtual_screen_rect()
+        else:
+            hwnd = self._resolve_target()
+            if not hwnd:
+                return  # 保留标志：等待游戏窗口出现后重试
+            rect = win32api.window_rect(hwnd)
+        self._layout_pending_position = False
+        total = compute_geometry(
+            rect,
+            (self.width, self.height + self._title_h + self._title_gap),
+            self.dock,
+            self._user_offset,
+        )
+        title_rect, body_rect = pair_layout(total, self._title_h, self._title_gap)
+        if not self._visible:
+            self._set_visible(True)
+        win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
+        win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
+        logger.info(
+            "已按 layout 恢复流式悬浮窗几何（locked=%s，offset=%s）",
+            self._locked,
+            self._user_offset,
+        )
 
     def _hide_if_visible(self) -> None:
         if self._visible:

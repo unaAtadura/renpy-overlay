@@ -57,6 +57,12 @@ ERROR_ACCESS_DENIED = 5
 ERROR_PARTIAL_COPY = 299
 ERROR_INVALID_PARAMETER = 87
 
+#: 虚拟桌面度量（GetSystemMetrics 的 SM_* 参数值，SDK 标准值；不依赖 win32con）
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
 _MAX_PATH = 1024
 
 # ---------------------------------------------------------------- ctypes 声明
@@ -154,9 +160,14 @@ if _IS_WINDOWS:
         wintypes.DWORD,
     ]
     _psapi.GetModuleInformation.restype = wintypes.BOOL
+
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    _user32.GetSystemMetrics.restype = ctypes.c_int
 else:  # pragma: no cover - 便于在非 Windows 环境做静态检查
     _kernel32 = None
     _psapi = None
+    _user32 = None
 
 
 def _k32():
@@ -536,6 +547,25 @@ def find_main_window(pid: int, min_width: int = 200, min_height: int = 120) -> i
 
 def window_rect(hwnd: int) -> tuple[int, int, int, int]:
     return _win32gui().GetWindowRect(hwnd)
+
+
+def virtual_screen_rect() -> tuple[int, int, int, int]:
+    """整个虚拟桌面（全部显示器并集）的物理像素矩形 (left, top, right, bottom)。
+
+    布局恢复的离屏校验用（需求 future_恢复布局.txt：分辨率/显示器数量变化
+    时记录坐标可能落到当前桌面之外）：与 layout.json 记录的 abs_rect 同为
+    win32 物理像素口径，与 Qt 逻辑屏幕矩形不可混用。经 ctypes user32 取
+    GetSystemMetrics——pywin32 的 win32gui 不含该函数（实测缺陷
+    renpy_overlay_20261112_164807.log：二次启动即崩）。非 Windows 返回
+    空矩形，调用方的相交判定自然为 False。
+    """
+    if not _IS_WINDOWS or _user32 is None:  # pragma: no cover
+        return (0, 0, 0, 0)
+    x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    width = _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    height = _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    return (int(x), int(y), int(x) + int(width), int(y) + int(height))
 
 
 def ltrb_to_xywh(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:

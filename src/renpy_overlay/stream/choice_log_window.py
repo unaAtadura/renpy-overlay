@@ -513,6 +513,20 @@ class ChoiceLogWindow(QWidget):
 
     # ---- 对外接口 ---------------------------------------------------------
 
+    @property
+    def is_locked(self) -> bool:
+        """双击锁定状态（宿主退出快照用，与截图窗口 is_locked 同口径）。"""
+        return self._locked
+
+    def apply_initial_locked(self) -> None:
+        """layout 启动恢复专用：把锁定态置为锁定（需求 future_恢复布局.txt）。
+
+        复用 ``_set_locked`` 保证光标切换与重绘和双击锁定完全一致（与
+        双击同一代码路径）；仅恢复路径调用（新建窗口恒为未锁定，无需
+        目标态判断）。
+        """
+        self._set_locked(True)
+
     def anchor_to(self, top_right: QPoint | None) -> None:
         """弹窗左下角贴合指定全局锚点（入口图标右上角），钳在所在屏内。"""
         if top_right is None:

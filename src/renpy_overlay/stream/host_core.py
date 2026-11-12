@@ -17,7 +17,7 @@ import time
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
-from .. import config, translation_store
+from .. import config, layout, translation_store, win32api
 from ..quick_menu import QuickMenu
 from ..screenshot import (
     AIChatWindow,
@@ -147,6 +147,7 @@ class StreamOverlayCore:
         self._drag_size = (width, height)
         self._drag_origin = (0, 0)
         self._user_offset: tuple[int, int] | None = None
+        self._layout_pending_position = False  # layout 恢复的一次性定位（follow 首个 tick 消费）
         self._last_topmost_log = 0.0
         self._last_minimize_log = 0.0  # 最小化隐藏节流日志（follow.py）
         self._press_pos: tuple[int, int] | None = None
@@ -312,6 +313,10 @@ class StreamOverlayCore:
         self._tray = TrayIconController(
             items_provider=self._tray_managed_items, on_quit=self.request_close
         )
+        # 窗口布局持久化（需求 future_恢复布局.txt）：装配末尾一次性读取并
+        # 恢复（此时 quick_menu/hotkey_mode/日志窗入口句柄已全部就绪，恢复
+        # 顺序见 _apply_layout）；恢复期间的标题提示随后被启动文案覆盖
+        self._load_and_apply_layout()
         self._update_title("正在启动…")
 
     # ------------------------------------------------------------ 对外接口
@@ -446,6 +451,195 @@ class StreamOverlayCore:
             errors.append(f"锁鼠标热键重注册失败：{exc}")
         return errors
 
+    # ------------------------------------------------------------ 布局持久化
+
+    def _load_and_apply_layout(self) -> None:
+        """启动时读取 layout.json 并恢复上次窗口状态（需求 future_恢复布局.txt）。
+
+        无 game_dir（存储降级场景）或文件缺失/损坏/版本不支持时静默跳过，
+        按默认布局启动；加载成功后按恢复顺序应用（顺序即正确性，见
+        :meth:`_apply_layout`）。仅运行时覆盖，不回写 config.json（冲突时
+        以 layout 优先）；设置窗口仍只改 config.json。恢复异常兜底：
+        布局问题绝不阻塞启动（沿配置问题绝不导致崩溃的项目原则），失败
+        按默认布局继续运行并留痕。
+        """
+        path = layout.layout_path_for(self._game_dir or None)
+        if path is None:
+            return
+        state = layout.load_layout(path)
+        if state is None:
+            return
+        logger.info("已读取布局文件：%s", path)
+        try:
+            self._apply_layout(state)
+        except Exception:  # pragma: no cover - 运行环境竞态的残响不阻启动
+            logger.exception("布局恢复失败，按默认布局启动")
+
+    def _apply_layout(self, state: layout.LayoutState) -> None:
+        """按恢复顺序应用布局（顺序即正确性；需求 future_恢复布局.txt）。
+
+        1) 流式窗口：尺寸/锁定/偏移写回运行时并置一次性 pending 定位标志
+           （follow 首个有效 tick 消费——锁定态的常规路径不移动窗口，恢复
+           为锁定时必须在此定位，否则两窗停留构造期默认位置）；保存坐标
+           落到当前虚拟桌面之外（分辨率/显示器变化）丢弃偏移回退自动停靠
+           （尺寸保留）；
+        2) 截图窗口：按创建序恢复（颜色随池序自动对齐），坐标离屏回退级联
+           定位，计入上限（超限已在解析层截断）；
+        3) 快捷键模式：必须在第 2 步之后开启——锁定窗口表在模式开启瞬间
+           快照，顺序颠倒会记不到窗口；仅恢复模式开关（主开关恒为关）；
+        4) 选项副作用日志窗口：跳过注入模式硬守卫——即便复制了别处的
+           layout 文件也不显示（需求）；恢复位置/大小/锁定，不再从功能
+           图标右上角弹出。
+        """
+        stream = state.stream_window
+        self.width = stream.width
+        self.height = stream.height
+        self._body_window.resize(self.width, self.height)
+        self._title_window.resize(self.width, self._title_h)
+        offset = stream.user_offset
+        if offset is not None and stream.abs_rect is not None:
+            left, top, right, bottom = stream.abs_rect
+            if not layout.rect_intersects_any_screen(
+                left,
+                top,
+                max(1, right - left),
+                max(1, bottom - top),
+                [win32api.virtual_screen_rect()],
+            ):
+                logger.warning("layout 记录的流式窗口坐标落到当前虚拟桌面之外，回退自动停靠")
+                offset = None
+        self._user_offset = offset
+        if stream.locked:
+            self._locked = True
+            logger.info("布局恢复：流式窗口恢复为锁定态（与双击锁定同一状态位）")
+        self._layout_pending_position = True
+        self._restore_screenshot_windows(state.screenshot_windows)
+        if state.hotkey_mode and not self._hotkey_mode.enabled:
+            self._hotkey_mode.set_enabled(True)
+        choice = state.choice_log_window
+        choice_restored = False
+        if choice.open and not self.skip_injection:
+            self._open_choice_log(
+                choice.width,
+                choice.height,
+                pos=(choice.x, choice.y),
+                locked=choice.locked,
+            )
+            choice_restored = self._choice_log_window is not None
+        elif choice.open and self.skip_injection:
+            logger.info("跳过注入模式不恢复选项副作用日志窗口（需求：无此窗口）")
+        logger.info(
+            "布局已恢复：流式窗口 %dx%d（锁定=%s，offset=%s），截图窗口 %d 个，"
+            "快捷键模式=%s，副作用日志=%s",
+            self.width,
+            self.height,
+            self._locked,
+            self._user_offset,
+            self._quick_menu.window_count,
+            self._hotkey_mode.enabled,
+            choice_restored,
+        )
+
+    def _restore_screenshot_windows(
+        self, entries: tuple[layout.ScreenshotWindowLayout, ...]
+    ) -> None:
+        """按创建序恢复截图窗口（需求：自动依次创建、计入上限、效果与右键创建一致）。
+
+        记录坐标落到当前任一屏幕之外（分辨率/显示器数量变化）时该窗回退
+        与新建相同的级联定位（尺寸钳制后保留）；restore_window 返回 None
+        （上限/布局锁定拒绝）即停止，剩余条目一并放弃。
+        """
+        if not entries:
+            return
+        screens = self._screen_rects_logical()
+        restored = 0
+        for entry in entries:
+            width, height = layout.clamp_size(
+                entry.width,
+                entry.height,
+                layout.MIN_SCREENSHOT_WINDOW_WIDTH,
+                layout.MIN_SCREENSHOT_WINDOW_HEIGHT,
+            )
+            pos: tuple[int, int] | None = None
+            if layout.rect_intersects_any_screen(entry.x, entry.y, width, height, screens):
+                pos = (entry.x, entry.y)
+            else:
+                logger.warning(
+                    "layout 记录的截图窗口坐标 (%d, %d) 落到屏幕之外，回退级联定位",
+                    entry.x,
+                    entry.y,
+                )
+            if (
+                self._quick_menu.restore_window(width, height, locked=entry.locked, pos=pos)
+                is None
+            ):
+                break
+            restored += 1
+        logger.info("布局恢复：已恢复 %d/%d 个截图窗口", restored, len(entries))
+
+    def _screen_rects_logical(self) -> list[tuple[int, int, int, int]]:
+        """全部屏幕的可用区域矩形（Qt 逻辑坐标；与截图窗/日志窗恢复坐标
+        同一单位口径）。无屏幕（极端环境）回退 1920×1080 兜底。"""
+        rects = [
+            (geo.x(), geo.y(), geo.width(), geo.height())
+            for screen in QApplication.screens()
+            for geo in (screen.availableGeometry(),)
+        ]
+        if not rects:  # pragma: no cover - 无显示环境兜底
+            rects.append((0, 0, 1920, 1080))
+        return rects
+
+    def _persist_layout(self) -> None:
+        """退出时把当前窗口状态写入 layout.json（需求 future_恢复布局.txt）。
+
+        仅 ``_shutdown`` 调用（全部退出路径的唯一汇聚点：托盘/快捷菜单/
+        控制台 q/游戏关闭监控，Qt 主线程、窗口尚未销毁）。快照不读可见性：
+        托盘「隐藏窗口」期间被隐藏的窗口照常记录几何与锁定，恢复侧一律
+        直接显示；写盘失败只记日志，不影响退出流程；崩溃等未走 _shutdown
+        的路径不保存（保留上次正常退出的值）。
+        """
+        path = layout.layout_path_for(self._game_dir or None)
+        if path is None:
+            return
+        stream_abs_rect = None
+        try:
+            title_rect = win32api.window_rect(self._title_hwnd)
+            body_rect = win32api.window_rect(self._body_hwnd)
+            stream_abs_rect = (
+                min(title_rect[0], body_rect[0]),
+                min(title_rect[1], body_rect[1]),
+                max(title_rect[2], body_rect[2]),
+                max(title_rect[3], body_rect[3]),
+            )
+        except Exception:  # pragma: no cover - 窗口已销毁等竞态
+            stream_abs_rect = None
+        screenshots = []
+        for window in self._quick_menu.screenshot_windows():
+            geo = window.geometry()
+            screenshots.append(
+                (geo.x(), geo.y(), geo.width(), geo.height(), window.is_locked)
+            )
+        choice = self._choice_log_window
+        choice_rect = None
+        choice_locked = False
+        if choice is not None:
+            geo = choice.geometry()
+            choice_rect = (geo.x(), geo.y(), geo.width(), geo.height())
+            choice_locked = choice.is_locked
+        payload = layout.collect_layout(
+            stream_width=self.width,
+            stream_height=self.height,
+            stream_locked=self._locked,
+            stream_user_offset=self._user_offset,
+            stream_abs_rect=stream_abs_rect,
+            screenshot_windows=screenshots,
+            hotkey_mode=self._hotkey_mode.enabled,
+            choice_log_open=choice is not None,
+            choice_log_rect=choice_rect,
+            choice_log_locked=choice_locked,
+        )
+        layout.save_layout(path, payload)
+
     @property
     def hwnd(self) -> int:
         return self._body_hwnd
@@ -478,6 +672,10 @@ class StreamOverlayCore:
         if self._closed:
             return
         self._closed = True
+        # 布局快照必须在任何窗口关闭之前完成（需求 future_恢复布局.txt：
+        # 退出时记录当前窗口状态）；不读可见性——托盘「隐藏窗口」期间隐藏
+        # 的窗口照常记录几何与锁定，恢复侧一律直接显示
+        self._persist_layout()
         self._tray.shutdown()  # 先移除托盘图标，避免退出过程中用户再点托盘
         self._translation_seq += 1  # 在途翻译的结果作废
         if self._translating:

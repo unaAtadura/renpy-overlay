@@ -19,6 +19,7 @@ import logging
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QMenu
 
+from .layout import MAX_SCREENSHOT_WINDOWS
 from .screenshot.frame_overlay import FrameOverlayLayer
 from .screenshot.hotkeys import HOTKEY_MODE_OFF_TEXT, HOTKEY_MODE_ON_TEXT
 from .screenshot.mouse_lock import MOUSE_LOCK_OFF_TEXT, MOUSE_LOCK_ON_TEXT
@@ -33,8 +34,8 @@ from .video.asr_rt import ASR_RT_OFF_TEXT, ASR_RT_ON_TEXT
 
 logger = logging.getLogger("renpy_overlay.quick_menu")
 
-#: 截图窗口数量上限（需求：最多创建 8 个）
-MAX_WINDOWS = 8
+#: 截图窗口数量上限（需求：最多创建 8 个；与 layout 纯逻辑层同源单列常量）
+MAX_WINDOWS = MAX_SCREENSHOT_WINDOWS
 #: 级联创建时后一个窗口相对前一个的偏移（像素），避免完全重叠
 CASCADE_STEP = 30
 #: 录制中菜单项计时的刷新间隔（毫秒）：菜单打开期间按秒走动
@@ -60,6 +61,7 @@ class QuickMenu:
         on_open_prebuild=None,
         on_open_settings=None,
         frame_overlay_factory=None,
+        window_factory=None,
     ) -> None:
         self._on_capture_click = on_capture_click
         self._on_open_history = on_open_history
@@ -93,6 +95,9 @@ class QuickMenu:
         # 框选提示覆盖层（锁定期线框）：惰性创建；工厂可注入（离线测试用）
         self._frame_overlay = None
         self._frame_overlay_factory = frame_overlay_factory or FrameOverlayLayer
+        # 截图窗口工厂（create_window/restore_window 共用）：可注入（离线
+        # 测试用 stub，同 frame_overlay_factory 的宿主注入约定）
+        self._window_factory = window_factory or ScreenshotWindow
 
     # ---- 右键菜单 -----------------------------------------------------------
 
@@ -252,7 +257,7 @@ class QuickMenu:
             logger.info("截图窗口已达上限 %d 个，忽略创建请求", MAX_WINDOWS)
             return None
         index = len(self._windows)
-        window = ScreenshotWindow(index, FRAME_COLORS[index], on_click=self._on_capture_click)
+        window = self._window_factory(index, FRAME_COLORS[index], on_click=self._on_capture_click)
         window.show()  # 先 show 再定位（Qt 渲染管线要求），随后级联摆放
         center = self._screen_center()
         w, h = window.width(), window.height()
@@ -263,6 +268,52 @@ class QuickMenu:
             "已创建截图窗口 #%d（边框色 %s），当前 %d/%d 个",
             index,
             FRAME_COLORS[index].name(),
+            len(self._windows),
+            MAX_WINDOWS,
+        )
+        return window
+
+    def restore_window(
+        self,
+        width: int,
+        height: int,
+        locked: bool = False,
+        pos: tuple[int, int] | None = None,
+    ) -> ScreenshotWindow | None:
+        """按 layout 记录恢复一个截图窗口（启动路径专用；需求 future_恢复布局.txt）。
+
+        守卫与颜色分配与 :meth:`create_window` 一致（布局锁定/数量上限拒绝，
+        颜色按池序红橙黄绿青蓝紫黑依次分配）；``pos`` 提供时按恢复坐标摆放，
+        缺省走与新建相同的级联定位（layout 坐标落到屏幕之外时由宿主侧回退）。
+        锁定态经 ``_set_locked(True)`` 与双击锁定同一代码路径（含状态清理
+        与重绘）。仅启动恢复调用；运行期创建仍走 :meth:`create_window`
+        （需求：销毁重建不回读 layout，走正常创建逻辑）。
+        """
+        if self._layout_locked:
+            logger.info("截图布局已锁定，忽略恢复截图窗口请求")
+            return None
+        if len(self._windows) >= MAX_WINDOWS:
+            logger.info("截图窗口已达上限 %d 个，忽略恢复请求", MAX_WINDOWS)
+            return None
+        index = len(self._windows)
+        window = self._window_factory(index, FRAME_COLORS[index], on_click=self._on_capture_click)
+        window.show()  # 先 show 再定位（Qt 渲染管线要求，与 create_window 同序）
+        window.resize(width, height)
+        if pos is not None:
+            window.move(QPoint(int(pos[0]), int(pos[1])))
+        else:
+            center = self._screen_center()
+            offset = index * CASCADE_STEP
+            window.move(center.x() - width // 2 + offset, center.y() - height // 2 + offset)
+        if locked:
+            window._set_locked(True)
+        self._windows.append(window)
+        logger.info(
+            "已恢复截图窗口 #%d（%dx%d，锁定=%s），当前 %d/%d 个",
+            index,
+            width,
+            height,
+            locked,
             len(self._windows),
             MAX_WINDOWS,
         )
