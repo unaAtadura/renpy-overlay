@@ -44,7 +44,7 @@
 | Qt 主线程 | `Session._run_overlay_mode` | 全部界面绘制、队列消费（80ms）、跟随定位（200ms）、自动翻译轮询、录制定时器、所有 store 读写 | **唯一允许触碰 Qt 对象与 SQLite 存储的线程** |
 | IPC accept 线程 | `DialogueLink.start` | `accept()` 新连接（0.5s 超时轮询） | daemon |
 | IPC reader 线程 | `DialogueLink._accept_loop` | 每连接一个，按行解码 + 首包 token 认证 + 分发回调 | daemon；回调异常只记日志不断线 |
-| 游戏进程监控线程 | `Session._start_monitor` | 每 2s 检查游戏 PID 存活与最后消息时间；游戏退出后 `--idle-exit`（默认 20s）触发清理 | daemon |
+| 游戏进程监控线程 | `Session._start_monitor` | 每 2s 检查游戏 PID 存活与最后消息时间；游戏退出后 `--idle-exit`（默认 2s，0 = 检测到退出立即清理）触发清理 | daemon |
 | 控制台命令线程 | `Session._start_console` | 读 stdin：`h` 显隐 / `d` 恢复停靠 / `u` 卸载 / `s` 状态 / `q` 退出 | daemon；stdin 非终端时跳过 |
 | 流式翻译线程 | `translate_flow._start_translation` | 执行 SSE 请求，逐块投递 `("chunk", ...)`，结束投递 `("translation", ...)` | daemon；同一时刻只允许一条在途 |
 | 批量预构建线程池 | `pretranslate.runner.BatchTask` | `ThreadPoolExecutor`，动态并发上限由 `AdaptiveLimiter` 控制 | 后台守护线程驱动 `run()` |

@@ -168,7 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     runtime.add_argument("--timeout", type=float, default=15.0, help="等待远程线程结束的秒数")
     runtime.add_argument(
-        "--idle-exit", type=float, default=20.0, help="游戏进程消失后自动退出的秒数"
+        "--idle-exit",
+        type=float,
+        default=2.0,
+        help="游戏进程消失后自动退出的等待秒数（默认 2.0；0 = 检测到退出立即关闭）",
     )
     runtime.add_argument("--poll-hz", type=float, default=7.0, help="游戏内兜底轮询频率")
     runtime.add_argument("--log-level", default="INFO", help="控制台日志级别")
@@ -446,6 +449,11 @@ class Session:
                 continue
             if gone_since is None:
                 gone_since = time.time()
+                if self.args.idle_exit <= 0:
+                    # idle_exit=0：发现即退，不再多等一个轮询周期才二次判定
+                    self.log.warning("游戏进程 %d 已退出，立即自动关闭。", self.target.pid)
+                    self._request_stop()
+                    return
                 self.log.warning(
                     "游戏进程 %d 已退出，%.0f 秒后自动关闭。", self.target.pid, self.args.idle_exit
                 )

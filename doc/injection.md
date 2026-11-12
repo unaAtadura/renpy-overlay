@@ -102,7 +102,7 @@ x64 用 `sub rsp,0x28` 预留影子空间并对齐 16 字节；gil 暂存在影�
 | `--dock POS` | `top-center` | `top-center/top-left/top-right/bottom-center/bottom-left/bottom-right` |
 | `--port` | `0` | IPC 监听端口（系统分配空闲端口） |
 | `--timeout` | `15.0` | 等待远程线程结束秒数 |
-| `--idle-exit` | `20.0` | 游戏进程消失后自动退出的秒数 |
+| `--idle-exit` | `2.0` | 游戏进程消失后自动退出的等待秒数；`0` = 检测到退出立即关闭 |
 | `--poll-hz` | `7.0` | 游戏内兜底轮询频率（透传 agent 配置） |
 | `--log-level / --log-dir / --log-file` | `INFO / logs / 自动命名` | 日志配置 |
 
