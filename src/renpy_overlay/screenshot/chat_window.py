@@ -486,13 +486,14 @@ class AIChatWindow(QWidget):
         }
 
     def _text_api_options(self) -> dict:
-        """对话请求参数：与流式翻译同源，仅系统提示词换为对话专用（纯文本回复）。"""
+        """对话请求参数：chat 专用三键（空值各自独立回退主链路，与 vision/asr
+        同构），仅系统提示词换为对话专用（纯文本回复）。"""
         return {
-            "base_url": self._config.api_base_url,
+            "base_url": self._config.api_base_url_chat or self._config.api_base_url,
             "timeout": self._config.api_timeout,
-            "model": self._config.model,
+            "model": self._config.model_chat or self._config.model,
             "system_prompt": CHAT_SYSTEM_PROMPT,
-            "api_key": self._config.api_key,
+            "api_key": self._config.api_key_chat or self._config.api_key,
             "enable_thinking": self._config.enable_thinking,
             "reasoning_effort": self._config.reasoning_effort,
         }

@@ -25,6 +25,9 @@ def test_missing_file_creates_defaults(tmp_path):
         "api_base_url": "http://127.0.0.1:1234",
         "model": "",
         "api_key": "",
+        "api_base_url_chat": "",
+        "model_chat": "",
+        "api_key_chat": "",
         "api_base_url_vision": "",
         "model_vision": "",
         "api_key_vision": "",
@@ -93,6 +96,9 @@ def test_default_file_key_order_matches_target(tmp_path):
         "api_base_url",
         "model",
         "api_key",
+        "api_base_url_chat",
+        "model_chat",
+        "api_key_chat",
         "api_base_url_vision",
         "model_vision",
         "api_key_vision",
@@ -265,6 +271,57 @@ def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
         target.write_text(json.dumps({"screenshot_compress_percent": bad}), encoding="utf-8")
         loaded = config.load_config(target)
         assert loaded.screenshot_compress_percent == 10, f"{bad!r} 应回退默认"
+
+
+# ------------------------------------------------------------- AI 对话窗口专用链路
+
+
+def test_api_base_url_chat_loaded_and_fallback(tmp_path):
+    """chat 基址：合法值生效；缺键/空串/类型非法均回退空串（空 = 使用方回退主链路）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_base_url_chat": "http://127.0.0.1:9999"}), encoding="utf-8")
+    assert config.load_config(target).api_base_url_chat == "http://127.0.0.1:9999"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串
+    assert config.load_config(target).api_base_url_chat == ""
+    target.write_text(json.dumps({"api_base_url_chat": ""}), encoding="utf-8")  # 空串 = 跟随主链路
+    loaded = config.load_config(target)
+    assert loaded.api_base_url_chat == ""
+    assert (loaded.api_base_url_chat or loaded.api_base_url) == loaded.api_base_url
+    for bad in (123, None, ["url"], True):
+        target.write_text(json.dumps({"api_base_url_chat": bad}), encoding="utf-8")
+        assert config.load_config(target).api_base_url_chat == "", f"{bad!r}"
+
+
+def test_model_chat_loaded_and_fallback(tmp_path):
+    """chat 模型：合法值生效；缺键/空串/类型非法均回退空串（空 = 使用方回退主链路）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"model_chat": "qwen3.5-9b"}), encoding="utf-8")
+    assert config.load_config(target).model_chat == "qwen3.5-9b"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串
+    assert config.load_config(target).model_chat == ""
+    target.write_text(json.dumps({"model_chat": ""}), encoding="utf-8")  # 空串 = 跟随主链路
+    loaded = config.load_config(target)
+    assert loaded.model_chat == ""
+    assert (loaded.model_chat or loaded.model) == loaded.model
+    for bad in (123, None, ["m"], True):
+        target.write_text(json.dumps({"model_chat": bad}), encoding="utf-8")
+        assert config.load_config(target).model_chat == "", f"{bad!r}"
+
+
+def test_api_key_chat_loaded_and_fallback(tmp_path):
+    """chat 密钥：合法值生效；缺键/空串/类型非法均回退空串（空 = 使用方回退主链路）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"api_key_chat": "sk-chat"}), encoding="utf-8")
+    assert config.load_config(target).api_key_chat == "sk-chat"
+    target.write_text("{}", encoding="utf-8")  # 缺键：回退空串
+    assert config.load_config(target).api_key_chat == ""
+    target.write_text(json.dumps({"api_key_chat": ""}), encoding="utf-8")  # 空串 = 跟随主链路
+    loaded = config.load_config(target)
+    assert loaded.api_key_chat == ""
+    assert (loaded.api_key_chat or loaded.api_key) == loaded.api_key
+    for bad in (123, None, ["sk"], True):
+        target.write_text(json.dumps({"api_key_chat": bad}), encoding="utf-8")
+        assert config.load_config(target).api_key_chat == "", f"{bad!r}"
 
 
 def test_api_base_url_vision_loaded_and_fallback(tmp_path):
