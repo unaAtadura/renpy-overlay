@@ -406,6 +406,19 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 minimum=config.MIN_STREAM_WINDOW_HEIGHT, maximum=2160,
                 note="缺省时回退正文窗高度；修改后需重启生效", restart=True,
             ),
+            SettingSpec(
+                "api_base_url_chat", "AI 对话 API 地址", KIND_STR,
+                config.DEFAULT_API_BASE_URL_CHAT,
+                note="仅对话窗口文本请求使用；留空 = 跟随主链路 api_base_url",
+            ),
+            SettingSpec(
+                "model_chat", "AI 对话模型", KIND_STR, config.DEFAULT_MODEL_CHAT,
+                note="留空 = 跟随主链路 model",
+            ),
+            SettingSpec(
+                "api_key_chat", "AI 对话 API Key", KIND_STR, config.DEFAULT_API_KEY_CHAT,
+                note="留空 = 跟随主链路 api_key",
+            ),
         ),
     ),
 )

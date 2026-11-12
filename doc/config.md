@@ -24,6 +24,7 @@
 | `model` | `""` | — | 空 = 自动 `GET /v1/models` 取第一个已加载模型 |
 | `system_prompt` | 内置翻译提示词 | — | 可整个覆盖 |
 | `api_key` | `""` | — | 非空时附 `Authorization: Bearer` |
+| `api_base_url_chat` / `model_chat` / `api_key_chat` | `""` | — | AI 对话窗专用三键（仅对话窗口文本请求，紧随 `api_key`）；各自独立回退：基址空跟随主链路 `api_base_url`、模型空跟随主链路 `model`、密钥空跟随主链路 `api_key` |
 | `enable_thinking` | `false` | — | 思考模式开关；关闭时三方言同发（见 [translation.md](translation.md) §1） |
 | `reasoning_effort` | `"none"` | — | 关闭思考时的取值；置空不发送 |
 | `api_base_url_vision` / `model_vision` / `api_key_vision` | `""` | — | 视觉三键；基址空跟随主链路、模型空自动发现（需 vision 能力）、密钥空不带鉴权头 |

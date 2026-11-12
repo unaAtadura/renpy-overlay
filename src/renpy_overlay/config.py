@@ -16,6 +16,9 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "model": "",                        # 模型代号；空 = 自动用 /v1/models 的第一个
       "system_prompt": "...",             # 系统提示词（默认见 translator.DEFAULT_SYSTEM_PROMPT）
       "api_key": "",                      # API Key；空 = 不携带鉴权头
+      "api_base_url_chat": "",            # AI 对话窗独立 API 基址；空 = 跟随主链路 api_base_url
+      "model_chat": "",                   # AI 对话窗模型；空 = 跟随主链路 model
+      "api_key_chat": "",                 # AI 对话窗的 API Key（留空则跟随主链路 api_key）
       "enable_thinking": false,           # 模型思考（reasoning）模式开关，默认关闭
       "reasoning_effort": "none",         # 关闭思考时的 reasoning_effort 取值
       "stream_window_width": 1760,        # 流式正文窗宽度（像素，被游戏窗口宽度钳制）
@@ -94,6 +97,11 @@ DEFAULT_SHOW_ORIGINAL_TEXT = False
 DEFAULT_TRANSLATION_CACHE_SIZE_KB = 2048
 DEFAULT_MODEL = ""  # 空：自动向 /v1/models 查询第一个已加载模型
 DEFAULT_API_KEY = ""  # 空：不携带 Authorization 头
+#: AI 对话窗口专用链路：基址/模型/密钥三键紧跟主链路 api_key（需求），
+#: 仅对话窗口文本请求使用；空值各自独立回退主链路（与 vision / asr 同构）
+DEFAULT_API_BASE_URL_CHAT = ""
+DEFAULT_MODEL_CHAT = ""
+DEFAULT_API_KEY_CHAT = ""
 DEFAULT_ENABLE_THINKING = False  # 模型思考（reasoning）模式默认关闭
 #: 请求超时（秒）：独立于 translator 的兜底常量（20.0），对慢端点更宽松
 DEFAULT_API_TIMEOUT = 30.0
@@ -198,6 +206,10 @@ class AppConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     model: str = DEFAULT_MODEL
     api_key: str = DEFAULT_API_KEY
+    # AI 对话窗口专用链路：三键空值各自独立回退主链路（仅对话窗口文本请求）
+    api_base_url_chat: str = DEFAULT_API_BASE_URL_CHAT
+    model_chat: str = DEFAULT_MODEL_CHAT
+    api_key_chat: str = DEFAULT_API_KEY_CHAT
     enable_thinking: bool = DEFAULT_ENABLE_THINKING
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     # 流式悬浮窗
@@ -312,6 +324,9 @@ def _write_defaults(target: Path) -> None:
         "api_base_url": DEFAULT_BASE_URL,
         "model": DEFAULT_MODEL,
         "api_key": DEFAULT_API_KEY,
+        "api_base_url_chat": DEFAULT_API_BASE_URL_CHAT,
+        "model_chat": DEFAULT_MODEL_CHAT,
+        "api_key_chat": DEFAULT_API_KEY_CHAT,
         "api_base_url_vision": DEFAULT_API_BASE_URL_VISION,
         "model_vision": DEFAULT_MODEL_VISION,
         "api_key_vision": DEFAULT_API_KEY_VISION,
@@ -625,6 +640,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         system_prompt=_read_str(raw, "system_prompt", DEFAULT_SYSTEM_PROMPT),
         model=_read_str(raw, "model", DEFAULT_MODEL),
         api_key=_read_str(raw, "api_key", DEFAULT_API_KEY),
+        api_base_url_chat=_read_str(raw, "api_base_url_chat", DEFAULT_API_BASE_URL_CHAT),
+        model_chat=_read_str(raw, "model_chat", DEFAULT_MODEL_CHAT),
+        api_key_chat=_read_str(raw, "api_key_chat", DEFAULT_API_KEY_CHAT),
         enable_thinking=_read_bool(raw, "enable_thinking", DEFAULT_ENABLE_THINKING),
         reasoning_effort=_read_str(raw, "reasoning_effort", DEFAULT_REASONING_EFFORT),
         stream_window_width=stream_width,
@@ -751,6 +769,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "system_prompt=%d 字，api_key=%s，enable_thinking=%s，reasoning_effort=%r，"
         "stream_window（size=%dx%d，font=%d，spacing=%.2f，title_font=%d，gap=%d，style=%d，fill=%s），"
         "chat_window（size=%dx%d），"
+        "chat（base_url=%s，model=%s，api_key=%s），"
         "screenshot（compress=%d%%），"
         "vision（base_url=%s，model=%s，api_key=%s），"
         "asr（base_url=%s，model=%s，api_key=%s），"
@@ -782,6 +801,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.body_fill_color,
         app_config.chat_window_width,
         app_config.chat_window_height,
+        app_config.api_base_url_chat or "<跟随主链路>",
+        app_config.model_chat or "<跟随主链路>",
+        "已设置" if app_config.api_key_chat else "未设置",
         app_config.screenshot_compress_percent,
         app_config.api_base_url_vision or "<跟随主链路>",
         app_config.model_vision or "<自动发现>",
