@@ -221,7 +221,8 @@ class StreamOverlayCore:
         )
         self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
         # 遥控器自动化：周期截图 + 感知哈希变化检测 + 缓存命中（装填状态复用
-        # 遥控截图控制器）；提交走视觉链路但不隐藏窗口、不落 screenshot.db
+        # 遥控截图控制器）；提交走视觉链路但不隐藏窗口；API 成功落库
+        # screenshot.db 并回填持久化缓存，缓存命中（内存/数据库）零写库
         self._remote_automation = RemoteAutomationController(
             interval=self._config.remote_screenshot_interval,
             cache_size=self._config.remote_cache_size_count,
@@ -233,6 +234,8 @@ class StreamOverlayCore:
             suppress_frame=self._quick_menu.set_frame_suppressed,
             get_windows_hidden=lambda: self._remote_screenshot.user_hidden,
             set_windows_hidden=self._remote_screenshot.set_user_hidden,
+            persistent_lookup=self._lookup_persistent_cache,
+            persistent_put=self._put_persistent_cache,
         )
         self._remote_screenshot.attach_automation(self._remote_automation)
         self._quick_menu.attach_remote_automation(self._remote_automation)

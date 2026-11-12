@@ -716,13 +716,17 @@ class _StubStore:
 
 
 class _StubAutomation:
-    """RemoteAutomationController 替身：记录在途回执（签名, 译文）。"""
+    """RemoteAutomationController 替身：记录在途回执（签名, 译文）与溯源 id。"""
 
     def __init__(self) -> None:
         self.results: list[tuple[object, str | None]] = []
+        self.screenshot_ids: list[int | None] = []
 
-    def on_translation_result(self, signature: object, text: str | None) -> None:
+    def on_translation_result(
+        self, signature: object, text: str | None, screenshot_id: int | None = None
+    ) -> None:
         self.results.append((signature, text))
+        self.screenshot_ids.append(screenshot_id)
 
 
 class _AutoHost(ScreenshotFlowMixin):
@@ -1027,6 +1031,75 @@ def test_auto_store_missing_keeps_display():
     host._handle_remote_auto_done(_done_item())
     assert host.displayed == ["自动化译文\n"]
     assert host.titles == ["翻译完成"]
+
+
+# ---- 宿主持久化回调（开关短路 / 真实读写 / 回执透传 / 手动链路红线） ----------------
+
+
+def test_host_persistent_callbacks_short_circuit_and_passthrough(tmp_path):
+    """开关关闭恒未命中且零写入；开启后真实读写（每次读 config，热重载生效）。"""
+    from renpy_overlay.screenshot.store import open_store as open_real_store
+
+    store = open_real_store(str(tmp_path))
+    host = _AutoHost(store)
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=False, remote_cache_db_size_count=40000
+    )
+    sig = grid_signature(_gradient_image())
+    assert host._lookup_persistent_cache(sig) is None  # 关闭：恒未命中
+    host._put_persistent_cache(sig, "译文", 10, 20, None)  # 关闭：跳过写入
+    assert store.signature_cache_count() == 0
+    host._config.remote_cache_persist_enable = True  # 热重载：下次调用即生效
+    assert host._lookup_persistent_cache(sig) is None  # 空库未命中
+    host._put_persistent_cache(sig, "译文", 10, 20, None)
+    assert store.signature_cache_count() == 1
+    assert host._lookup_persistent_cache(sig) == "译文"
+    store.close()
+
+
+def test_host_persistent_lookup_tolerates_incompatible_store():
+    """store 缺少缓存接口（如旧替身）：异常吞噬按未命中处理，不波及主线程。"""
+    host = _AutoHost(_StubStore())
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=True, remote_cache_db_size_count=40000
+    )
+    assert host._lookup_persistent_cache(grid_signature(_gradient_image())) is None
+    host._put_persistent_cache(grid_signature(_gradient_image()), "译文", 1, 1, None)
+
+
+def test_auto_done_passes_record_id_to_controller(tmp_path):
+    """成功收尾链：落库 record_id 随回执透传控制器（持久化缓存溯源用）。"""
+    from renpy_overlay.screenshot.store import open_store as open_real_store
+
+    store = open_real_store(str(tmp_path))
+    host = _AutoHost(store)
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=True, remote_cache_db_size_count=40000
+    )
+    host._handle_remote_auto_done(_done_item())
+    assert host._remote_automation.screenshot_ids == [1]  # 首条插入记录 id
+    store.close()
+
+
+def test_manual_screenshot_path_never_touches_persistent_cache():
+    """范围红线：手动截图翻译链路源码不得引用持久化缓存（防将来误接线）。
+
+    手动单击与快捷键截图翻译的既有约定：不查缓存、始终调 API、成功不写
+    任何缓存——本断言从源码层锁定该边界（快捷键链路复用同一入口）。
+    """
+    import inspect
+
+    from renpy_overlay.stream.screenshot_flow import ScreenshotFlowMixin
+
+    for name in (
+        "request_screenshot_translation",
+        "_capture_restore_then",
+        "_screenshot_worker",
+        "_handle_screenshot_done",
+    ):
+        source = inspect.getsource(getattr(ScreenshotFlowMixin, name))
+        assert "persistent" not in source, f"{name} 不得触碰持久化缓存"
+
 
 
 def test_auto_worker_success_encodes_original_and_thumbnail(monkeypatch):
