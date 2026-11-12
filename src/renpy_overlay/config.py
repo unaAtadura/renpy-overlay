@@ -483,22 +483,33 @@ def _read_fullscreen_mode(raw: dict) -> str:
 
 
 def _read_window_style(raw: dict) -> int:
-    """窗口样式字段校验（仅 1/2）：类型不对或取值非法 → 回退默认 1。"""
+    """窗口样式字段校验（仅 1/2）：类型不对或取值非法 → 回退默认 1。
+
+    兼容整数、整值浮点（2.0）与字符串数字（"1"/"2"/"2.0"——设置窗口
+    枚举控件以字符串形式落盘的历史形态，实测写 "2" 曾被误判非法回退 1，
+    导致样式 2 永远无法生效）；bool 与其他值一律非法。"""
     value = raw.get("translate_window_style", DEFAULT_TRANSLATE_WINDOW_STYLE)
-    # bool 是 int 子类，True/False 不算合法数字；整值浮点（2.0）等价整数
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or value != int(value)
-        or int(value) not in (1, 2)
-    ):
+    # bool 是 int 子类，True/False 不算合法数字；其余统一转数值后判定
+    # （int/float 直接可用，字符串经 float() 解析——容忍前后空白与小数形态）
+    if isinstance(value, bool):
+        num = None
+    else:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            num = None
+    try:
+        legal = num is not None and int(num) == num and int(num) in (1, 2)
+    except (OverflowError, ValueError):  # inf/nan 等无法转 int 的浮点特例
+        legal = False
+    if not legal:
         logger.warning(
             "translate_window_style 非法（%r，仅支持 1/2），回退默认 %d",
             value,
             DEFAULT_TRANSLATE_WINDOW_STYLE,
         )
         return DEFAULT_TRANSLATE_WINDOW_STYLE
-    return int(value)
+    return int(num)
 
 
 def _read_color(raw: dict, key: str, default: str) -> str:

@@ -736,12 +736,17 @@ def test_translate_window_style_defaults_loaded(tmp_path):
 
 
 def test_translate_window_style_valid_values_loaded(tmp_path):
-    """合法值 2 生效；整值浮点（2.0）等价整数 2。"""
+    """合法值生效：整数 2、整值浮点 2.0、字符串 "2"（设置窗口枚举控件
+    以字符串落盘的历史形态，读取端需兼容）。"""
     target = tmp_path / "config.json"
     target.write_text(json.dumps({"translate_window_style": 2}), encoding="utf-8")
     assert config.load_config(target).translate_window_style == 2
     target.write_text(json.dumps({"translate_window_style": 2.0}), encoding="utf-8")
     assert config.load_config(target).translate_window_style == 2
+    target.write_text(json.dumps({"translate_window_style": "2"}), encoding="utf-8")
+    assert config.load_config(target).translate_window_style == 2
+    target.write_text(json.dumps({"translate_window_style": " 1.0 "}), encoding="utf-8")
+    assert config.load_config(target).translate_window_style == 1
     target.write_text(json.dumps({"translate_window_style": 1}), encoding="utf-8")
     assert config.load_config(target).translate_window_style == 1
 
@@ -749,7 +754,7 @@ def test_translate_window_style_valid_values_loaded(tmp_path):
 def test_translate_window_style_invalid_falls_back(tmp_path, caplog):
     """非整数 / 非 1/2 / bool 等非法值一律回退 1 并记警告日志。"""
     target = tmp_path / "config.json"
-    for bad in (0, 3, -1, 1.5, "2", True, False, None, [2]):
+    for bad in (0, 3, -1, 1.5, "3", "abc", "2px", True, False, None, [2]):
         target.write_text(json.dumps({"translate_window_style": bad}), encoding="utf-8")
         loaded = config.load_config(target)
         assert loaded.translate_window_style == 1, f"{bad!r} 应回退默认"
