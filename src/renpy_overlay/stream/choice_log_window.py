@@ -21,7 +21,9 @@
 径：角优先、对边/对角固定、最小 100×150；滚动条区域保持原生事件，把
 手内最靠上的窄带优先作北向拉伸，其余把手区域仍为移动窗口）。拉伸仅在
 未锁定时可用，锁定态不响应尺寸调整；尺寸不持久化，关闭再打开仍按配
-置默认尺寸（150×300）打开。
+置默认尺寸（150×300）打开。拉伸判定与几何换算的纯函数（edge_at /
+apply_resize_delta / RESIZE_EDGE_PX）上提至 :mod:`.geometry`，与流式
+双窗的八向拉伸共用同一事实源。
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from PyQt6.QtWidgets import QApplication, QFrame, QTextBrowser, QVBoxLayout, QWi
 from ..bound_window import ENTRY_BACKDROP_COLOR, ENTRY_BACKDROP_RADIUS
 from ..screenshot.window_visual import draw_edge_highlight, draw_grip_handles
 from .choice_log import ANCHOR_GAP, anchored_position, is_effect_parsed
+from .geometry import RESIZE_EDGE_PX, apply_resize_delta, edge_at
 from .scroll_logic import DRAG_SCROLL_INTERVAL_MS, body_drag_scroll_rate
 
 logger = logging.getLogger("renpy_overlay.stream_window")
@@ -48,9 +51,6 @@ HANDLE_HEIGHT = 14
 #: 或滚动内容）；双击的两次按击位移低于该值，与拖动互不误判
 DRAG_START_THRESHOLD_PX = 12
 
-#: 八向拉伸热区宽度（逻辑像素）：与拖动启动阈值同量级（参考实现为动态
-#: min(14, 短边×15%)；过窄会导致按压几乎必然落空热区——实测教训）
-RESIZE_EDGE_PX = 12
 #: 八向拉伸的最小尺寸下限（与 config 校验下限同口径，保证滚动条与内容可用）
 MIN_WINDOW_WIDTH = 100
 MIN_WINDOW_HEIGHT = 150
@@ -90,6 +90,7 @@ _COLOR_ACCENT = "#ADD8E6"
 _COLOR_PREDICTED = "#9AA0A6"
 _COLOR_MUTED = "#7A7F87"
 
+
 #: 上文预览的最大字符数（窄幅弹窗下防止首行过宽）
 _PROMPT_PREVIEW_CHARS = 20
 
@@ -113,86 +114,6 @@ def scroll_drag_rate(dy: float, line_h: float) -> float:
     完全一致。``line_h`` 取内容区字体行高（弹窗无固定行高概念）。
     """
     return body_drag_scroll_rate(dy, line_h)
-
-
-def edge_at(
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    handle_h: int = HANDLE_HEIGHT,
-    edge_px: int = RESIZE_EDGE_PX,
-    right_start: int | None = None,
-    right_end: int | None = None,
-) -> str | None:
-    """窗口本地坐标 → 八向拉伸边缘/角（None = 非热区；纯函数，离线测试用）。
-
-    - 角优先于边：两方向热区叠加判角（nw/ne/sw/se），否则退回单边
-      （n/s/w/e）；
-    - 北向热区（y < edge_px）位于把手区内最靠上的若干像素，优先于「把手
-      移动窗口」——其余把手区域（y ∈ [edge_px, handle_h)）返回 None，
-      按下后仍为移动窗口语义；
-    - 东向热区带由 ``right_start``（左界）/``right_end``（右开界）给出：
-      滚动条可见时调用方传「宽度 − 滚动条宽 − edge_px」与「宽度 − 滚动
-      条宽」，滚动条区域不参与拉伸（保持原生事件），滚动条隐藏时右带为
-      最右 ``edge_px`` 窄带；
-    - 锁定与否由调用方分流，本函数不做锁定判定。
-    """
-    rs = width - edge_px if right_start is None else right_start
-    re = width if right_end is None else right_end
-    near_n = y < edge_px
-    near_s = y >= height - edge_px
-    near_w = x < edge_px
-    near_e = rs <= x < re
-    if near_n and near_w:
-        return "nw"
-    if near_n and near_e:
-        return "ne"
-    if near_s and near_w:
-        return "sw"
-    if near_s and near_e:
-        return "se"
-    if near_n:
-        return "n"
-    if near_s:
-        return "s"
-    if near_w:
-        return "w"
-    if near_e:
-        return "e"
-    return None
-
-
-def apply_resize_delta(
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    edge: str,
-    dx: int,
-    dy: int,
-    min_w: int = MIN_WINDOW_WIDTH,
-    min_h: int = MIN_WINDOW_HEIGHT,
-) -> tuple[int, int, int, int]:
-    """按边/角与拖动增量计算新 ``(x, y, w, h)``（纯函数，离线测试用）。
-
-    与截图窗口 ``_do_resize`` 同逻辑：拖动某条边只改变该方向尺寸、对边
-    固定；拖动角同时改两个方向、对角固定；涉及左/上方向时原点同步平移
-    （被拖边/角始终跟随鼠标）；新尺寸经 ``max(min, ...)`` 钳制，钳制时
-    原点补偿保证固定侧不动。
-    """
-    new_x, new_y, new_w, new_h = x, y, w, h
-    if "e" in edge:
-        new_w = max(min_w, w + dx)
-    if "s" in edge:
-        new_h = max(min_h, h + dy)
-    if "w" in edge:
-        new_w = max(min_w, w - dx)
-        new_x = x + w - new_w
-    if "n" in edge:
-        new_h = max(min_h, h - dy)
-        new_y = y + h - new_h
-    return new_x, new_y, new_w, new_h
 
 
 class _LogBrowser(QTextBrowser):
@@ -253,6 +174,8 @@ class _DragHandle(QWidget):
         super().__init__(owner)
         self.setFixedHeight(HANDLE_HEIGHT)
         self.setCursor(Qt.CursorShape.SizeAllCursor)
+        # 悬停（未按下）也接收 move：宿主据此切换边缘拉伸光标
+        self.setMouseTracking(True)
 
     def apply_lock(self, locked: bool) -> None:
         """锁定态光标切换：解锁 = 移动样式（SizeAll），锁定 = 可滚动手形。"""
@@ -400,14 +323,7 @@ class ChoiceLogWindow(QWidget):
         local = self.mapFromGlobal(global_pos)
         rs, re = self._resize_right_band()
         edge = edge_at(
-            local.x(),
-            local.y(),
-            self.width(),
-            self.height(),
-            HANDLE_HEIGHT,
-            RESIZE_EDGE_PX,
-            rs,
-            re,
+            local.x(), local.y(), self.width(), self.height(), RESIZE_EDGE_PX, rs, re
         )
         if should_begin_resize(self._locked, edge):
             self._begin_resize(edge, global_pos)
@@ -429,6 +345,8 @@ class ChoiceLogWindow(QWidget):
                     self._resize_edge,
                     delta.x(),
                     delta.y(),
+                    MIN_WINDOW_WIDTH,
+                    MIN_WINDOW_HEIGHT,
                 )
                 self.setGeometry(x, y, w, h)
             return
@@ -438,12 +356,9 @@ class ChoiceLogWindow(QWidget):
         if self._gesture == "scroll":
             self._update_scroll_drag(global_pos.y())
             return
-        # 悬停（或按下未超阈值）：同步边缘检测光标与高亮重绘——必须在启动
-        # 判定之前无条件执行，否则悬停（pending 为 None）时提前返回，边缘
-        # 光标永不变化（实测回归根因）
+        # 未启动手势：悬停同步边缘检测光标；按下点位移超过阈值才进入
+        # 移动/滚动（双击按击位移低，不会误启动）
         self._sync_hover_cursor(global_pos)
-        # 未启动手势：按下点位移超过阈值才进入移动/滚动（双击按击位移低，
-        # 不会误启动；真正拖动位移超阈值也不会被判成双击）
         if self._pending_press is None:
             return
         if exceeds_drag_threshold(
@@ -457,7 +372,6 @@ class ChoiceLogWindow(QWidget):
                 self._gesture = "move"
                 self.begin_window_drag(self._pending_press)
             return
-        self._sync_hover_cursor(global_pos)
 
     def on_release(self) -> None:
         """释放：结束进行中的手势；未启动的按下（双击的一半）直接清掉。"""
@@ -484,7 +398,6 @@ class ChoiceLogWindow(QWidget):
     def begin_window_drag(self, global_pos: QPoint) -> None:
         """移动窗口：记录抓取点并切移动光标（抓取点相对窗口位置保持不变）。"""
         self._drag_offset = global_pos - self.frameGeometry().topLeft()
-        self._drag_last_global = QPoint(global_pos)
         self._apply_drag_cursor(Qt.CursorShape.SizeAllCursor)
 
     def update_window_drag(self, global_pos: QPoint) -> None:
@@ -508,19 +421,13 @@ class ChoiceLogWindow(QWidget):
 
     def _sync_hover_cursor(self, global_pos: QPoint) -> None:
         """空闲悬停：未锁定按边缘/角显示对应拉伸光标，把手非边缘区为移动
-        样式、内部为箭头；锁定态全窗手形。光标与高亮变化才设置/重绘
-        （幂等省开销），任何状态都不出现 I 形文本光标。"""
+        样式、内部为箭头；锁定态全窗手形且无拉伸热区（edge 恒置 None）。
+        光标与高亮变化才设置/重绘（幂等省开销），任何状态都不出现 I 形
+        文本光标。"""
         local = self.mapFromGlobal(global_pos)
         rs, re = self._resize_right_band()
         edge = edge_at(
-            local.x(),
-            local.y(),
-            self.width(),
-            self.height(),
-            HANDLE_HEIGHT,
-            RESIZE_EDGE_PX,
-            rs,
-            re,
+            local.x(), local.y(), self.width(), self.height(), RESIZE_EDGE_PX, rs, re
         )
         if self._locked:
             edge = None  # 锁定态不可拉伸：不显示热区光标与高亮
@@ -541,13 +448,13 @@ class ChoiceLogWindow(QWidget):
             self.setCursor(cursor)
             self._browser.viewport().setCursor(cursor)
 
-    def _begin_scroll_drag(self, origin_y: float) -> None:
-        """锁定态滚动拖动：记按下基准并启动步进定时器（窗口保持不动）。"""
-        self._scroll_origin_y = float(origin_y)
-        self._scroll_rate = 0.0
-        self._apply_drag_cursor(Qt.CursorShape.ClosedHandCursor)
-        if not self._scroll_drag_timer.isActive():
-            self._scroll_drag_timer.start()
+    def _tick_scroll_drag(self) -> None:
+        """滚动步进：按档位速率增量推进滚动条（钳制由滚动条范围自负）。"""
+        if not self._locked or self._scroll_rate == 0.0:
+            self._scroll_drag_timer.stop()
+            return
+        bar = self._browser.verticalScrollBar()
+        bar.setValue(bar.value() + int(self._scroll_rate * DRAG_SCROLL_INTERVAL_MS / 1000.0))
 
     def _update_scroll_drag(self, current_y: float) -> None:
         """按当前纵坐标换算档位速率：防抖区停表，离开防抖区启动/提速。"""
@@ -560,13 +467,13 @@ class ChoiceLogWindow(QWidget):
         if not self._scroll_drag_timer.isActive():
             self._scroll_drag_timer.start()
 
-    def _tick_scroll_drag(self) -> None:
-        """滚动步进：按档位速率增量推进滚动条（钳制由滚动条范围自负）。"""
-        if not self._locked or self._scroll_rate == 0.0:
-            self._scroll_drag_timer.stop()
-            return
-        bar = self._browser.verticalScrollBar()
-        bar.setValue(bar.value() + int(self._scroll_rate * DRAG_SCROLL_INTERVAL_MS / 1000.0))
+    def _begin_scroll_drag(self, origin_y: float) -> None:
+        """锁定态滚动拖动：记按下基准并启动步进定时器（窗口保持不动）。"""
+        self._scroll_origin_y = float(origin_y)
+        self._scroll_rate = 0.0
+        self._apply_drag_cursor(Qt.CursorShape.ClosedHandCursor)
+        if not self._scroll_drag_timer.isActive():
+            self._scroll_drag_timer.start()
 
     def _set_locked(self, locked: bool) -> None:
         """切换锁定态：翻转状态、恢复空闲光标并**立即触发重绘**。

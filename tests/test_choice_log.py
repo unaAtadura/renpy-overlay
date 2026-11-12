@@ -22,6 +22,7 @@ from renpy_overlay.stream.choice_log_window import (
     scroll_drag_rate,
     shows_resize_hints,
 )
+from renpy_overlay.stream.geometry import apply_resize_delta, edge_at
 
 # ------------------------------------------------------------------ 摘要解析
 
@@ -262,10 +263,9 @@ def test_edge_at_corners_and_edges_table():
     """全区域判定表：角优先；四边；北向热区加宽后覆盖把手 y<12（其剩余
     2px 仍为移动窗口）、滚动条排除、内部均返回 None。模拟宽 12px 的滚动
     条：东向热区带 = [132, 138)。"""
-    from renpy_overlay.stream.choice_log_window import edge_at
 
     def at(x, y):
-        return edge_at(x, y, 150, 300, 14, RESIZE_EDGE_PX, 132, 138)
+        return edge_at(x, y, 150, 300, RESIZE_EDGE_PX, 132, 138)
 
     assert at(2, 2) == "nw"
     assert at(133, 2) == "ne"
@@ -292,22 +292,63 @@ def test_edge_at_default_right_band_when_scrollbar_hidden():
     assert edge_at(130, 150, 150, 300) is None  # 热区左界之外（150-12=138）
 
 
+def test_apply_resize_delta_outward_never_shrinks():
+    """回归：向外拖动结果必不小于起始尺寸。
+
+    历史缺陷：_drag_last 在 motion 中逐帧重写，帧间增量与冻结基准混用，
+    导致每帧输出只在基准附近抖动、向外拖动永不放大（110053.log 实测
+    n 拖 5 秒仅变动 4px）。纯函数口径：基准 + 累计位移下，外向拖动的
+    对应维度必须 ≥ 起始尺寸。
+    """
+    from renpy_overlay.stream.geometry import apply_resize_delta
+
+    x, y, w, h = 100, 100, 800, 300
+    min_w, min_h = 240, 154
+    assert apply_resize_delta(x, y, w, h, "e", 50, 0, min_w, min_h)[2] >= w
+    assert apply_resize_delta(x, y, w, h, "w", -50, 0, min_w, min_h)[2] >= w
+    assert apply_resize_delta(x, y, w, h, "s", 0, 50, min_w, min_h)[3] >= h
+    assert apply_resize_delta(x, y, w, h, "n", 0, -50, min_w, min_h)[3] >= h
+    for edge in ("ne", "nw", "se", "sw"):
+        dx = 50 if "e" in edge else -50
+        dy = 50 if "s" in edge else -50
+        _, _, new_w, new_h = apply_resize_delta(x, y, w, h, edge, dx, dy, min_w, min_h)
+        assert new_w >= w and new_h >= h, f"{edge} 向外拖动不应缩小"
+
+
+def test_finish_resize_dims_zero_delta_and_last_frame_parity():
+    """拉伸收尾写回：零位移 press→release 尺寸不变；写回尺寸等于最后一帧
+    apply_resize_delta 输出（121725.log 回归：body rect 高已不含标题带，
+    旧实现再减 title_h+gap 导致每次手势固定少 74）。"""
+    from renpy_overlay.stream.geometry import (
+        apply_resize_delta,
+        finish_resize_dims,
+    )
+
+    title_h, gap = 72, 2
+    # 零位移：整体基准 1760x274 → apply 输出不变 → body 高 200 → 收尾写回 200
+    _, _, _, total_h = apply_resize_delta(562, 964, 1760, 274, "n", 0, 0, 240, 154)
+    assert finish_resize_dims(1760, total_h - title_h - gap, 240) == (1760, 200)
+    # 终态=最后帧输出：e 向拖 +206 → 整体 1966x274 → body 200 → 写回 (1966, 200)
+    _, _, w_out, h_out = apply_resize_delta(562, 964, 1760, 274, "e", 206, 0, 240, 154)
+    assert finish_resize_dims(w_out, h_out - title_h - gap, 240) == (1966, 200)
+    # 宽度下限钳制生效（正文宽 = 总宽，不低于 MIN_STREAM_WIDTH）
+    assert finish_resize_dims(100, 200, 240) == (240, 200)
+
+
 def test_apply_resize_delta_edges_corners_and_min_clamp():
     """八方向几何换算：对边/对角固定、左上方向原点平移、最小尺寸钳制时
-    原点补偿保证固定侧不动。"""
-    from renpy_overlay.stream.choice_log_window import apply_resize_delta
-
+    原点补偿保证固定侧不动（弹窗口径 min 100×150）。"""
     x, y, w, h = 100, 200, 150, 300
-    assert apply_resize_delta(x, y, w, h, "e", 20, 0) == (100, 200, 170, 300)
-    assert apply_resize_delta(x, y, w, h, "e", -60, 0) == (100, 200, 100, 300)  # 钳 min_w=100
-    assert apply_resize_delta(x, y, w, h, "w", 30, 0) == (130, 200, 120, 300)
-    assert apply_resize_delta(x, y, w, h, "w", -30, 0) == (70, 200, 180, 300)
-    assert apply_resize_delta(x, y, w, h, "s", 0, 40) == (100, 200, 150, 340)
-    assert apply_resize_delta(x, y, w, h, "n", 0, 30) == (100, 230, 150, 270)
-    assert apply_resize_delta(x, y, w, h, "n", 0, -50) == (100, 150, 150, 350)
-    assert apply_resize_delta(x, y, w, h, "ne", 20, 30) == (100, 230, 170, 270)
-    assert apply_resize_delta(x, y, w, h, "sw", 30, 40) == (130, 200, 120, 340)
-    assert apply_resize_delta(x, y, w, h, "se", -60, -80) == (100, 200, 100, 220)
+    assert apply_resize_delta(x, y, w, h, "e", 20, 0, 100, 150) == (100, 200, 170, 300)
+    assert apply_resize_delta(x, y, w, h, "e", -60, 0, 100, 150) == (100, 200, 100, 300)  # 钳 min_w=100
+    assert apply_resize_delta(x, y, w, h, "w", 30, 0, 100, 150) == (130, 200, 120, 300)
+    assert apply_resize_delta(x, y, w, h, "w", -30, 0, 100, 150) == (70, 200, 180, 300)
+    assert apply_resize_delta(x, y, w, h, "s", 0, 40, 100, 150) == (100, 200, 150, 340)
+    assert apply_resize_delta(x, y, w, h, "n", 0, 30, 100, 150) == (100, 230, 150, 270)
+    assert apply_resize_delta(x, y, w, h, "n", 0, -50, 100, 150) == (100, 150, 150, 350)
+    assert apply_resize_delta(x, y, w, h, "ne", 20, 30, 100, 150) == (100, 230, 170, 270)
+    assert apply_resize_delta(x, y, w, h, "sw", 30, 40, 100, 150) == (130, 200, 120, 340)
+    assert apply_resize_delta(x, y, w, h, "se", -60, -80, 100, 150) == (100, 200, 100, 220)
 
 
 def test_should_begin_resize_locked_guard():

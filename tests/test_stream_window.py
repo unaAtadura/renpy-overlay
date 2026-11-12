@@ -431,3 +431,36 @@ def test_plan_stream_replace_shrink():
 
 def test_plan_stream_replace_identical_text_is_noop():
     assert plan_stream_replace("相同", 2, "相同") == (0, "")
+
+
+# ------------------------------------------------------ 双窗八向拉伸边过滤
+
+
+def test_window_resize_edge_title_excludes_south():
+    """标题窗下缘贴正文窗：南向（s/se/sw）被过滤，其余边/角保留。"""
+    from renpy_overlay.stream.geometry import window_resize_edge
+
+    assert window_resize_edge("n", "title") == "n"
+    assert window_resize_edge("ne", "title") == "ne"
+    assert window_resize_edge("nw", "title") == "nw"
+    assert window_resize_edge("e", "title") == "e"
+    assert window_resize_edge("w", "title") == "w"
+    assert window_resize_edge("s", "title") is None
+    assert window_resize_edge("se", "title") is None
+    assert window_resize_edge("sw", "title") is None
+    assert window_resize_edge(None, "title") is None
+
+
+def test_window_resize_edge_body_excludes_north():
+    """正文窗上缘贴标题窗：北向（n/ne/nw）被过滤，其余边/角保留。"""
+    from renpy_overlay.stream.geometry import window_resize_edge
+
+    assert window_resize_edge("s", "body") == "s"
+    assert window_resize_edge("se", "body") == "se"
+    assert window_resize_edge("sw", "body") == "sw"
+    assert window_resize_edge("e", "body") == "e"
+    assert window_resize_edge("w", "body") == "w"
+    assert window_resize_edge("n", "body") is None
+    assert window_resize_edge("ne", "body") is None
+    assert window_resize_edge("nw", "body") is None
+    assert window_resize_edge(None, "body") is None

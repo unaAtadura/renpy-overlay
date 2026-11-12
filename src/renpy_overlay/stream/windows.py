@@ -20,6 +20,8 @@ from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter
 from PyQt6.QtWidgets import QWidget
 
 from ..bound_window import BOUND_GAP, ENTRY_GAP, TitleEntryStrip, dispatch_action
+from ..screenshot.window_visual import draw_edge_highlight
+from .geometry import RESIZE_EDGE_PX, resize_band_rects
 from .scroll_logic import (
     DRAG_SCROLL_INTERVAL_MS,
     body_drag_scroll_rate,
@@ -74,6 +76,9 @@ class _StreamWindowBase(QWidget):
         self._font = font
         self._host = host  # StreamOverlayWindow：业务事件的唯一处理者
         self._font_metrics = QFontMetricsF(font)
+        self._hover_edge: str | None = None  # 悬停命中的拉伸边/角（八向拉伸提示）
+        # 鼠标追踪：未按下（悬停）也接收 move，供宿主做边缘检测与光标切换
+        self.setMouseTracking(True)
         # 文字填充色（config.body_fill_color）：paintEvent 每帧现取，
         # 宿主热重载时经 set_fill_color 更新（无状态风险，无需重启）
         self._fill_color = QColor(fill_color)
@@ -120,6 +125,32 @@ class _StreamWindowBase(QWidget):
         """右键（标题/正文文字处）：转发宿主弹快捷菜单（创建/销毁截图窗等）。"""
         self._host.on_window_context_menu(self, event)
         event.accept()
+
+    # ---- 八向拉伸提示（未锁定；interaction 驱动） ---------------------------
+
+    def set_hover_highlight(self, edge: str | None) -> None:
+        """悬停边缘高亮（interaction 驱动；None = 清除）；锁定态不显示。"""
+        edge = None if getattr(self._host, "_locked", False) else edge
+        if edge != self._hover_edge:
+            self._hover_edge = edge
+            self.update()
+
+    def paint_hover_highlight(self, painter: QPainter) -> None:
+        """绘制悬停边缘亮白反馈线（八向拉伸提示）；锁定态不绘制。"""
+        if self._hover_edge is None or getattr(self._host, "_locked", False):
+            return
+        draw_edge_highlight(painter, self.rect(), self._hover_edge)
+
+    def paint_resize_band(self, painter: QPainter) -> None:
+        """绘制四向低 alpha 可命中条带（未锁定；分层窗口 alpha=0 像素命中
+        穿透——边缘热区必须有绘制像素才能接收鼠标事件）。锁定态不绘制。"""
+        if getattr(self._host, "_locked", False):
+            return
+        color = QColor(173, 216, 230, 28)  # #ADD8E6 低 alpha（可命中且不喧宾）
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        for x, y, w, h in resize_band_rects(self.width(), self.height(), RESIZE_EDGE_PX):
+            painter.drawRect(x, y, w, h)
 
 
 class TitleWindow(_StreamWindowBase):
@@ -280,6 +311,8 @@ class TitleWindow(_StreamWindowBase):
             entry_y = int(center_y - hot / 2.0)
             self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
             self._entry_strip.paint(painter, entry_x, entry_y)
+        # 八向拉伸提示：悬停边缘亮白反馈线（未锁定；锁定态不绘制）
+        self.paint_hover_highlight(painter)
 
 
 class _Glyph:
@@ -362,8 +395,8 @@ class BodyWindow(_StreamWindowBase):
         """设置显示锚点并恢复跟随（宿主在实时识别开启/关闭时切换）。
 
         ``"start"``：固定显示第一行（默认）；``"tail"``：跟随内容末尾
-        （倒数第 2 个字符始终可见）。切换即重新进入跟随态，滚动目标由
-        下帧按新锚点收敛。
+        （实时语音识别：倒数第 2 个字符始终可见，与语音同步显示）。
+        切换即重新进入跟随态，滚动目标由下帧按新锚点收敛。
         """
         self._anchor = "tail" if anchor == "tail" else "start"
         self._follow = True
@@ -466,6 +499,9 @@ class BodyWindow(_StreamWindowBase):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # 八向拉伸提示：悬停边缘亮白反馈线（未锁定；锁定态不绘制）。画在滚
+        # 动变换之前——高亮线属窗口坐标，不随内容滚动平移
+        self.paint_hover_highlight(painter)
 
         # —— 滚动：start 锚点 = 固定显示第一行；tail 锚点 = 跟随内容末尾；
         # 滚轮回看时停在用户翻到的位置 ——

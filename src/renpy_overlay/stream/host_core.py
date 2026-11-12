@@ -137,6 +137,12 @@ class StreamOverlayCore:
         self._visible = False  # 首次定位成功后才显示，避免旧位置闪烁
         self._locked = False
         self._dragging = False
+        self._resizing = False  # 八向拉伸进行中（未锁定；拉伸期间跟随短路）
+        self._resize_edge: str | None = None
+        self._drag_last = (0, 0)  # 拉伸增量基准（上一帧鼠标物理坐标）
+        self._resize_min = (0.0, 0.0)  # 拉伸最小尺寸（物理像素，按下时计算）
+        self._resize_hover_state = None  # 悬停观测去重键（窗口角色 + 命中边）
+        self._resize_debug_last = 0.0  # 拉伸观测 DEBUG 的上次输出时刻（节流）
         self._drag_grab = (0, 0)
         self._drag_size = (width, height)
         self._drag_origin = (0, 0)

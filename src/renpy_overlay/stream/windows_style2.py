@@ -6,13 +6,14 @@
 
 - **视觉**（需求 future_流式输出窗口_窗口样式，取值沿用参考项目
   screen_translaor_4.0 的已验证方案）：整窗半透明黑色圆角背景（替代逐行
-  蒙版条带）、白色文字、无蓝色外边框、无缩放手柄/边缘高亮/尺寸标签、
-  无发音按钮、不支持拖拽改变窗口大小；
+  蒙版条带）、白色文字、无蓝色外边框、无发音按钮；
 - **文本**：无打字机逐字特效与逐字出现动画，整段内容立即排版上屏；
   普通翻译固定显示第一行（start 锚点），实时语音识别保留 tail 锚点
   （已确认决议：实时识别体验与 style=1 一致）；
 - **交互**：全部继承 style=1（拖拽移动/双击锁定解锁/单击翻译/滚轮回看/
-  锁定态拖拽滚动/右键快捷菜单/标题窗入口条图标），仅重写视觉与上屏方式；
+  锁定态拖拽滚动/右键快捷菜单/标题窗入口条图标/**八向拉伸与悬停边缘
+  高亮**——拉伸状态机与几何换算在 interaction/geometry，悬停高亮经
+  ``paint_hover_highlight`` 绘制），仅重写视觉与上屏方式；
 - **配置复用**：窗口尺寸/字号/行距/标题字号/间距沿用 ``stream_window_*``
   六键，不新增重复语义配置项。
 """
@@ -57,6 +58,9 @@ class Style2TitleWindow(TitleWindow):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         _draw_style2_backdrop(painter, self)
+        # 八向拉伸提示：悬停边缘亮白反馈线（interaction 驱动；锁定态不绘制）。
+        # 画在滚动落位之前——高亮线属窗口坐标，不随内容滚动平移。
+        self.paint_hover_highlight(painter)
         if not self._layout:
             return
         fm = self.fm
@@ -119,6 +123,8 @@ class Style2BodyWindow(BodyWindow):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         _draw_style2_backdrop(painter, self)
+        # 八向拉伸提示：悬停边缘亮白反馈线（窗口坐标，画在滚动平移之前）
+        self.paint_hover_highlight(painter)
         # 滚动：沿用 body_scroll_target 纯函数收敛目标；style=2 无平滑
         # 插值，直接落位（与参考项目 QScrollArea 的即时滚动观感一致）。
         # start 锚点固定显示第一行（普通翻译），tail 锚点跟随末尾（实时

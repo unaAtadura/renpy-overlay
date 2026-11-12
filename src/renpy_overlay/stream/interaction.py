@@ -16,17 +16,36 @@ from __future__ import annotations
 import logging
 import time
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QWidget
 
 from .. import win32api
+from .choice_log_window import CURSOR_BY_EDGE
 from .constants import CLICK_MOVE_TOLERANCE, CLICK_SUPPRESS_SECONDS
-from .geometry import pair_offset_from_body
+from .geometry import (
+    MIN_STREAM_HEIGHT,
+    MIN_STREAM_WIDTH,
+    apply_resize_delta,
+    edge_at,
+    finish_resize_dims,
+    pair_layout,
+    pair_offset_from_body,
+    window_resize_edge,
+)
 
 logger = logging.getLogger("renpy_overlay.stream_window")
 
 
 class MouseInteractionMixin:
-    """窗口拖动、锁定态拖拽滚动喂入、单双击判定与右键菜单转发。"""
+    """窗口拖动、锁定态拖拽滚动喂入、八向拉伸、单双击判定与右键菜单转发。
+
+    八向拉伸（未锁定专属）：按下落在任一窗的边缘/角热区（6px → 12px）
+    即进入拉伸手势——两窗整体几何按边/角增量调整（标题窗管北向/上角、
+    正文窗管南向/下角、东西两边两窗皆可拖，总宽同步），跟随循环经
+    ``_dragging`` 短路不干扰；结束把新尺寸写回宿主运行时尺寸（跟随以
+    此重摆，不回写 config）并按拖动移动同款语义记录相对偏移。锁定态不
+    响应拉伸（仅拖拽滚动/无边缘提示）。
+    """
 
     # ------------------------------------------------------------ 鼠标拖动
 
@@ -36,10 +55,54 @@ class MouseInteractionMixin:
         return int(point.x()), int(point.y())
 
     def on_window_press(self, window: QWidget, event) -> None:
-        """左键按下：记录点击候选；未锁定时开始整体拖动（两窗联动）。"""
+        """左键按下：未锁定先判边缘/角热区（命中 → 八向拉伸）；否则记录
+        点击候选并开始整体拖动（两窗联动）。"""
         if self._closed:
             return
         pos = self._physical_mouse(window, event)
+        if not self._locked:
+            local = event.position().toPoint()
+            edge = edge_at(local.x(), local.y(), window.width(), window.height())
+            edge = window_resize_edge(
+                edge, "title" if window is self._title_window else "body"
+            )
+            if edge is not None:
+                # 拉伸激活：置 _dragging 短路跟随循环（200ms tick 会按配置
+                # 尺寸重摆两窗，会把拉伸结果覆盖）。
+                # 拉伸基准必须取「整体物理矩形」（标题窗左上 + 正文窗右下
+                # 合成）——正文窗矩形不含标题带，用它当整体基准会让北/上向
+                # 拉伸首帧整体高度塌缩一个标题带。
+                # 坐标系说明：window_rect/move_window/compute_geometry 同处
+                # win32 物理像素体系，增量直接用物理鼠标坐标相减——不引入
+                # dpr 换算（实测多除一次 dpr 会让窗口尺寸每次拉伸减半）。
+                title_rect = win32api.window_rect(self._title_hwnd)
+                body_rect = win32api.window_rect(self._body_hwnd)
+                left = min(title_rect[0], body_rect[0])
+                top = min(title_rect[1], body_rect[1])
+                right = max(title_rect[2], body_rect[2])
+                bottom = max(title_rect[3], body_rect[3])
+                self._dragging = True
+                self._resizing = True
+                self._resize_edge = edge
+                self._drag_last = (pos[0], pos[1])
+                self._drag_origin = (left, top)
+                self._drag_size = (max(1, right - left), max(1, bottom - top))
+                # 最小尺寸钳制与 compute/move_window 同体系（win32 物理像素）
+                self._resize_min = (
+                    MIN_STREAM_WIDTH,
+                    self._title_h + self._title_gap + MIN_STREAM_HEIGHT,
+                )
+                logger.info("开始拉伸流式悬浮窗：%s 边/角", edge)
+                return
+            # 观测点（DEBUG）：排查「边缘按下去无拉伸」时打开——记录热区判
+            # 定的输入与结果（本地坐标/角色/命中边），未命中即落入整体拖动
+            logger.debug(
+                "拉伸热区判定未命中：role=%s local=(%d,%d) edge=%r → 整体拖动",
+                "title" if window is self._title_window else "body",
+                local.x(),
+                local.y(),
+                edge,
+            )
         self._press_pos = pos
         if self._locked:
             if window is self._body_window:
@@ -68,7 +131,75 @@ class MouseInteractionMixin:
             # 锁定态拖拽滚动进行中：纵坐标喂给正文窗更新速度档位
             self._body_window.update_drag_scroll(event.position().y())
             return
+        if self._resizing:
+            # 八向拉伸：以按下时的整体物理几何为基准，叠加「自按下起的累计
+            # 位移」换算（每帧重算，钳制含最小尺寸）。
+            # _drag_last 保持 press 时的坐标不更新——若每帧重写 _drag_last，
+            # delta 退化为帧间增量，与冻结基准混用后每帧输出只在基准附近
+            # 抖动（实测「向外拉不放大」根因）。
+            pos = self._physical_mouse(window, event)
+            x, y, w, h = apply_resize_delta(
+                self._drag_origin[0],
+                self._drag_origin[1],
+                self._drag_size[0],
+                self._drag_size[1],
+                self._resize_edge,
+                pos[0] - self._drag_last[0],
+                pos[1] - self._drag_last[1],
+                self._resize_min[0],
+                self._resize_min[1],
+            )
+            title_rect, body_rect = pair_layout((x, y, w, h), self._title_h, self._title_gap)
+            # 观测点（DEBUG，约 200ms 节流）：定位「越拉越小/几何未生效」——
+            # 对比输出几何与窗口实际尺寸即可区分「换算/基准缺陷」与「move 失败」
+            now = time.time()
+            if now - self._resize_debug_last >= 0.2:
+                self._resize_debug_last = now
+                logger.debug(
+                    "拉伸中：edge=%s 输出=(%d,%d,%d,%d) min=(%d,%d) 基准=(%d,%d,%d,%d)",
+                    self._resize_edge,
+                    x,
+                    y,
+                    w,
+                    h,
+                    MIN_STREAM_WIDTH,
+                    self._title_h + self._title_gap + MIN_STREAM_HEIGHT,
+                    self._drag_origin[0],
+                    self._drag_origin[1],
+                    self._drag_size[0],
+                    self._drag_size[1],
+                )
+            try:
+                win32api.move_window(self._title_hwnd, *title_rect, topmost=True)
+                win32api.move_window(self._body_hwnd, *body_rect, topmost=True)
+            except Exception as exc:  # pragma: no cover - 窗口在拉伸中销毁
+                # 观测点（WARNING）：move 失败 = 几何未生效的静默盲区，必须留痕
+                logger.warning("拉伸 move_window 失败：%r", exc)
+                self._dragging = False
+                self._resizing = False
+            return
         if not self._dragging:
+            # 空闲悬停（未按下）：边缘/角热区切换拉伸光标与边缘高亮（仅未
+            # 锁定；锁定态不可拉伸，保持默认箭头）。状态变化才打 DEBUG 观测
+            # 日志（进入/离开热区各一条，不刷屏）
+            if not self._locked:
+                local = event.position().toPoint()
+                edge = edge_at(local.x(), local.y(), window.width(), window.height())
+                edge = window_resize_edge(
+                    edge, "title" if window is self._title_window else "body"
+                )
+                window.setCursor(CURSOR_BY_EDGE.get(edge, Qt.CursorShape.ArrowCursor))
+                window.set_hover_highlight(edge)
+                state = (window is self._title_window, edge)
+                if state != self._resize_hover_state:
+                    self._resize_hover_state = state
+                    logger.debug(
+                        "拉伸悬停：window=%s local=(%d,%d) edge=%r",
+                        "title" if window is self._title_window else "body",
+                        local.x(),
+                        local.y(),
+                        edge,
+                    )
             return
         pos = self._physical_mouse(window, event)
         body_x = pos[0] - self._drag_grab[0]
@@ -99,6 +230,8 @@ class MouseInteractionMixin:
         if self._closed:
             return
         self._body_window.end_drag_scroll()  # 未在拖拽滚动时为无害调用
+        if self._resizing:
+            self._finish_resize()
         if self._dragging:
             self._finish_drag()
         press_pos = self._press_pos
@@ -155,6 +288,37 @@ class MouseInteractionMixin:
             offset[1],
         )
 
+    def _finish_resize(self) -> None:
+        """结束拉伸：新尺寸写回宿主运行时尺寸（跟随循环以此重摆两窗，
+        被游戏窗口约束的钳制仍会在后续 tick 生效；不回写 config，重启恢复
+        配置默认），并按拖动移动同款语义记录相对偏移（涉及西/北方向时原
+        点已平移，位置与尺寸一并保持）。
+
+        坐标系：window_rect 与 move_window/compute_geometry 同为 win32 物理
+        像素体系——直接写回，**不得再除以 dpr**（多除会把物理值降为逻辑值，
+        而跟随重摆又以物理消费，实测窗口尺寸每次拉伸减半、单调递减）。
+        高度口径：读回的是正文窗矩形（**不含标题带**），正文高直接写回
+        self.height（跟随以 self.height + title_h + gap 还原总高）——不得
+        再减 title_h + gap（重复扣减会让每次手势固定少一个标题带高度）。
+        换算抽为纯函数 finish_resize_dims 便于离线单测。"""
+        self._resizing = False
+        self._resize_edge = None
+        try:
+            rect = win32api.window_rect(self._body_hwnd)
+        except Exception:  # pragma: no cover - 窗口已销毁
+            self._dragging = False
+            return
+        self.width, self.height = finish_resize_dims(
+            rect[2] - rect[0], rect[3] - rect[1], MIN_STREAM_WIDTH
+        )
+        logger.info(
+            "拉伸结束：整体尺寸调整为 %dx%d 逻辑像素（不持久化，重启恢复配置默认）",
+            self.width,
+            self.height + self._title_h + self._title_gap,
+        )
+        self._dragging = False
+        self._finish_drag()  # 记相对偏移（西/北方向拉伸平移过原点，位置需保持）
+
     # ------------------------------------------------------------ 双击锁定与单击翻译
 
     def on_window_double_click(self, window: QWidget, event) -> None:
@@ -166,12 +330,22 @@ class MouseInteractionMixin:
         if self._dragging:
             # 双击的第二次按下可能顺带开了拖动，直接取消，避免它的 release 产生副作用
             self._dragging = False
+        # 双击的第二次按下若落在拉伸热区也会顺带激活拉伸，同样取消（避免
+        # 它的 release 产生尺寸副作用）；锁定切换后边缘不再响应拉伸
+        self._resizing = False
+        self._resize_edge = None
         self._abort_translation("双击")
         self._abort_song_recognition("双击")
         self._toggle_lock()
 
     def _toggle_lock(self) -> None:
         self._locked = not self._locked
+        # 锁定态不可拉伸：清两窗的悬停高亮与拉伸光标（解锁恢复时由悬停
+        # 重新点亮）；进行中的拉伸手势已被 on_window_double_click 取消
+        self._body_window.set_hover_highlight(None)
+        self._title_window.set_hover_highlight(None)
+        self._body_window.setCursor(Qt.CursorShape.ArrowCursor)
+        self._title_window.setCursor(Qt.CursorShape.ArrowCursor)
         if self._locked:
             self._lock_started_at = time.time()
             if self._auto_translate_on:
