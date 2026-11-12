@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from renpy_overlay import cli
 from renpy_overlay.cli import Session
 from renpy_overlay.discovery import Candidate
 
 
-def _make_session() -> Session:
-    args = SimpleNamespace(timeout=15.0, port=0, no_overlay=False)
+def _make_session(idle_exit: float = 2.0) -> Session:
+    args = SimpleNamespace(timeout=15.0, port=0, no_overlay=False, idle_exit=idle_exit)
     return Session(args, Candidate(pid=0, name="stub"))
 
 
@@ -26,6 +27,10 @@ class _FakeOverlay:
         self.hints: list[str] = []
         self.injected_calls = 0
         self.choices: list[dict] = []
+        self.request_close_calls = 0
+
+    def request_close(self) -> None:
+        self.request_close_calls += 1
 
     def push_say(self, who, what, source="", ts=None) -> None:
         self.pushed.append((who, what, source, ts))
@@ -153,3 +158,74 @@ def test_hooks_after_overlay_direct_and_unconfirmed_no_replay():
     session2.overlay = overlay2
     session2._flush_injected()  # 从未确认：不得补发（跳过注入模式同口径）
     assert overlay2.injected_calls == 0
+
+
+# ---- 退出时机（idle_exit 语义与 _request_stop 幂等） ------------------------
+
+
+class _FakeStopEvent:
+    """threading.Event 替身：wait 按脚本逐次返回，避免真实轮询等待。"""
+
+    def __init__(self, script: list[bool]) -> None:
+        self._script = list(script)
+        self._set = False
+
+    def is_set(self) -> bool:
+        return self._set
+
+    def set(self) -> None:
+        self._set = True
+
+    def wait(self, timeout=None) -> bool:
+        if self._script:
+            return self._script.pop(0)
+        return self._set
+
+
+def _monitor_session(idle_exit: float) -> Session:
+    session = _make_session(idle_exit=idle_exit)
+    session.overlay = _FakeOverlay()
+    return session
+
+
+def test_monitor_loop_zero_idle_exit_stops_immediately(monkeypatch):
+    """idle_exit=0：检测到进程退出的当下即 _request_stop，不再多等一轮轮询。"""
+    monkeypatch.setattr(cli.psutil, "pid_exists", lambda pid: False)
+    session = _monitor_session(idle_exit=0.0)
+    session._stop = _FakeStopEvent([False])  # 首次进入循环体即命中退出路径
+    session._monitor_loop()
+    assert session._stop.is_set()
+    assert session.overlay.request_close_calls == 1
+
+
+def test_monitor_loop_positive_idle_exit_waits_then_stops(monkeypatch):
+    """idle_exit>0：保留「发现 → 计时 → 等满 idle_exit 再退」的原路径。"""
+    monkeypatch.setattr(cli.psutil, "pid_exists", lambda pid: False)
+    clock = iter([1000.0, 1002.5])  # 发现时刻与判定时刻，间隔 2.5s >= idle_exit
+    monkeypatch.setattr(cli.time, "time", lambda: next(clock))
+    session = _monitor_session(idle_exit=2.0)
+    session._stop = _FakeStopEvent([False, False])
+    session._monitor_loop()
+    assert session._stop.is_set()
+    assert session.overlay.request_close_calls == 1
+
+
+def test_monitor_loop_positive_idle_exit_not_due_keeps_waiting(monkeypatch):
+    """idle_exit>0：等待未满时不退出（证明 0 的「立即」不是轮询周期的巧合）。"""
+    monkeypatch.setattr(cli.psutil, "pid_exists", lambda pid: False)
+    clock = iter([1000.0, 1001.0])  # 间隔 1.0s < idle_exit=2.0
+    monkeypatch.setattr(cli.time, "time", lambda: next(clock))
+    session = _monitor_session(idle_exit=2.0)
+    session._stop = _FakeStopEvent([False, True])  # 第二次 wait 置位结束循环
+    session._monitor_loop()
+    assert not session._stop.is_set()
+
+
+def test_request_stop_is_idempotent():
+    """重复 _request_stop 不重复通知界面（幂等），任意时刻可安全触发。"""
+    session = _monitor_session(idle_exit=2.0)
+    session._request_stop()
+    session._request_stop()
+    session._request_stop()
+    assert session._stop.is_set()
+    assert session.overlay.request_close_calls == 1
