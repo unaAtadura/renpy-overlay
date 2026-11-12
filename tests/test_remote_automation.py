@@ -24,17 +24,28 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from renpy_overlay.screenshot.remote_automation import (
+    CACHE_PRUNE_CANDIDATE_FRACTION,
+    CACHE_PRUNE_WATERMARK_RATIO,
     MSG_NEED_HOTKEY_MODE,
     REMOTE_AUTO_OFF_TEXT,
     REMOTE_AUTO_ON_TEXT,
     REMOTE_HIDE_TEXT,
     REMOTE_SHOW_TEXT,
+    SIGNATURE_CACHE_HIT_RATIO,
+    SIGNATURE_CACHE_INFORMATIVE_SPREAD,
+    SIGNATURE_CACHE_PRESCREEN_TOLERANCE,
+    SIGNATURE_CACHE_QUERY_LIMIT,
     SIGNATURE_CHANGE_RATIO,
     SIGNATURE_SIZE,
     RemoteAutoCache,
     RemoteAutomationController,
+    bytes_to_signature,
     grid_signature,
+    region_means,
     signature_change_ratio,
+    signature_is_informative,
+    signature_to_bytes,
+    signatures_match_for_cache,
     signatures_similar,
 )
 from renpy_overlay.stream import screenshot_flow as flow_module
@@ -152,6 +163,86 @@ def test_signature_change_ratio_and_thresholds():
     # 8/512 = 1.56% ≥ 1.5% 判变阈值 → 变化；7/512 ≈ 1.37% → 无变化
     assert not signatures_similar(base, perturbed(8))
     assert signatures_similar(base, perturbed(7))
+
+
+# ---- 持久化缓存纯函数：命中判定 / 区均值预筛 / 信息量护栏 / 序列化 ------------------
+
+
+def test_signatures_match_for_cache_zero_tolerance():
+    """零超阈格判据：逐格差恰 8 命中、恰 9 不命中（与判变阈值完全解耦）。"""
+    base = tuple([100] * 512)
+    at_threshold = tuple(v + 8 for v in base)  # 全部格 |Δ|=8：不超阈
+    over_threshold = tuple(v + 9 for v in base)  # 全部格 |Δ|=9：全超阈
+    assert signatures_match_for_cache(base, at_threshold) is True
+    assert signatures_match_for_cache(base, over_threshold) is False
+    assert signatures_match_for_cache(base, base) is True
+    # 长度不一致保守不命中（与 signature_change_ratio 的 1.0 语义一致）
+    assert signatures_match_for_cache(base, base[:256]) is False
+
+
+def test_region_means_partition_order_and_uniform():
+    """分区顺序：上排四区（区 0-3）后下排四区（区 4-7）；恒色签名各区等于该色。"""
+    uniform = tuple([128] * 512)
+    assert region_means(uniform) == (128,) * 8
+    # 区 k = row*4 + col（row/col 为 8 格分块的行/列）；行主序存储下每行
+    # 前 8 格属同一区，跨 8 行共 64 格/区
+    segmented = tuple(
+        ((y // 8) * 4 + (x // 8)) * 10 for y in range(16) for x in range(32)
+    )
+    assert region_means(segmented) == tuple(k * 10 for k in range(8))
+
+
+def test_region_means_prescreen_is_lossless_for_matches():
+    """无损性正向：零超阈命中对的全部区均值差 ≤ 预筛阈值（不会被误排斥）。"""
+    rng = random.Random(2026)
+    for _ in range(32):
+        base = tuple(rng.randrange(0, 256) for _ in range(512))
+        near = tuple(
+            max(0, min(255, v + rng.randint(-8, 8))) for v in base
+        )
+        assert signatures_match_for_cache(base, near)
+        for a_mean, b_mean in zip(region_means(base), region_means(near), strict=True):
+            assert abs(a_mean - b_mean) <= SIGNATURE_CACHE_PRESCREEN_TOLERANCE
+
+
+def test_region_means_prescreen_excludes_distant_pairs():
+    """无损性逆否：区均值差超预筛阈值的对必然不命中（排除是安全的）。"""
+    blank = tuple([10] * 512)
+    bright = tuple([250] * 512)
+    for a_mean, b_mean in zip(region_means(blank), region_means(bright), strict=True):
+        assert abs(a_mean - b_mean) > SIGNATURE_CACHE_PRESCREEN_TOLERANCE
+    assert not signatures_match_for_cache(blank, bright)
+
+
+def test_signature_is_informative_boundaries():
+    """信息量护栏：极差恰阈值可写入、低一档拒写、恒色拒写、空签名拒写。"""
+    informative = tuple([100] * 256 + [100 + SIGNATURE_CACHE_INFORMATIVE_SPREAD] * 256)
+    barely_blank = tuple([100] * 256 + [100 + SIGNATURE_CACHE_INFORMATIVE_SPREAD - 1] * 256)
+    assert signature_is_informative(informative)
+    assert not signature_is_informative(barely_blank)
+    assert not signature_is_informative(tuple([128] * 512))
+    assert not signature_is_informative(())
+
+
+def test_signature_bytes_roundtrip():
+    """序列化往返无损：512 格签名 → bytes → 签名完全相等。"""
+    rng = random.Random(7)
+    signature = tuple(rng.randrange(0, 256) for _ in range(512))
+    payload = signature_to_bytes(signature)
+    assert len(payload) == 512
+    assert bytes_to_signature(payload) == signature
+
+
+def test_cache_hit_ratio_is_stricter_than_change_ratio():
+    """命中阈值（0.0）必须严格严于判变阈值（0.015）：缓存宁漏命中不误命中。"""
+    assert SIGNATURE_CACHE_HIT_RATIO < SIGNATURE_CHANGE_RATIO
+
+
+def test_cache_prune_constants_in_range():
+    """水位与冷端候选比例的取值约束：水位 0<ratio<1、候选 0<ratio<=1。"""
+    assert 0 < CACHE_PRUNE_WATERMARK_RATIO < 1
+    assert 0 < CACHE_PRUNE_CANDIDATE_FRACTION <= 1
+    assert SIGNATURE_CACHE_QUERY_LIMIT > 0
 
 
 # ---- RemoteAutoCache：循环队列语义 -------------------------------------------------

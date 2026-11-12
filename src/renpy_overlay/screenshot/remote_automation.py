@@ -95,6 +95,82 @@ def signatures_similar(a: Signature, b: Signature) -> bool:
     return signature_change_ratio(a, b) < SIGNATURE_CHANGE_RATIO
 
 
+# ---- 持久化缓存命中参数（feat/remote-cache-persist，与判变常量方向相反） --------
+
+#: 持久化缓存命中判定：超阈格占比必须 ≤ 此值（0 = 零超阈格，仅零差异才复用）。
+#: 与 :data:`SIGNATURE_CHANGE_RATIO`（判变灵敏度）方向相反：判变宁可误判变化
+#: 不漏变化，缓存宁可漏命中不误命中——误命中的代价是把错误译文上屏，漏命中
+#: 只多一次 vision API。实测依据：同画面/1px 平移超阈占比 0%（见
+#: :data:`SIGNATURE_CELL_THRESHOLD` 注释），零超阈格判据可行且稳妥。
+SIGNATURE_CACHE_HIT_RATIO = 0.0
+#: 信息量护栏：签名极差（max-min）低于该值视为空白/纯色画面（黑场转场、
+#: 过曝白屏、纯色载入页），拒绝写入持久化缓存——任何两个此类画面的网格
+#: 几乎全同值，是「量化碰撞」唯一可能批量发生的来源；正常游戏画面均值化
+#: 后极差通常 >50（UI/字幕自带黑白对比），16 不会误伤。
+SIGNATURE_CACHE_INFORMATIVE_SPREAD = 16
+#: 细比较候选上限：SQL 层区均值预筛后的幸存候选最多逐条细比 500 条（按
+#: updated_ts 最新优先），防低对比画面查询把数千候选全部送进 Python 层；
+#: 截断只会造成漏命中（走 API），是安全方向的退化。
+SIGNATURE_CACHE_QUERY_LIMIT = 500
+#: 区均值预筛阈值：8（格差阈值）+ 1（区均值 floor 取整裕量）。无损性：若全部
+#: 512 格 |Δ|≤8 则每区 64 格均值差 ≤8（均值不等式）；逆否成立——区均值差 >8
+#: 必存在格差 >8 必不命中，故仅排除不可能命中的候选。
+SIGNATURE_CACHE_PRESCREEN_TOLERANCE = 9
+#: 水位淘汰：缓存条数超过容量上限时一次性采样删除至上限的 95%（下轮写入再
+#: 触发自愈），避免逐条触发的高频全表扫描；单次淘汰量约容量的 5%。
+CACHE_PRUNE_WATERMARK_RATIO = 0.95
+#: 冷端候选比例：随机采样仅在按 updated_ts 最旧的该比例条目内进行——最新
+#: 条目结构性免疫误删，被命中刷新过的条目移出候选区（顺序重玩轨迹 100%
+#: 保护），冷区段仍被均匀稀释（消除 FIFO/LRU 的「整章归零」方向性缺陷）。
+CACHE_PRUNE_CANDIDATE_FRACTION = 0.5
+
+
+def region_means(signature: Signature) -> tuple[int, ...]:
+    """签名的 8 区均值（4x2 分区，每区 8x8=64 格均值，纯函数，离线可测）。
+
+    供持久化缓存的 SQL 层无损预筛：区均值差超过预筛阈值的候选不可能零
+    超阈命中（见 :data:`SIGNATURE_CACHE_PRESCREEN_TOLERANCE` 注释），直接
+    排除后仅幸存候选进入 Python 层细比较。
+    """
+    width, height = SIGNATURE_SIZE
+    cell_w, cell_h = width // 4, height // 2  # 8x8=64 格/区
+    means: list[int] = []
+    for row in range(2):
+        for col in range(4):
+            total = 0
+            for y in range(row * cell_h, (row + 1) * cell_h):
+                base = y * width + col * cell_w
+                total += sum(signature[base : base + cell_w])
+            means.append(total // (cell_w * cell_h))
+    return tuple(means)
+
+
+def signatures_match_for_cache(a: Signature, b: Signature) -> bool:
+    """持久化缓存命中判定：零超阈格才视为同一画面（纯函数）。
+
+    与 :func:`signatures_similar`（判变，阈值 0.015）分开定义，避免共用
+    阈值常量造成「判变灵敏度」与「复用保守度」意外耦合。
+    """
+    return signature_change_ratio(a, b) <= SIGNATURE_CACHE_HIT_RATIO
+
+
+def signature_is_informative(signature: Signature) -> bool:
+    """签名是否含足够明暗结构（非空白/纯色画面，纯函数，写入准入护栏）。"""
+    return bool(signature) and (
+        max(signature) - min(signature) >= SIGNATURE_CACHE_INFORMATIVE_SPREAD
+    )
+
+
+def signature_to_bytes(signature: Signature) -> bytes:
+    """签名序列化：逐格灰度（0-255）直接映射为 512 字节（无损，纯函数）。"""
+    return bytes(signature)
+
+
+def bytes_to_signature(data: bytes) -> Signature:
+    """签名反序列化：512 字节还原为逐格灰度元组（无损，纯函数）。"""
+    return tuple(data)
+
+
 class RemoteAutoCache:
     """自动化翻译的内存循环队列缓存：仅存（感知签名, 译文），命中移尾。
 
