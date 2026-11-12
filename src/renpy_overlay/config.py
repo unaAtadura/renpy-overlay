@@ -54,6 +54,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "api_key_asr_rt": "",              # 实时语音识别的 API Key（不回退其它链路，留空即不可用）
       "fullscreen_mode": "sdl",           # 视频剪辑全屏渲染路径：sdl=SDL 独立窗口（默认）/ qt=Qt 顶层回退
       "remote_screenshot_enable": true,   # 遥控截图开关（快捷键模式期间生成 A/B 触发/瞄准小圆窗）
+      "remote_screenshot_hide": false,    # 遥控截图初始隐藏（菜单初始「显示遥控器」，快捷键模式不自动显示 A/B）
       "remote_screenshot_interval": 0.5,  # 遥控器自动化：周期截图间隔（秒）
       "remote_cache_size_count": 50,      # 遥控器自动化：内存循环队列缓存条数（感知签名↔译文）
       "remote_screenshot_diameterA": 100, # 遥控截图窗口 A（触发器）直径（像素）
@@ -151,6 +152,9 @@ DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
 DEFAULT_HOTKEY_MOUSE_ESCAPE = "alt+o"
 #: 遥控截图：快捷键模式期间生成的 A/B 触发/瞄准小圆窗（开关 + 各自直径，像素）
 DEFAULT_REMOTE_SCREENSHOT_ENABLE = True
+#: 用户级显隐初值：true 时进入快捷键模式生成 A/B 后保持隐藏（右键菜单初始
+#: 「显示遥控器」）；默认 false 保持既有行为（生成即自动显示）。紧跟 enable（需求）
+DEFAULT_REMOTE_SCREENSHOT_HIDE = False
 DEFAULT_REMOTE_SCREENSHOT_DIAMETER = 100
 #: 直径下限：再小无法瞄准与点击，低于回退默认
 MIN_REMOTE_SCREENSHOT_DIAMETER = 20
@@ -251,6 +255,8 @@ class AppConfig:
     hotkey_mouse_escape: str = DEFAULT_HOTKEY_MOUSE_ESCAPE
     # 遥控截图（快捷键模式期间存在的 A/B 触发/瞄准小圆窗；与主开关相互独立）
     remote_screenshot_enable: bool = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    # 用户级显隐初值（紧跟 enable）：true 时 A/B 生成后保持隐藏，菜单初始「显示遥控器」
+    remote_screenshot_hide: bool = DEFAULT_REMOTE_SCREENSHOT_HIDE
     # 遥控器自动化（周期截图翻译：间隔与内存缓存条数，紧跟 enable 之后，需求备注）
     remote_screenshot_interval: float = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     remote_cache_size_count: int = DEFAULT_REMOTE_CACHE_SIZE_COUNT
@@ -361,6 +367,7 @@ def _write_defaults(target: Path) -> None:
         payload[f"hotkey_window_{index}"] = hotkey
     payload["hotkey_mouse_escape"] = DEFAULT_HOTKEY_MOUSE_ESCAPE
     payload["remote_screenshot_enable"] = DEFAULT_REMOTE_SCREENSHOT_ENABLE
+    payload["remote_screenshot_hide"] = DEFAULT_REMOTE_SCREENSHOT_HIDE
     payload["remote_screenshot_interval"] = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     payload["remote_cache_size_count"] = DEFAULT_REMOTE_CACHE_SIZE_COUNT
     payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
@@ -712,6 +719,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         remote_screenshot_enable=_read_bool(
             raw, "remote_screenshot_enable", DEFAULT_REMOTE_SCREENSHOT_ENABLE
         ),
+        remote_screenshot_hide=_read_bool(
+            raw, "remote_screenshot_hide", DEFAULT_REMOTE_SCREENSHOT_HIDE
+        ),
         remote_screenshot_interval=_read_positive_float(
             raw,
             "remote_screenshot_interval",
@@ -776,7 +786,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "asr_rt（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "remote_screenshot（enable=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d），"
+        "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d），"
         "prebuild（max=%d，initial=%d，increase_after=%d，latency_guard=%.1fs，"
         "circuit_break=%d，retries=%d，include_tl=%s，tl_langs=%s），"
         "last_game_dir=%s",
@@ -820,6 +830,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.hotkey_windows,
         app_config.hotkey_mouse_escape,
         app_config.remote_screenshot_enable,
+        app_config.remote_screenshot_hide,
         app_config.remote_screenshot_interval,
         app_config.remote_cache_size_count,
         app_config.remote_screenshot_diameter_a,

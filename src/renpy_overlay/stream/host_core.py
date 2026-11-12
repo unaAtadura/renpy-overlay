@@ -208,13 +208,16 @@ class StreamOverlayCore:
         )
         self._quick_menu.attach_hotkey_mode(self._hotkey_mode)
         # 遥控截图：快捷键模式期间存在的 A/B 触发/瞄准小圆窗（与主开关相互
-        # 独立）；A 单击经 B 的装填状态复用截图翻译入口（含在途互斥与提示）
+        # 独立）；A 单击经 B 的装填状态复用截图翻译入口（含在途互斥与提示）；
+        # remote_screenshot_hide 注入为「隐藏遥控器」用户级显隐初值（true 时
+        # 生成后保持隐藏，自动化与右键菜单文案经 user_hidden 回调同步感知）
         self._remote_screenshot = RemoteScreenshotController(
             enable=self._config.remote_screenshot_enable,
             diameter_a=self._config.remote_screenshot_diameter_a,
             diameter_b=self._config.remote_screenshot_diameter_b,
             locked_windows_provider=self._quick_menu.locked_windows,
             trigger=self.request_screenshot_translation,
+            user_hidden=self._config.remote_screenshot_hide,
         )
         self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
         # 遥控器自动化：周期截图 + 感知哈希变化检测 + 缓存命中（装填状态复用

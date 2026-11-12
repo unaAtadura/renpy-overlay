@@ -117,6 +117,7 @@ def test_restart_keys_marked_with_ranges():
         "chat_window_width",
         "chat_window_height",
         "remote_screenshot_enable",
+        "remote_screenshot_hide",
         "remote_screenshot_interval",
         "remote_cache_size_count",
         "remote_screenshot_diameterA",

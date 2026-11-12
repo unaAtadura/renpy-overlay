@@ -516,6 +516,26 @@ def test_menu_remote_automation_labels_follow_state(monkeypatch):
     assert "显示遥控器" in labels
 
 
+def test_menu_remote_hidden_initial_label_follows_config_initial_value(monkeypatch):
+    """初始文案与「隐藏遥控器」用户级显隐初值联动（config remote_screenshot_hide）。
+
+    初值 false（默认/老配置）初始即「隐藏遥控器」；初值 true（stub 的
+    remote_hidden=True，对应控制器 user_hidden 注入初值）首次渲染即为
+    「显示遥控器」，无需用户先点击切换；文案经宿主回调反映控制器初始态。
+    """
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    stub = _automation_stub([])  # remote_hidden=False：配置默认初值
+    menu.attach_remote_automation(stub)
+    menu.show_context_menu(QPoint(0, 0))
+    assert "隐藏遥控器" in _menu_labels(fake_menu)
+    stub.remote_hidden = True  # 配置 remote_screenshot_hide=true 的注入初值
+    fake_menu.items.clear()
+    menu.show_context_menu(QPoint(0, 0))
+    assert "显示遥控器" in _menu_labels(fake_menu)
+
+
 def test_menu_dispatch_toggles_automation_and_hidden(monkeypatch):
     calls: list[str] = []
     fake_menu = _FakeMenu()

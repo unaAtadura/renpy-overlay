@@ -67,6 +67,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "hotkey_window_8": "8",
         "hotkey_mouse_escape": "alt+o",
         "remote_screenshot_enable": True,
+        "remote_screenshot_hide": False,
         "remote_screenshot_interval": 0.5,
         "remote_cache_size_count": 50,
         "remote_screenshot_diameterA": 100,
@@ -138,6 +139,7 @@ def test_default_file_key_order_matches_target(tmp_path):
         "hotkey_window_8",
         "hotkey_mouse_escape",
         "remote_screenshot_enable",
+        "remote_screenshot_hide",
         "remote_screenshot_interval",
         "remote_cache_size_count",
         "remote_screenshot_diameterA",
@@ -186,6 +188,7 @@ def test_remote_screenshot_defaults_loaded(tmp_path):
     target = tmp_path / "config.json"
     loaded = config.load_config(target)
     assert loaded.remote_screenshot_enable is True
+    assert loaded.remote_screenshot_hide is False  # 缺省键回退 False（保持既有行为）
     assert loaded.remote_screenshot_interval == 0.5
     assert loaded.remote_cache_size_count == 50
     assert loaded.remote_screenshot_diameter_a == 100
@@ -198,6 +201,7 @@ def test_remote_screenshot_values_loaded(tmp_path):
         json.dumps(
             {
                 "remote_screenshot_enable": False,
+                "remote_screenshot_hide": True,
                 "remote_screenshot_interval": 1.5,
                 "remote_cache_size_count": 20,
                 "remote_screenshot_diameterA": 150,
@@ -208,6 +212,7 @@ def test_remote_screenshot_values_loaded(tmp_path):
     )
     loaded = config.load_config(target)
     assert loaded.remote_screenshot_enable is False
+    assert loaded.remote_screenshot_hide is True
     assert loaded.remote_screenshot_interval == 1.5
     assert loaded.remote_cache_size_count == 20
     assert loaded.remote_screenshot_diameter_a == 150
@@ -220,6 +225,7 @@ def test_remote_screenshot_invalid_values_fall_back(tmp_path):
         json.dumps(
             {
                 "remote_screenshot_enable": "yes",  # 非布尔
+                "remote_screenshot_hide": "no",  # 非布尔
                 "remote_screenshot_diameterA": "big",  # 非数字
                 "remote_screenshot_diameterB": -5,  # 负数
             }
@@ -228,8 +234,16 @@ def test_remote_screenshot_invalid_values_fall_back(tmp_path):
     )
     loaded = config.load_config(target)
     assert loaded.remote_screenshot_enable is True
+    assert loaded.remote_screenshot_hide is False  # 非布尔回退默认 False
     assert loaded.remote_screenshot_diameter_a == 100
     assert loaded.remote_screenshot_diameter_b == 100
+
+
+def test_remote_screenshot_hide_explicit_false(tmp_path):
+    """显式写入 false 同样得到 False（与缺省回退区分，true/false 两分支全覆盖）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"remote_screenshot_hide": False}), encoding="utf-8")
+    assert config.load_config(target).remote_screenshot_hide is False
 
 
 def test_remote_screenshot_small_diameter_falls_back(tmp_path):

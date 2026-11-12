@@ -302,6 +302,12 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 restart=True,
             ),
             SettingSpec(
+                "remote_screenshot_hide", "初始隐藏遥控器", KIND_BOOL,
+                config.DEFAULT_REMOTE_SCREENSHOT_HIDE,
+                note="开启后右键菜单初始显示为“显示遥控器”，且开启快捷键模式时不自动显示 A/B 窗口；修改后需重启生效",
+                restart=True,
+            ),
+            SettingSpec(
                 "remote_screenshot_interval", "自动化截图间隔（秒）", KIND_FLOAT,
                 config.DEFAULT_REMOTE_SCREENSHOT_INTERVAL,
                 minimum=config.MIN_REMOTE_SCREENSHOT_INTERVAL, maximum=60.0,
