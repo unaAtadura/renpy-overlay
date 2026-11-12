@@ -220,8 +220,19 @@ class ScreenshotWindow(QWidget):
         event.accept()
 
     def _toggle_lock(self) -> None:
-        self._locked = not self._locked
-        if self._locked:
+        self._set_locked(not self._locked)
+
+    def _set_locked(self, locked: bool) -> None:
+        """把锁定态设为目标值（与双击锁定同一代码路径；layout 启动恢复专用）。
+
+        锁定/解锁分支逐行保留原 ``_toggle_lock`` 行为：锁定态清拖动/拉伸/
+        悬停状态与边缘光标，解锁态恢复拖动与拉伸；状态重绘立即触发。目标
+        值与当前一致时为 no-op（双击路径恒翻转，不受影响）。
+        """
+        if locked == self._locked:
+            return
+        self._locked = locked
+        if locked:
             self._dragging = False
             self._resizing = False
             self._resize_edge = None

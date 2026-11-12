@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from .. import layout
 from ..bound_window import BoundAction
 from ..pretranslate.formatting import prebuild_initial_dir
 from .icons import (
@@ -55,8 +56,10 @@ class InjectionFlowMixin:
         )
         # 「切换翻译模式」入口追加在既有入口条末端（图标由当前模式决定）
         self._sync_translation_mode_entry()
-        # 「选项副作用日志」入口同样追加在末端（开合状态由 label 同步）
-        self._sync_choice_log_entry(opened=False)
+        # 「选项副作用日志」入口同样追加在末端（开合状态由 label 同步；
+        # 按窗口实际状态同步——layout 启动恢复可能已打开日志窗，需求
+        # future_恢复布局.txt：入口开合状态必须与实际一致）
+        self._sync_choice_log_entry(opened=self._choice_log_window is not None)
         logger.info(
             "注入成功：预构建/定位/翻译模式切换/副作用日志入口已并入标题窗（图标跟随标题文本长度）"
         )
@@ -161,8 +164,8 @@ class InjectionFlowMixin:
 
         打开 = 创建单例半透明弹窗并锚定到本图标右上角（仅打开时计算一次，
         打开期间不自动跟随标题窗移动，拖动位置保持到关闭）；关闭 = 销毁
-        弹窗并清空日志历史，下次打开从空白重新累积。构造失败兜底：引用
-        保持 None、label 还原、提示走标题窗唯一出口。
+        弹窗并清空日志历史，下次打开从空白重新累积。打开动作在
+        :meth:`_open_choice_log`（右键入口与 layout 启动恢复共用）。
         """
         if self._closed:
             return
@@ -175,15 +178,48 @@ class InjectionFlowMixin:
             self._sync_choice_log_entry(opened=False)
             logger.info("选项副作用日志已关闭，累积日志已清空")
             return
+        self._open_choice_log(
+            self._config.choice_log_window_width,
+            self._config.choice_log_window_height,
+        )
+
+    def _open_choice_log(
+        self,
+        width: int,
+        height: int,
+        pos: tuple[int, int] | None = None,
+        locked: bool = False,
+    ) -> None:
+        """打开选项副作用日志窗口（右键入口与 layout 启动恢复共用；需求
+        future_恢复布局.txt）。
+
+        ``pos`` 为 None：锚定到入口图标右上角（既有行为）；提供时按恢复
+        位置直接摆放——读取 layout 启动时不再从功能图标右上角弹出；坐标
+        落到当前任一屏幕之外（分辨率/显示器数量变化）回退锚定。``locked``
+        为 True 时按记录恢复锁定态（与双击锁定同一代码路径）。构造失败
+        兜底与入口路径一致：引用保持 None、label 还原、提示走标题窗唯一
+        出口。
+        """
+        if self._closed or self._choice_log_window is not None:
+            return
         from .choice_log_window import ChoiceLogWindow  # 局部导入：仅入口时加载
 
         try:
-            window = ChoiceLogWindow(
-                self._choice_log,
-                width=self._config.choice_log_window_width,
-                height=self._config.choice_log_window_height,
-            )
-            window.anchor_to(self._title_window.entry_top_right_global("choice-log"))
+            window = ChoiceLogWindow(self._choice_log, width=width, height=height)
+            if pos is not None and layout.rect_intersects_any_screen(
+                pos[0], pos[1], width, height, self._screen_rects_logical()
+            ):
+                window.move(int(pos[0]), int(pos[1]))
+            else:
+                if pos is not None:
+                    logger.warning(
+                        "layout 记录的副作用日志坐标 (%d, %d) 落到屏幕之外，回退锚定入口图标",
+                        pos[0],
+                        pos[1],
+                    )
+                window.anchor_to(self._title_window.entry_top_right_global("choice-log"))
+            if locked:
+                window.apply_initial_locked()
             window.show()
         except Exception:
             logger.exception("选项副作用日志窗口打开失败")
@@ -192,4 +228,10 @@ class InjectionFlowMixin:
             return
         self._choice_log_window = window
         self._sync_choice_log_entry(opened=True)
-        logger.info("选项副作用日志已打开（锚定到入口图标右上角）")
+        logger.info(
+            "选项副作用日志已打开（%s，尺寸 %dx%d，锁定=%s）",
+            f"layout 恢复位置 ({pos[0]}, {pos[1]})" if pos is not None else "锚定到入口图标右上角",
+            width,
+            height,
+            locked,
+        )

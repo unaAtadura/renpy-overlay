@@ -269,6 +269,7 @@ class _FollowHostStub:
     _context_menu_open = False
     skip_injection = False
     target_pid = 0
+    _layout_pending_position = False  # layout 恢复的一次性定位标志（默认已消费）
 
     def __init__(self, tray_hidden: bool) -> None:
         self._tray = SimpleNamespace(hidden=tray_hidden)
