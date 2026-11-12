@@ -311,7 +311,8 @@ class TitleWindow(_StreamWindowBase):
             entry_y = int(center_y - hot / 2.0)
             self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
             self._entry_strip.paint(painter, entry_x, entry_y)
-        # 八向拉伸提示：悬停边缘亮白反馈线（未锁定；锁定态不绘制）
+        # 八向拉伸提示：常驻可命中条带（未锁定）+ 悬停边缘亮白反馈线
+        self.paint_resize_band(painter)
         self.paint_hover_highlight(painter)
 
 
@@ -499,8 +500,9 @@ class BodyWindow(_StreamWindowBase):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        # 八向拉伸提示：悬停边缘亮白反馈线（未锁定；锁定态不绘制）。画在滚
-        # 动变换之前——高亮线属窗口坐标，不随内容滚动平移
+        # 八向拉伸提示：常驻可命中条带（未锁定）+ 悬停边缘亮白反馈线。均
+        # 画在滚动变换之前——条带/高亮属窗口坐标，不随内容滚动平移
+        self.paint_resize_band(painter)
         self.paint_hover_highlight(painter)
 
         # —— 滚动：start 锚点 = 固定显示第一行；tail 锚点 = 跟随内容末尾；

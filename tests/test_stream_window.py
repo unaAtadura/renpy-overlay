@@ -464,3 +464,21 @@ def test_window_resize_edge_body_excludes_north():
     assert window_resize_edge("ne", "body") is None
     assert window_resize_edge("nw", "body") is None
     assert window_resize_edge(None, "body") is None
+
+
+def test_resize_band_rects_covers_four_edges():
+    """常驻可命中条带：四向矩形覆盖整条热区带、自窗口边缘内贴无裁切。"""
+    from renpy_overlay.stream.geometry import resize_band_rects
+
+    top, bottom, left, right = resize_band_rects(800, 300, 12)
+    assert top == (0, 0, 800, 12)
+    assert bottom == (0, 288, 800, 12)
+    assert left == (0, 0, 12, 300)
+    assert right == (788, 0, 12, 300)
+    # 条带宽度与热区同参：band_px 可随热区宽度调整而不破坏结构
+    assert resize_band_rects(100, 100, 6) == (
+        (0, 0, 100, 6),
+        (0, 94, 100, 6),
+        (0, 0, 6, 100),
+        (94, 0, 6, 100),
+    )
