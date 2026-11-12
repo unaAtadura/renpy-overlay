@@ -3,7 +3,8 @@
 覆盖：矩形相交判定、装填决策（首个进入驻留、离开恢复圆形、多区域忽略、
 目标失效重选）、快捷键模式开/关的窗口生成与销毁（配置开关、幂等、未创建
 安全）、A 单击分发（已装填 → 宿主 trigger 调用一次；未装填 → 忽略）、
-截图期间隐藏/恢复与 shutdown 的 no-op 安全、初始摆放（左右并排）。
+截图期间隐藏/恢复与 shutdown 的 no-op 安全、初始摆放（左右并排），
+配置初值 remote_screenshot_hide 的生成不自动显示与用户操作优先。
 
 在途 API 互斥由宿主 request_screenshot_translation 负责（同一时刻只允许
 一个在途），控制器不重复实现——故此处无互斥相关用例。
@@ -104,7 +105,7 @@ class _Factory:
         return window
 
 
-def _make_controller(enable=True, locked=None, factory=None, trigger=None):
+def _make_controller(enable=True, locked=None, factory=None, trigger=None, user_hidden=False):
     locked_windows = list(locked or [])
     controller = RemoteScreenshotController(
         enable=enable,
@@ -114,6 +115,7 @@ def _make_controller(enable=True, locked=None, factory=None, trigger=None):
         trigger=trigger,
         window_factory=factory,
         screen_center_provider=lambda: _CENTER,
+        user_hidden=user_hidden,
     )
     return controller, locked_windows
 
@@ -405,3 +407,79 @@ def test_user_hidden_hides_and_show_windows_respects():
     controller.set_user_hidden(False)
     assert not controller.user_hidden
     assert a.calls[-1] == "show" and b.calls[-1] == "show"
+
+
+# ---- 配置初值 remote_screenshot_hide：生成不自动显示与用户操作优先 --------------
+
+
+def test_initial_user_hidden_true_skips_show_and_keeps_windows():
+    """配置初值 true：进入快捷键模式生成 A/B 后不调 show（保持隐藏）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, user_hidden=True)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    assert factory.kinds == [("A", 100), ("B", 100)]  # 窗口对象照常创建
+    assert a.calls == [] and b.calls == []  # 未自动显示（无 show 调用）
+    assert controller.user_hidden is True
+    controller.show_windows()  # 抓屏恢复尊重用户级隐藏初值（不放出）
+    assert a.calls == [] and b.calls == []
+    controller.set_user_hidden(False)  # 「显示遥控器」菜单路径：放出
+    assert a.calls == ["show"] and b.calls == ["show"]
+
+
+def test_initial_user_hidden_false_keeps_legacy_auto_show():
+    """配置初值 false（默认，含未配置的老配置文件）：既有行为不变，生成即显示。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, user_hidden=False)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    assert a.calls == ["show"] and b.calls == ["show"]
+    assert controller.user_hidden is False
+
+
+def test_user_operations_take_precedence_over_initial_config():
+    """点击菜单后的显隐以用户操作为准：配置初值仅在构造时生效一次（跨重建）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, user_hidden=True)
+    controller.on_hotkey_mode_changed(True)
+    controller.set_user_hidden(False)  # 「显示遥控器」：用户态改为显示
+    a, b = factory.created
+    assert a.calls == ["show"] and b.calls == ["show"]
+    controller.on_hotkey_mode_changed(False)
+    controller.on_hotkey_mode_changed(True)  # 重建：沿用最近用户态（显示）
+    a2, b2 = factory.created[2:]
+    assert a2.calls == ["show"] and b2.calls == ["show"]
+    controller.set_user_hidden(True)  # 再次「隐藏遥控器」
+    assert a2.calls == ["show", "hide"] and b2.calls == ["show", "hide"]
+    controller.show_windows()  # 抓屏恢复不放出（尊重用户隐藏态）
+    assert a2.calls == ["show", "hide"] and b2.calls == ["show", "hide"]
+
+
+def _make_automation(controller):
+    """与宿主同构的最小自动化控制器（显隐回调接遥控截图控制器）。"""
+    from renpy_overlay.screenshot.remote_automation import RemoteAutomationController
+
+    return RemoteAutomationController(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: controller.windows_created,
+        is_busy=lambda: False,
+        display=lambda text: None,
+        submit=lambda window, image, signature: True,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: controller.user_hidden,
+        set_windows_hidden=controller.set_user_hidden,
+    )
+
+
+def test_initial_user_hidden_flows_to_automation_menu_state():
+    """配置初值经控制器流入自动化控制器（右键菜单文案依据 remote_hidden）。"""
+    hidden_controller, _ = _make_controller(factory=_Factory(), user_hidden=True)
+    automation = _make_automation(hidden_controller)
+    assert automation.remote_hidden is True  # 菜单初始「显示遥控器」
+    hidden_controller.set_user_hidden(False)
+    assert automation.remote_hidden is False  # 用户切换后文案「隐藏遥控器」
+
+    default_controller, _ = _make_controller(factory=_Factory())
+    assert _make_automation(default_controller).remote_hidden is False  # 默认初值

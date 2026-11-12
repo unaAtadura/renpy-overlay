@@ -15,6 +15,8 @@
 attach_automation 注入自动化控制器后，本控制器把 A 单击与 B 装填变化
 转发给它（自动化开启时接管 A 单击的首轮/重启轮语义），并管理「隐藏
 遥控器」的用户级显隐（show_windows 尊重，防手动抓屏把 A/B 放出来）。
+显隐初值取配置 ``remote_screenshot_hide``：true 时进入快捷键模式生成
+A/B 后保持隐藏（右键菜单初始「显示遥控器」），此后以用户操作为准。
 
 与截图窗口池的隔离（同 mouse_lock 约定）：A/B 由本控制器自持，不进
 QuickMenu 截图窗口池 —— lock_layout / unlock_layout / locked_windows /
@@ -108,7 +110,9 @@ class RemoteScreenshotController:
     - ``trigger``：截图翻译入口（宿主 request_screenshot_translation，含
       在途互斥与既有提示规则——本控制器不重复实现互斥）；
     - ``window_factory`` / ``screen_center_provider``：窗口工厂与屏幕中心
-      源（离线测试注入 stub，缺省为真实实现）。
+      源（离线测试注入 stub，缺省为真实实现）；
+    - ``user_hidden``：「隐藏遥控器」用户级显隐初值（config.
+      remote_screenshot_hide；true 时 A/B 生成后保持隐藏，此后以用户操作为准）。
 
     仅 Qt 主线程使用。
     """
@@ -122,6 +126,7 @@ class RemoteScreenshotController:
         trigger: Callable[[object], None] | None = None,
         window_factory: Callable[[str, int, object], object] | None = None,
         screen_center_provider: Callable[[], tuple[int, int]] | None = None,
+        user_hidden: bool = False,
     ) -> None:
         self._enable = bool(enable)
         self._diameter_a = int(diameter_a)
@@ -135,8 +140,9 @@ class RemoteScreenshotController:
         self._armed: object | None = None  # B 当前装填的截图窗口（None = 圆形）
         # 遥控器自动化控制器（宿主经 attach_automation 注入；未注入时全部旁路）
         self._automation = None
-        # 「隐藏遥控器」的用户级显隐态：抓屏恢复 show_windows 时尊重（不放出）
-        self._user_hidden = False
+        # 「隐藏遥控器」的用户级显隐态：抓屏恢复 show_windows 时尊重（不放出）；
+        # 初值取配置 remote_screenshot_hide（true 时生成后保持隐藏，此后以用户操作为准）
+        self._user_hidden = bool(user_hidden)
 
     def attach_automation(self, automation) -> None:
         """注入遥控器自动化控制器（A 单击接管与 B 装填变化转发；同宿主附着约定）。"""
@@ -153,7 +159,10 @@ class RemoteScreenshotController:
         return self._user_hidden
 
     def set_user_hidden(self, hidden: bool) -> None:
-        """「隐藏遥控器/显示遥控器」：用户级显隐（自动化继续运行，需求决议 A6）。"""
+        """「隐藏遥控器/显示遥控器」：用户级显隐（自动化继续运行，需求决议 A6）。
+
+        菜单点击后的显隐以本入口为准，配置初值仅在控制器构造时生效一次。
+        """
         self._user_hidden = bool(hidden)
         if self._user_hidden:
             self.hide_windows()
@@ -163,7 +172,11 @@ class RemoteScreenshotController:
     # ---- 快捷键模式生命周期（HotkeyMode 模式开/关时通知） ---------------------
 
     def on_hotkey_mode_changed(self, enabled: bool) -> None:
-        """快捷键模式开/关：生成/销毁 A/B（幂等；配置开关关闭时不生成）。"""
+        """快捷键模式开/关：生成/销毁 A/B（幂等；配置开关关闭时不生成）。
+
+        生成受用户级显隐约束（remote_screenshot_hide=true 时不自动显示，
+        见 :meth:`_create_windows`）；重建沿用最近用户态（以用户操作为准）。
+        """
         if enabled:
             if not self._enable:
                 logger.info("遥控截图开关已关闭，进入快捷键模式不生成窗口 A/B")
@@ -184,11 +197,15 @@ class RemoteScreenshotController:
         self._window_b = self._window_factory(
             "B", self._diameter_b, self.update_arm_state
         )
-        for window in (self._window_a, self._window_b):
-            window.show()  # 先 show 再定位（Qt 渲染管线要求，同 QuickMenu）
+        if not self._user_hidden:
+            for window in (self._window_a, self._window_b):
+                window.show()  # 先 show 再定位（Qt 渲染管线要求，同 QuickMenu）
         self._place_windows()
         logger.info(
-            "遥控截图窗口 A/B 已生成（直径 %d/%d）", self._diameter_a, self._diameter_b
+            "遥控截图窗口 A/B 已生成（直径 %d/%d，%s）",
+            self._diameter_a,
+            self._diameter_b,
+            "保持隐藏（remote_screenshot_hide）" if self._user_hidden else "已显示",
         )
 
     def _destroy_windows(self) -> None:
