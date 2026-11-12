@@ -20,11 +20,12 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRect, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QPainter
 
 from ..bound_window import BOUND_GAP
 from .scroll_logic import body_scroll_target
+from .visual import TITLE_MARGIN_X
 from .windows import BodyWindow, TitleWindow
 
 #: 整窗半透明黑色背景（参考项目 QScrollArea 的 rgba(0,0,0,160)）
@@ -61,11 +62,17 @@ class Style2TitleWindow(TitleWindow):
         # 八向拉伸提示：悬停边缘亮白反馈线（interaction 驱动；锁定态不绘制）。
         # 画在滚动落位之前——高亮线属窗口坐标，不随内容滚动平移。
         self.paint_hover_highlight(painter)
+        # 入口条：仅图标态左移顶到可用区起点，否则紧跟文本右侧；含横向
+        # 滚动偏移与可见区裁剪（_paint_entry_strip 同步 _entry_rect）
+        entry_y = int(self.height() / 2.0 - self._entry_strip.hotzone() / 2.0)
+        if self._title_hidden:
+            if not self._entry_strip.is_empty():
+                self._paint_entry_strip(painter, TITLE_MARGIN_X, entry_y)
+            return
         if not self._layout:
             return
         fm = self.fm
         box_h = fm.height()
-        center_y = self.height() / 2.0  # 单行垂直居中
         baseline_y = (self.height() - box_h) / 2.0 + fm.ascent()
         # 白色直绘（无蒙版条带：整窗背景已提供对比度）
         painter.setFont(self._font)
@@ -76,11 +83,8 @@ class Style2TitleWindow(TitleWindow):
         if not self._entry_strip.is_empty():
             last_ch, last_x = self._layout[-1]
             text_right = last_x + fm.horizontalAdvance(last_ch)
-            hot = self._entry_strip.hotzone()
             entry_x = int(text_right + BOUND_GAP)
-            entry_y = int(center_y - hot / 2.0)
-            self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
-            self._entry_strip.paint(painter, entry_x, entry_y)
+            self._paint_entry_strip(painter, entry_x, entry_y)
 
 
 class Style2BodyWindow(BodyWindow):

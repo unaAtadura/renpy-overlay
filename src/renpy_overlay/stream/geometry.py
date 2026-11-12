@@ -219,3 +219,50 @@ def finish_resize_dims(body_w: int, body_h: int, min_w: int) -> tuple[int, int]:
     每次拉伸手势固定少一个标题带高度，实测 121725.log 零位移 −74）。
     """
     return max(min_w, int(body_w)), max(1, int(body_h))
+
+
+# ------------------------------------------------ 标题窗仅图标态与图标滚动
+
+
+def title_hidden_for_width(
+    avail_w: float,
+    text_w: float,
+    hotzone: int,
+    gap: int,
+    hysteresis: int = 22,
+    current_hidden: bool = False,
+) -> bool:
+    """标题窗宽度过窄时隐藏状态文本（仅图标态）判定（纯函数，含回滞）。
+
+    口径：可用宽放不下「完整标题文本实测宽 + 至少两个图标
+    （2×hotzone + gap）」→ 隐藏文本、图标优先（文本本身已被截断排版，
+    完整放不下时截断只剩零星字符，不如只显示关键动作入口）。
+    回滞：进入用严格阈值；退出需 avail 超过阈值 + hysteresis，避免边界
+    拖拽抖动。text_w 由调用方传入完整文本实测宽（未截断）。"""
+    icons_min = 2 * hotzone + gap
+    if current_hidden:
+        return text_w + icons_min >= avail_w - hysteresis
+    return text_w + icons_min > avail_w
+
+
+def entry_visible_width(win_w: int, entry_x: int, margin_x: int) -> int:
+    """图标列表可见区宽度：可见起点到窗宽减右侧边距（纯函数）。"""
+    return max(0, int(win_w) - int(entry_x) - int(margin_x))
+
+
+def entry_scroll_max(entry_w: int, visible_w: int) -> int:
+    """图标列表可滚动上界：条带总宽超出可见区的部分（不足则 0）。"""
+    return max(0, int(entry_w) - int(visible_w))
+
+
+def entry_scroll_clamp(scroll: int, entry_w: int, visible_w: int) -> int:
+    """滚动位置夹取到 [0, 可滚动上界]：边界处不出现空白越界（纯函数）。"""
+    return min(max(0, int(scroll)), entry_scroll_max(entry_w, visible_w))
+
+
+def entry_wheel_step(hotzone: int) -> int:
+    """每格滚轮的横向滚动步长（逻辑像素）：热区的约 1/3（44→14，下限 8）。
+
+    远小于一个图标热区（44px），滚动连续顺滑、不整格跳图标；与热区同源
+    自适应。拖拽滚动为 1:1 跟手（不经本函数），无格跳。"""
+    return max(8, int(hotzone) // 3)

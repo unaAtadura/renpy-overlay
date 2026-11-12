@@ -21,7 +21,15 @@ from PyQt6.QtWidgets import QWidget
 
 from ..bound_window import BOUND_GAP, ENTRY_GAP, TitleEntryStrip, dispatch_action
 from ..screenshot.window_visual import draw_edge_highlight
-from .geometry import RESIZE_EDGE_PX, resize_band_rects
+from .geometry import (
+    RESIZE_EDGE_PX,
+    entry_scroll_clamp,
+    entry_scroll_max,
+    entry_visible_width,
+    entry_wheel_step,
+    resize_band_rects,
+    title_hidden_for_width,
+)
 from .scroll_logic import (
     DRAG_SCROLL_INTERVAL_MS,
     body_drag_scroll_rate,
@@ -165,8 +173,12 @@ class TitleWindow(_StreamWindowBase):
         super().__init__("renpy-overlay · stream title", font, host, fill_color)
         self._layout: list[tuple[str, float]] = []  # (字符, x 起点)，单行排版
         self._entry_strip = TitleEntryStrip()
-        self._entry_rect: QRect | None = None  # 入口条热区（本地坐标，命中测试用）
+        self._entry_rect: QRect | None = None  # 入口条可见热区（本地坐标，命中测试用）
         self._entry_press: object | None = None  # 图标按下的本地坐标（点击判定）
+        self._title_hidden = False  # 仅图标态：宽度过窄时隐藏状态文本（含回滞）
+        self._entry_scroll = 0  # 图标列表横向滚动偏移（px，≥0；锁定态拖拽/滚轮）
+        self._entry_dragging_scroll = False  # 锁定态图标拖拽滚动手势进行中
+        self._entry_drag_last_x = 0  # 拖拽滚动上一帧鼠标 x（跟手增量）
 
     def set_title_entries(self, actions: list) -> None:
         """注入确认时注入入口条并重排当前标题（可用宽扣除图标区）。"""
@@ -183,27 +195,65 @@ class TitleWindow(_StreamWindowBase):
             event.position().toPoint()
         ):
             self._entry_press = event.position().toPoint()
+            # 锁定态图标拖拽滚动手势状态（未超阈值前不影响单击分发）
+            self._entry_dragging_scroll = False
+            self._entry_drag_last_x = self._entry_press.x()
             event.accept()
             return
         self._entry_press = None
+        self._entry_dragging_scroll = False
         if event.button() == Qt.MouseButton.LeftButton:
             self._host.on_window_press(self, event)
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._entry_press is not None:
-            event.accept()  # 图标按住期间不触发窗口拖动
+            pos = event.position().toPoint()
+            # 锁定态：按住图标移动超过既有单击互判阈值 → 图标列表横向滚动
+            # （跟手、无惯性；未超阈值保持单击语义）。未锁定态不滚动。
+            if getattr(self._host, "_locked", False):
+                visible_w = self._entry_rect.width() if self._entry_rect else 0
+                if (
+                    not self._entry_dragging_scroll
+                    and abs(pos.x() - self._entry_press.x()) > 12
+                ):
+                    self._entry_dragging_scroll = True
+                    # 观测：进入手势即打一条（含可滚动上界）——可区分「未进
+                    # 锁定/未进分支」与「进入但夹取为 0（条带未溢出）」
+                    logger.debug(
+                        "图标列表拖拽滚动：进入（scroll=%d max=%d）",
+                        self._entry_scroll,
+                        entry_scroll_max(self._entry_strip.width(), visible_w),
+                    )
+                if self._entry_dragging_scroll:
+                    self._entry_scroll = entry_scroll_clamp(
+                        self._entry_scroll - (pos.x() - self._entry_drag_last_x),
+                        self._entry_strip.width(),
+                        visible_w,
+                    )
+                    self.update()
+                self._entry_drag_last_x = pos.x()
+            event.accept()  # 图标按住期间不触发窗口拖动/拉伸
             return
         self._host.on_window_motion(self, event)
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         press = self._entry_press
+        dragged = self._entry_dragging_scroll
         self._entry_press = None
+        self._entry_dragging_scroll = False
         if press is not None and event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
+            if dragged:
+                event.accept()  # 已进入拖拽滚动手势：松手不分发单击
+                return
             if (pos - press).manhattanLength() <= 12:  # 未拖动：单击图标分发入口
-                local_x = pos.x() - (self._entry_rect.x() if self._entry_rect else 0)
+                local_x = (
+                    pos.x()
+                    - (self._entry_rect.x() if self._entry_rect else 0)
+                    + self._entry_scroll
+                )
                 dispatch_action(self._entry_strip.action_at(local_x))
             event.accept()
             return
@@ -217,11 +267,45 @@ class TitleWindow(_StreamWindowBase):
         self._host.on_window_double_click(self, event)
         event.accept()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """宽度变化（八向拉伸/跟随重摆）后重排标题并重估仅图标态。"""
+        self.set_text(getattr(self._host, "_title_text", "") or "")
+        event.accept()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """图标列表区域横向滚轮滚动（一格一图标，边界夹取；锁定/未锁定
+        均可）。鼠标不在图标可见区时 ignore——正文窗是独立顶层窗口，其
+        滚轮回看与底部自动跟随不受影响。"""
+        if self._entry_strip.is_empty():
+            event.ignore()
+            return
+        pos = event.position().toPoint()
+        if self._entry_rect is None or not self._entry_rect.contains(pos):
+            event.ignore()
+            return
+        delta = event.angleDelta().y() or int(event.pixelDelta().y() * 8)
+        if delta == 0:
+            event.ignore()
+            return
+        step = entry_wheel_step(self._entry_strip.hotzone())
+        visible_w = self._entry_rect.width() if self._entry_rect else 0
+        target = entry_scroll_clamp(
+            self._entry_scroll + int(round(-delta / 120.0 * step)),
+            self._entry_strip.width(),
+            visible_w,
+        )
+        if target != self._entry_scroll:
+            self._entry_scroll = target
+            self.update()
+        event.accept()
+
     def set_text(self, text: str) -> None:
         """整显一条标题（单行）：超宽或换行后的内容直接截断。
 
         入口条非空时为其预留宽度：文本可用宽 = 窗宽 - 2×边距 - (条宽 + 列距)，
         文本与图标同一渲染帧排版，图标实时跟随文本长度。
+        宽度不足时进入仅图标态（title_hidden_for_width，含回滞）：内部
+        排版状态照常更新，仅绘制跳过，恢复宽度后即为最新内容。
         """
         self._layout.clear()
         fm = self.fm
@@ -229,6 +313,23 @@ class TitleWindow(_StreamWindowBase):
         reserve = 0
         if not self._entry_strip.is_empty():
             reserve = self._entry_strip.width() + BOUND_GAP
+        # 仅图标态评估：以「完整文本实测宽（未截断）」判定可用宽是否足够
+        full_w = 0.0
+        for ch in text:
+            if ch == "\n":
+                break
+            full_w += fm.horizontalAdvance(ch)
+        avail = max(0.0, self.width() - 2 * TITLE_MARGIN_X)
+        hidden = title_hidden_for_width(
+            avail,
+            full_w,
+            self._entry_strip.hotzone(),
+            ENTRY_GAP,
+            current_hidden=self._title_hidden,
+        )
+        if hidden != self._title_hidden:
+            self._title_hidden = hidden
+            logger.debug("标题窗仅图标态：%s（avail=%.0f text_w=%.0f）", hidden, avail, full_w)
         max_w = max(60.0, self.width() - 2 * TITLE_MARGIN_X - reserve)
         for ch in text:
             if ch == "\n":
@@ -255,6 +356,7 @@ class TitleWindow(_StreamWindowBase):
         """指定入口图标的右上角全局坐标（弹窗锚定用）；不可用返回 None。
 
         由入口条矩形（本地坐标）+ 条内 index 换算槽位右缘，再 mapToGlobal；
+        图标列表滚动偏移同步参与换算（滚出的图标仍锚定到真实全局位）；
         入口条尚未排版（未绘制过）或 action 不存在时返回 None，调用方降级
         为默认位置。
         """
@@ -269,10 +371,34 @@ class TitleWindow(_StreamWindowBase):
             return None
         slot = self._entry_strip.hotzone() + ENTRY_GAP
         local = QPoint(
-            self._entry_rect.x() + index * slot + self._entry_strip.hotzone(),
+            self._entry_rect.x()
+            + index * slot
+            + self._entry_strip.hotzone()
+            - self._entry_scroll,
             self._entry_rect.y(),
         )
         return self.mapToGlobal(local)
+
+    def _paint_entry_strip(self, painter: QPainter, entry_x: int, entry_y: int) -> None:
+        """绘制入口条（含横向滚动偏移与可见区裁剪），同步 _entry_rect 可见热区。
+
+        entry_x/entry_y 统一取整：visual 常量为浮点（TITLE_MARGIN_X=16.0），
+        QRect 与命中矩形不接受浮点参数（仅图标态直传常量曾致每帧
+        CRITICAL TypeError）。"""
+        entry_x = int(entry_x)
+        entry_y = int(entry_y)
+        visible_w = entry_visible_width(self.width(), entry_x, TITLE_MARGIN_X)
+        strip_w = min(self._entry_strip.width(), visible_w)
+        hot = self._entry_strip.hotzone()
+        self._entry_rect = QRect(entry_x, entry_y, strip_w, hot)
+        if strip_w <= 0:
+            return
+        painter.save()
+        painter.setClipRect(QRectF(entry_x, entry_y, strip_w, hot))
+        if self._entry_scroll:
+            painter.translate(-self._entry_scroll, 0)
+        self._entry_strip.paint(painter, entry_x, entry_y)
+        painter.restore()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._layout:
@@ -282,6 +408,14 @@ class TitleWindow(_StreamWindowBase):
         fm = self.fm
         box_h = fm.height()
         center_y = self.height() / 2.0  # 单行垂直居中
+        entry_y = int(center_y - self._entry_strip.hotzone() / 2.0)
+        # 仅图标态：跳过蒙版与文本绘制，入口条左移顶到可用区起点（无空洞）
+        if self._title_hidden:
+            if not self._entry_strip.is_empty():
+                self._paint_entry_strip(painter, TITLE_MARGIN_X, entry_y)
+            self.paint_resize_band(painter)
+            self.paint_hover_highlight(painter)
+            return
         baseline_y = (self.height() - box_h) / 2.0 + fm.ascent()
         # 蒙版：覆盖整行文字范围（单行，无相邻行间隙问题），画在字符之下
         first_x = self._layout[0][1]
@@ -306,11 +440,8 @@ class TitleWindow(_StreamWindowBase):
         # 入口条：紧跟标题文本右侧（同一渲染帧，实时随文本长度移动）
         if not self._entry_strip.is_empty():
             text_right = last_x + fm.horizontalAdvance(last_ch)
-            hot = self._entry_strip.hotzone()
             entry_x = int(text_right + BOUND_GAP)
-            entry_y = int(center_y - hot / 2.0)
-            self._entry_rect = QRect(entry_x, entry_y, self._entry_strip.width(), hot)
-            self._entry_strip.paint(painter, entry_x, entry_y)
+            self._paint_entry_strip(painter, entry_x, entry_y)
         # 八向拉伸提示：常驻可命中条带（未锁定）+ 悬停边缘亮白反馈线
         self.paint_resize_band(painter)
         self.paint_hover_highlight(painter)

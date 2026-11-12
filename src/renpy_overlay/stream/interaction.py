@@ -340,6 +340,9 @@ class MouseInteractionMixin:
 
     def _toggle_lock(self) -> None:
         self._locked = not self._locked
+        # 观测：锁定状态切换无其他痕迹——复测报告需据此区分「未锁定操作」
+        # 与「锁定态操作」（图标拖拽滚动等锁定专属分支依赖该状态）
+        logger.info("位置%s（双击切换）", "已锁定" if self._locked else "已解锁")
         # 锁定态不可拉伸：清两窗的悬停高亮与拉伸光标（解锁恢复时由悬停
         # 重新点亮）；进行中的拉伸手势已被 on_window_double_click 取消
         self._body_window.set_hover_highlight(None)

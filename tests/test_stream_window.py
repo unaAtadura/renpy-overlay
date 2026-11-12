@@ -482,3 +482,44 @@ def test_resize_band_rects_covers_four_edges():
         (0, 0, 6, 100),
         (94, 0, 6, 100),
     )
+
+
+# ------------------------------------------------ 标题窗仅图标态与图标滚动
+
+
+def test_title_hidden_for_width_enter_and_hysteresis_exit():
+    """仅图标态判定：进入用严格阈值，退出需超过阈值 + 回滞（防抖）。"""
+    from renpy_overlay.stream.geometry import title_hidden_for_width
+
+    hot, gap, hyst = 44, 8, 22
+    # 进入阈值 T = text_w + 2×hot + gap = 300 + 96 = 396：avail < 396 → 隐藏
+    assert title_hidden_for_width(500, 300, hot, gap) is False
+    assert title_hidden_for_width(390, 300, hot, gap) is True
+    # 回滞：已隐藏时保持至 avail ≤ T + hysteresis（418），超过才恢复显示
+    assert title_hidden_for_width(400, 300, hot, gap, hysteresis=hyst, current_hidden=True) is True
+    assert title_hidden_for_width(418, 300, hot, gap, hysteresis=hyst, current_hidden=True) is True
+    assert title_hidden_for_width(419, 300, hot, gap, hysteresis=hyst, current_hidden=True) is False
+
+
+def test_entry_scroll_clamp_and_bounds():
+    """图标滚动夹取：负值夹 0、超界夹上界、范围内原样；上界=总宽-可见宽。"""
+    from renpy_overlay.stream.geometry import entry_scroll_clamp, entry_scroll_max
+
+    assert entry_scroll_max(500, 300) == 200
+    assert entry_scroll_max(300, 300) == 0
+    assert entry_scroll_max(200, 300) == 0
+    assert entry_scroll_clamp(-50, 500, 300) == 0
+    assert entry_scroll_clamp(999, 500, 300) == 200
+    assert entry_scroll_clamp(120, 500, 300) == 120
+    assert entry_scroll_clamp(0, 300, 300) == 0  # 无溢出时恒 0（无空白越界）
+
+
+def test_entry_wheel_step_and_visible_width():
+    """滚轮步长 = 热区约 1/3（连续顺滑，下限 8）；可见区宽度下限 0。"""
+    from renpy_overlay.stream.geometry import entry_visible_width, entry_wheel_step
+
+    assert entry_wheel_step(44) == 14
+    assert entry_wheel_step(30) == 10
+    assert entry_wheel_step(12) == 8  # 下限兜底
+    assert entry_visible_width(1760, 300, 12) == 1448
+    assert entry_visible_width(400, 380, 24) == 0  # 可见起点越过右边界 → 0
