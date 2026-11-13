@@ -24,7 +24,6 @@ from renpy_overlay.settings_window import (
     hidden_spec_keys,
     parse_langs,
     raw_value_for,
-    restart_keys,
     section_names,
     spec_by_key,
     specs_for_section,
@@ -98,31 +97,20 @@ def test_last_game_dir_is_hidden_maintenance_key():
     assert "last_game_dir" not in visible_spec_keys()
 
 
-def test_restart_keys_marked_with_ranges():
-    """需重启生效键：双窗字体/几何与样式、全屏渲染路径、内存缓存容量、对话窗尺寸。
+def test_restart_hints_removed():
+    """需重启提示体系已移除（需求 future_自动重启.txt：确认后统一处理）。
 
-    运行中的双窗/对话窗单例构造时持有字体与几何，无法安全热应用；
-    其余键（API 参数 / 热键 / 自动翻译间隔 / 遥控参数等）均热重载。
+    SettingSpec 不再有 restart 字段；全部 note 不含「需重启」字样（界面
+    「（需重启）」后缀由 _SectionStack 直用 spec.label 一并消失，重启
+    问询改由「确定」后的二次确认弹窗统一承担）。
     """
-    assert restart_keys() == {
-        "translate_window_style",
-        "fullscreen_mode",
-        "translation_cache_size_kb",
-        "stream_window_width",
-        "stream_window_height",
-        "stream_window_font_size",
-        "stream_window_line_spacing",
-        "stream_window_title_font_size",
-        "stream_window_title_gap",
-        "chat_window_width",
-        "chat_window_height",
-        "remote_screenshot_enable",
-        "remote_screenshot_hide",
-        "remote_screenshot_interval",
-        "remote_cache_size_count",
-        "remote_screenshot_diameterA",
-        "remote_screenshot_diameterB",
-    }
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(SettingSpec)}
+    assert "restart" not in field_names
+    for name in section_names():
+        for spec in specs_for_section(name):
+            assert "需重启" not in spec.note, f"{spec.key} 的 note 仍含需重启字样"
 
 
 def test_spin_ranges_match_config_validation():
@@ -155,8 +143,6 @@ def test_body_fill_color_spec_registered_in_stream_style_section():
     assert spec is not None
     assert spec.kind == KIND_COLOR
     assert spec.default == config.DEFAULT_BODY_FILL_COLOR
-    assert not spec.restart, "纯绘制参数可热应用，不得标注需重启"
-    assert "body_fill_color" not in restart_keys()
     keys = {s.key for s in specs_for_section("流式窗口样式")}
     assert "body_fill_color" in keys
 
@@ -316,3 +302,139 @@ def test_existing_user_values_not_overwritten_by_defaults(tmp_path):
     spec = spec_by_key("api_base_url")
     assert spec is not None
     assert raw_value_for(spec, raw) == "https://user.example"
+
+
+# ------------------------------------------------------------------ 确认与重启（offscreen 驱动三分支）
+
+_QAPP = None  # 模块级持有 QApplication 引用（局部变量会被 GC 销毁 → QWidget 构造 abort）
+
+
+def _ensure_qapp():
+    global _QAPP
+    if _QAPP is None:
+        from PyQt6.QtWidgets import QApplication
+
+        _QAPP = QApplication.instance() or QApplication([])
+    return _QAPP
+
+
+class _CallableStub:
+    """可编程替身：记录调用次数并返回预置值 / 抛出预置异常。"""
+
+    def __init__(self, result=None, exc: Exception | None = None) -> None:
+        self.calls = 0
+        self.result = result
+        self.exc = exc
+
+    def __call__(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+def _make_window(on_reload, on_restart=None):
+    """offscreen 构造设置窗口（on_reload / on_restart 全替身，不触宿主）。"""
+    from renpy_overlay.settings_window import SettingsWindow
+
+    _ensure_qapp()
+    return SettingsWindow(on_reload=on_reload, on_restart=on_restart)
+
+
+def _answer_stub(answers: list[str]):
+    """问答替身：按预置序列逐个返回三态选择（不弹真实对话框）。"""
+
+    seq = iter(answers)
+    asked: list[str] = []
+
+    def impl() -> str:
+        choice = next(seq)
+        asked.append(choice)
+        return choice
+
+    impl.asked = asked  # type: ignore[attr-defined]
+    return impl
+
+
+def test_reload_failure_skips_restart_dialog():
+    """重载失败：不弹重启问询、不触发重启（保持现状失败提示）。"""
+    reload_stub = _CallableStub(result="读取配置失败：x")
+    window = _make_window(on_reload=reload_stub)
+    window._ask_restart_impl = _answer_stub(["restart"])
+    restart_stub = _CallableStub()
+    window._on_restart = restart_stub
+    window._on_reload_clicked()
+    assert reload_stub.calls == 1
+    assert window._ask_restart_impl.asked == []  # 未问询
+    assert restart_stub.calls == 0
+
+
+def test_confirm_restart_branch_invokes_host():
+    """问询返回 restart：调宿主重启回调（成功无额外提示动作）。"""
+    window = _make_window(on_reload=_CallableStub(result=None))
+    window._ask_restart_impl = _answer_stub(["restart"])
+    restart_stub = _CallableStub(result=None)
+    window._on_restart = restart_stub
+    window._on_reload_clicked()
+    assert window._ask_restart_impl.asked == ["restart"]
+    assert restart_stub.calls == 1
+
+
+def test_confirm_restart_failure_hints_and_keeps_window():
+    """重启回调失败：hint 明确提示且窗口保留（不 close）。"""
+    window = _make_window(on_reload=_CallableStub(result=None))
+    window._ask_restart_impl = _answer_stub(["restart"])
+    window._on_restart = _CallableStub(result="启动新实例失败，详见日志")
+    closed: list[int] = []
+    window.close = lambda: closed.append(1)  # 记录替身：验证未关窗
+    window._on_reload_clicked()
+    assert "重启失败" in window._hint_label.text()
+    assert closed == []
+
+
+def test_confirm_close_branch_closes_settings_window():
+    """问询返回 close：关闭设置窗口（效果同关闭按钮），不触发重启。"""
+    window = _make_window(on_reload=_CallableStub(result=None))
+    window._ask_restart_impl = _answer_stub(["close"])
+    restart_stub = _CallableStub()
+    window._on_restart = restart_stub
+    closed: list[int] = []
+    window.close = lambda: closed.append(1)
+    window._on_reload_clicked()
+    assert closed == [1]
+    assert restart_stub.calls == 0
+
+
+def test_confirm_cancel_branch_keeps_everything():
+    """问询返回 cancel：仅关弹窗返回设置窗口，不重启不关窗。"""
+    window = _make_window(on_reload=_CallableStub(result=None))
+    window._ask_restart_impl = _answer_stub(["cancel"])
+    restart_stub = _CallableStub()
+    window._on_restart = restart_stub
+    closed: list[int] = []
+    window.close = lambda: closed.append(1)
+    window._on_reload_clicked()
+    assert restart_stub.calls == 0
+    assert closed == []
+
+
+def test_restart_without_host_callback_hints_unavailable():
+    """未接入宿主重启回调：点「重启」提示不可用，不崩溃不关窗。"""
+    window = _make_window(on_reload=_CallableStub(result=None), on_restart=None)
+    window._ask_restart_impl = _answer_stub(["restart"])
+    closed: list[int] = []
+    window.close = lambda: closed.append(1)
+    window._on_reload_clicked()
+    assert "重启不可用" in window._hint_label.text()
+    assert closed == []
+
+
+def test_restart_dialog_three_choices_and_default_cancel():
+    """确认框三态常量与默认选择（offscreen 构造，不 exec 不阻塞）。"""
+    from renpy_overlay.settings_window import _RestartConfirmDialog
+
+    _ensure_qapp()
+    dialog = _RestartConfirmDialog()
+    assert dialog.choice == _RestartConfirmDialog.CHOICE_CANCEL
+    dialog._done(_RestartConfirmDialog.CHOICE_CLOSE)
+    assert dialog.choice == _RestartConfirmDialog.CHOICE_CLOSE

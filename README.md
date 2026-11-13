@@ -168,7 +168,7 @@ uv run renpy-overlay
 
 ### 5.5 config.json 配置说明
 
-配置文件在项目根目录（打包版在 exe 旁边），首次运行自动生成，可用记事本编辑，也可用快捷菜单「设置」图形化修改。**改完保存，设置窗口点「确定」可让多数项即时生效**（标注"需重启"的项除外）。完整键表（含默认值、取值范围、非法值回退规则）见 [doc/config.md](doc/config.md)，下面是最常用的键：
+配置文件在项目根目录（打包版在 exe 旁边），首次运行自动生成，可用记事本编辑，也可用快捷菜单「设置」图形化修改。**改完保存，设置窗口点「确定」即可热重载生效；确认后可按弹窗提示一键重启，统一载入全部新配置**。完整键表（含默认值、取值范围、非法值回退规则）见 [doc/config.md](doc/config.md)，下面是最常用的键：
 
 ```jsonc
 {
@@ -197,7 +197,7 @@ uv run renpy-overlay
   "remote_screenshot_enable": true,  // 遥控截图小圆窗开关
   "remote_cache_persist_enable": false, // 遥控器自动化持久化缓存（默认关）
   "remote_cache_db_size_count": 40000, // 持久化缓存条数上限（冷端随机淘汰）
-  "remote_settle_frames": 3         // 稳定窗口帧数（打字机过滤，需重启生效）
+  "remote_settle_frames": 3         // 稳定窗口帧数（打字机过滤）
 }
 ```
 

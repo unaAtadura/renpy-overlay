@@ -12,9 +12,12 @@
   只改对应键、保留未展示键与手工编辑内容）；下次启动由 ``load_config``
   逐项严格校验兜底；
 - **确定按钮**：手动触发宿主 ``on_reload`` 回调（运行时热重载全部已加载
-  配置的模块）；回调返回错误字符串即提示失败且不破坏原配置；
-- **需重启生效**：无法安全热应用的键（窗口样式 / 全屏渲染路径 / 内存缓存
-  容量）在元数据中标注 ``restart=True``，设置名带「（需重启）」后缀。
+  配置的模块）；回调返回错误字符串即提示失败且不破坏原配置；重载成功
+  后弹「是否重启载入配置？」二次确认；
+- **自动重启**：「重启」经宿主 ``on_restart`` 回调分离拉起新实例再退出
+  本实例（见 :mod:`restart`）；「不重启」关闭设置窗口（效果同关闭
+  按钮）；「取消」留在设置窗口（需求 future_自动重启.txt：确认后统一
+  处理，不区分需重启键集合，界面不再展示「（需重启）」提示）。
 
 纯函数层（栏目表 / 键规格 / 值转换）不依赖 Qt，离线单测覆盖（见
 ``tests/test_settings_window.py``）：元数据完整性、键冲突优先级（同键
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from PyQt6.QtWidgets import (
@@ -75,7 +79,6 @@ class SettingSpec:
     maximum: float | None = None    # 数值上限
     choices: tuple[str, ...] = ()   # KIND_ENUM 的可选项
     note: str = ""                  # 取值说明（界面 tooltip + 测试文档）
-    restart: bool = False           # True = 无法安全热应用，需重启生效
     hidden: bool = False            # True = 不在界面展示（记忆型键）
 
 
@@ -118,21 +121,19 @@ def _api_main_specs() -> tuple[SettingSpec, ...]:
 
 #: 跨栏目复用的键组必须为同一实例集合（键冲突优先级测试钉住身份一致）
 _API_MAIN_SPECS = _api_main_specs()
-#: 流式窗口样式键：运行中的双窗单例持有字体与几何，全部标需重启生效
+#: 流式窗口样式键：运行中的双窗单例持有字体与几何（改后经重启生效，
+#: 不再单独标注，统一由「确定」后的二次确认弹窗承担）
 _STREAM_SIZE_SPECS = (
     SettingSpec(
         "stream_window_width", "正文窗宽度（像素）", KIND_INT,
         config.DEFAULT_STREAM_WINDOW_WIDTH,
         minimum=config.MIN_STREAM_WINDOW_WIDTH, maximum=7680,
-        note="实际显示宽度还会被游戏窗口宽度钳制；修改后需重启生效",
-        restart=True,
+        note="实际显示宽度还会被游戏窗口宽度钳制",
     ),
     SettingSpec(
         "stream_window_height", "正文窗高度（像素）", KIND_INT,
         config.DEFAULT_STREAM_WINDOW_HEIGHT,
         minimum=config.MIN_STREAM_WINDOW_HEIGHT, maximum=2160,
-        note="修改后需重启生效",
-        restart=True,
     ),
 )
 
@@ -161,7 +162,7 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 "translation_cache_size_kb", "内存翻译缓存上限（KB）", KIND_INT,
                 config.DEFAULT_TRANSLATION_CACHE_SIZE_KB,
                 minimum=1, maximum=1048576,
-                note="FIFO 分桶淘汰；修改后需重启生效", restart=True,
+                note="FIFO 分桶淘汰",
             ),
             *_API_MAIN_SPECS,
             SettingSpec(
@@ -298,40 +299,34 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
             SettingSpec(
                 "remote_screenshot_enable", "遥控截图开关", KIND_BOOL,
                 config.DEFAULT_REMOTE_SCREENSHOT_ENABLE,
-                note="快捷键模式期间生成 A/B 触发/瞄准小圆窗；修改后需重启生效",
-                restart=True,
+                note="快捷键模式期间生成 A/B 触发/瞄准小圆窗",
             ),
             SettingSpec(
                 "remote_screenshot_hide", "初始隐藏遥控器", KIND_BOOL,
                 config.DEFAULT_REMOTE_SCREENSHOT_HIDE,
-                note="开启后快捷菜单初始显示为“显示遥控器”，且开启快捷键模式时不自动显示 A/B 窗口；修改后需重启生效",
-                restart=True,
+                note="开启后快捷菜单初始显示为“显示遥控器”，且开启快捷键模式时不自动显示 A/B 窗口",
             ),
             SettingSpec(
                 "remote_screenshot_interval", "自动化截图间隔（秒）", KIND_FLOAT,
                 config.DEFAULT_REMOTE_SCREENSHOT_INTERVAL,
                 minimum=config.MIN_REMOTE_SCREENSHOT_INTERVAL, maximum=60.0,
-                note="修改后需重启生效", restart=True,
             ),
             SettingSpec(
                 "remote_cache_size_count", "自动化缓存条数", KIND_INT,
                 config.DEFAULT_REMOTE_CACHE_SIZE_COUNT,
                 minimum=config.MIN_REMOTE_CACHE_SIZE_COUNT, maximum=999,
-                note="感知签名↔译文的内存循环队列容量；修改后需重启生效",
-                restart=True,
+                note="感知签名↔译文的内存循环队列容量",
             ),
             SettingSpec(
                 "remote_screenshot_diameterA", "触发器（A）直径", KIND_INT,
                 config.DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
                 minimum=config.MIN_REMOTE_SCREENSHOT_DIAMETER, maximum=500,
-                note="低于 20 像素无法瞄准，回退默认；修改后需重启生效",
-                restart=True,
+                note="低于 20 像素无法瞄准，回退默认",
             ),
             SettingSpec(
                 "remote_screenshot_diameterB", "瞄准器（B）直径", KIND_INT,
                 config.DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
                 minimum=config.MIN_REMOTE_SCREENSHOT_DIAMETER, maximum=500,
-                note="修改后需重启生效", restart=True,
             ),
         ),
     ),
@@ -352,8 +347,7 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
             SettingSpec(
                 "fullscreen_mode", "全屏渲染路径", KIND_ENUM, config.DEFAULT_FULLSCREEN_MODE,
                 choices=("sdl", "qt"),
-                note="sdl=SDL 独立窗口（更稳）/ qt=Qt 顶层回退；修改后需重启生效",
-                restart=True,
+                note="sdl=SDL 独立窗口（更稳）/ qt=Qt 顶层回退",
             ),
         ),
     ),
@@ -365,30 +359,26 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 "stream_window_font_size", "正文字号（像素）", KIND_INT,
                 config.DEFAULT_STREAM_WINDOW_FONT_SIZE,
                 minimum=config.MIN_STREAM_FONT_SIZE, maximum=96,
-                note="修改后需重启生效", restart=True,
             ),
             SettingSpec(
                 "stream_window_line_spacing", "正文行距倍数", KIND_FLOAT,
                 config.DEFAULT_STREAM_WINDOW_LINE_SPACING,
                 minimum=config.MIN_STREAM_LINE_SPACING, maximum=3.0,
-                note="小于 1.0 会上下行重叠；修改后需重启生效", restart=True,
+                note="小于 1.0 会上下行重叠",
             ),
             SettingSpec(
                 "stream_window_title_font_size", "标题字号（像素）", KIND_INT,
                 config.DEFAULT_STREAM_WINDOW_TITLE_FONT_SIZE,
                 minimum=config.MIN_STREAM_FONT_SIZE, maximum=48,
-                note="修改后需重启生效", restart=True,
             ),
             SettingSpec(
                 "stream_window_title_gap", "标题与正文间距（像素）", KIND_INT,
                 config.DEFAULT_STREAM_WINDOW_TITLE_GAP, minimum=0, maximum=100,
-                note="修改后需重启生效", restart=True,
             ),
             SettingSpec(
                 "translate_window_style", "悬浮窗样式", KIND_ENUM,
                 config.DEFAULT_TRANSLATE_WINDOW_STYLE, choices=("1", "2"),
-                note="1=透明双窗（默认）；2=半透明黑色悬浮窗；修改后需重启生效",
-                restart=True,
+                note="1=透明双窗（默认）；2=半透明黑色悬浮窗",
             ),
             SettingSpec(
                 "body_fill_color", "正文文字颜色", KIND_COLOR,
@@ -404,13 +394,13 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
                 "chat_window_width", "对话窗宽度（像素）", KIND_INT,
                 config.DEFAULT_CHAT_WINDOW_WIDTH,
                 minimum=config.MIN_STREAM_WINDOW_WIDTH, maximum=7680,
-                note="缺省时回退正文窗宽度；修改后需重启生效", restart=True,
+                note="缺省时回退正文窗宽度",
             ),
             SettingSpec(
                 "chat_window_height", "对话窗高度（像素）", KIND_INT,
                 config.DEFAULT_CHAT_WINDOW_HEIGHT,
                 minimum=config.MIN_STREAM_WINDOW_HEIGHT, maximum=2160,
-                note="缺省时回退正文窗高度；修改后需重启生效", restart=True,
+                note="缺省时回退正文窗高度",
             ),
             SettingSpec(
                 "api_base_url_chat", "AI 对话 API 地址", KIND_STR,
@@ -434,7 +424,7 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
 #: 不进入设置窗口（消费入口仅 injection_flow._toggle_choice_log）；
 #: 遥控器自动化持久化缓存两键（feat/remote-cache-persist）一期仅由
 #: config.json 手改（cli.py 已有说明），设置窗口暂不加 UI；稳定窗口帧数
-#:（remote_settle_frames）随构造注入需重启生效，同口径登记；
+#:（remote_settle_frames）随构造注入（改后经重启生效），同口径登记；
 #: 快捷菜单锚点直径（future_右键快捷菜单_分离）属锚点自身启动参数，
 #: layout.json 记录值恢复时优先，同口径登记
 _HIDDEN_KEYS: frozenset[str] = frozenset(
@@ -547,26 +537,75 @@ def commit_value(spec: SettingSpec, widget_value):
     return widget_value
 
 
-def restart_keys() -> set[str]:
-    """标注为「需重启生效」的键集合（界面提示与测试用）。"""
-    return {spec.key for _name, specs in _SECTIONS for spec in specs if spec.restart}
-
-
 # ------------------------------------------------------------------ 窗口
+
+
+class _RestartConfirmDialog(QDialog):
+    """二次确认弹窗（需求 future_自动重启.txt）：三按钮严格左中右定序。
+
+    左「重启」（红色，进入重启流程）/ 中「不重启」（关闭本弹窗与设置
+    窗口，效果同设置窗口关闭按钮）/ 右「取消」（仅关闭本弹窗返回设置
+    窗口）。初始焦点在「取消」，Esc 与窗口关闭按钮同语义（防误触）。
+    """
+
+    CHOICE_RESTART = "restart"
+    CHOICE_CLOSE = "close"
+    CHOICE_CANCEL = "cancel"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("重启确认")
+        self.choice = self.CHOICE_CANCEL  # Esc / 关闭按钮默认视为取消
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("是否重启载入配置？", self))
+        buttons = QHBoxLayout()
+        restart_button = QPushButton("重启")
+        # 红色按钮：主操作视觉警示（重启会中断录制/识别等运行中任务）
+        restart_button.setStyleSheet(
+            "QPushButton { background-color: #d93025; color: white; }"
+            "QPushButton:hover { background-color: #b3261e; }"
+        )
+        decline_button = QPushButton("不重启")
+        cancel_button = QPushButton("取消")
+        restart_button.clicked.connect(lambda: self._done(self.CHOICE_RESTART))
+        decline_button.clicked.connect(lambda: self._done(self.CHOICE_CLOSE))
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(restart_button)
+        buttons.addWidget(decline_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+        cancel_button.setDefault(True)
+        cancel_button.setFocus()
+
+    def _done(self, choice: str) -> None:
+        """记录三态选择后接受弹窗（reject 路径保持默认 cancel）。"""
+        self.choice = choice
+        self.accept()
 
 
 class SettingsWindow(QWidget):
     """双栏设置窗口：左栏目列表 + 右设置页；改动即写盘，确定触发热重载。
 
     宿主交互：``on_reload`` 回调（「确定」按钮触发宿主
-    ``reload_config()``，返回 None=成功 / 错误字符串=失败）；
-    ``on_closed`` 回调（窗口关闭时宿主清引用）。
+    ``reload_config()``，返回 None=成功 / 错误字符串=失败）；重载成功后
+    弹「是否重启载入配置？」二次确认；``on_restart`` 回调（「重启」触发
+    宿主 ``request_restart()``，返回 None=已触发重启 / 错误字符串=失败
+    保留会话）；``on_closed`` 回调（窗口关闭时宿主清引用）。
     """
 
-    def __init__(self, on_reload=None, on_closed=None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        on_reload=None,
+        on_restart=None,
+        on_closed=None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._on_reload = on_reload
+        self._on_restart = on_restart
         self._on_closed = on_closed
+        # 重启问询替身（离线测试注入，不构造真实窗口；None=默认确认框）
+        self._ask_restart_impl: Callable[[], str] | None = None
 
         self.setWindowTitle("设置")
         self.resize(720, 520)
@@ -641,10 +680,15 @@ class SettingsWindow(QWidget):
         if name is not None:
             self._stack.set_current_section(name, self._read_raw())
 
-    # ---- 确定（热重载） ----------------------------------------------------------
+    # ---- 确定（热重载 + 重启确认） ------------------------------------------
 
     def _on_reload_clicked(self) -> None:
-        """「确定」：触发宿主 reload_config（运行时立即生效）；失败有明确提示。"""
+        """「确定」：热重载后弹「是否重启载入配置？」；重载失败不弹窗只提示。
+
+        需求 future_自动重启.txt：确认后统一走同一套重启流程（不区分需
+        重启键集合）；「取消」留在设置窗口（配置已写盘、热应用已生效），
+        「不重启」关闭设置窗口（效果同关闭按钮），「重启」进入重启流程。
+        """
         if not callable(self._on_reload):
             self._hint_label.setText("配置已保存（下次启动生效）。")
             return
@@ -655,10 +699,45 @@ class SettingsWindow(QWidget):
             error = str(exc)
         if error:
             self._hint_label.setText(f"重载失败：{error}（已保存的配置不受影响）")
+            return
+        self._hint_label.setText("已重载全部配置并生效")
+        choice = self._ask_restart()
+        if choice == _RestartConfirmDialog.CHOICE_RESTART:
+            self._on_restart_confirmed()
+        elif choice == _RestartConfirmDialog.CHOICE_CLOSE:
+            self._on_restart_declined()
         else:
-            restart = _loaded_restart_labels()
-            suffix = f"；需重启生效：{'、'.join(restart)}" if restart else ""
-            self._hint_label.setText(f"已重载全部配置并生效{suffix}")
+            self._on_restart_cancelled()
+
+    # ---- 重启确认（二次弹窗三分支，供离线测试直接驱动） ----------------------
+
+    def _ask_restart(self) -> str:
+        """问询是否重启（返回 _RestartConfirmDialog.CHOICE_* 三态之一）。"""
+        if callable(self._ask_restart_impl):
+            return str(self._ask_restart_impl())
+        dialog = _RestartConfirmDialog(self)
+        dialog.exec()
+        return dialog.choice
+
+    def _on_restart_confirmed(self) -> None:
+        """「重启」：调宿主重启回调；失败提示并保留当前会话与窗口。"""
+        if not callable(self._on_restart):
+            self._hint_label.setText("重启不可用（宿主未接入自动重启）。")
+            return
+        try:
+            error = self._on_restart()
+        except Exception as exc:  # 回调异常视为重启失败
+            logger.exception("重启回调异常")
+            error = str(exc)
+        if error:
+            self._hint_label.setText(f"重启失败：{error}（当前会话已保留）")
+
+    def _on_restart_declined(self) -> None:
+        """「不重启」：关闭二次弹窗与设置窗口（效果同设置窗口关闭按钮）。"""
+        self.close()
+
+    def _on_restart_cancelled(self) -> None:
+        """「取消」：仅关闭二次弹窗返回设置窗口，无任何后续动作。"""
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if callable(self._on_closed):
@@ -667,29 +746,6 @@ class SettingsWindow(QWidget):
             except Exception:  # pragma: no cover - 回调失败不影响关闭
                 logger.exception("设置窗口关闭回调失败")
         super().closeEvent(event)
-
-
-def _loaded_restart_labels() -> list[str]:
-    """当前 config.json 中与默认不同的需重启键中文名（提示文案用）。"""
-    labels: list[str] = []
-    raw = _read_raw_for_labels()
-    for _name, specs in all_sections():
-        for spec in specs:
-            if spec.restart and spec.key in raw and raw[spec.key] != spec.default:
-                labels.append(spec.label)
-    return sorted(set(labels))
-
-
-def _read_raw_for_labels() -> dict:
-    """提示文案专用的轻量 raw 读取（失败返回空 dict，不影响主流程）。"""
-    target = config.default_path()
-    if not target.is_file():
-        return {}
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
 
 
 class _ColorField(QWidget):
@@ -753,8 +809,7 @@ class _SectionStack(QWidget):
         for spec in specs:
             widget = self._make_widget(spec)
             widgets[spec.key] = widget
-            label = f"{spec.label}（需重启）" if spec.restart else spec.label
-            form.addRow(label, widget)
+            form.addRow(spec.label, widget)
         scroll_note = ""
         if specs and any(spec.note for spec in specs):
             scroll_note = "  ".join(
