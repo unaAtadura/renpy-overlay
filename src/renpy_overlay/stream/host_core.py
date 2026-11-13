@@ -241,6 +241,7 @@ class StreamOverlayCore:
             # 签名与缓存命中；隐藏后不自动恢复（防反复隐藏/显示的爆闪），
             # 须用户「显示遥控器」手动恢复
             hide_arm_before_capture=self._remote_screenshot.hide_arm_window,
+            settle_frames=self._config.remote_settle_frames,
         )
         self._remote_screenshot.attach_automation(self._remote_automation)
         self._quick_menu.attach_remote_automation(self._remote_automation)

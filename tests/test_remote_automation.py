@@ -877,9 +877,21 @@ def _make_controller(
     persistent_lookup=None,
     persistent_put=None,
     submit_ok=True,
+    settle_frames=1,
+    capture_fn=None,
 ):
-    """接线测试共用控制器：图像/签名确定，提交与持久化回调可观测。"""
-    return RemoteAutomationController(
+    """接线测试共用控制器：图像/签名确定，提交与持久化回调可观测。
+
+    返回 ``(controller, timer)``：timer 为手动驱动的 _StubTimer（tick 用）。
+    """
+    timer = _StubTimer()
+
+    def _make_timer(interval_ms: int, on_tick) -> _StubTimer:
+        timer.interval_ms = interval_ms
+        timer.on_tick = on_tick
+        return timer
+
+    controller = RemoteAutomationController(
         interval=0.5,
         cache_size=3,
         has_windows=lambda: True,
@@ -895,11 +907,13 @@ def _make_controller(
         get_windows_hidden=lambda: False,
         set_windows_hidden=lambda value: None,
         bbox_provider=lambda window: (0, 0, 100, 100),
-        capture_fn=lambda bbox: _gradient_image(),
-        timer_factory=lambda interval_ms, on_tick: _StubTimer(),
+        capture_fn=capture_fn or (lambda bbox: _gradient_image()),
+        timer_factory=_make_timer,
         persistent_lookup=persistent_lookup,
         persistent_put=persistent_put,
+        settle_frames=settle_frames,
     )
+    return controller, timer
 
 
 def test_constructor_rejects_non_callable_persistent_callbacks():
@@ -924,35 +938,39 @@ def test_constructor_rejects_non_callable_persistent_callbacks():
     RemoteAutomationController(**base)
 
 
-def test_persistent_hit_displays_without_api_and_backfills_memory(monkeypatch):
-    """数据库命中：直接上屏不发 API、不入历史，且回填内存（二次命中零查询）。"""
+def test_persistent_hit_displays_without_api_and_restart_forces_api(monkeypatch):
+    """首轮持久化命中：直接上屏不发 API、不入历史、回填内存；
 
-    def _forbidden(*args: object, **kwargs: object) -> str:
-        raise AssertionError("持久化缓存命中不应发起 API")
+    重启轮（auto 态再次单击 A）：跳过两级缓存强制发起 API（缓存错误命中
+    的人工兜底），持久层不被再次查询，也不产生缓存命中上屏。
+    """
 
-    monkeypatch.setattr(flow_module, "translate_image_verified", _forbidden)
     displayed, submitted, lookups = [], [], []
     sig = grid_signature(_gradient_image())
-    controller = _make_controller(
+    controller, _ = _make_controller(
         displayed,
         submitted,
         persistent_lookup=lambda signature: (lookups.append(signature), "库译文")[1],
     )
     controller.toggle_automation()
     controller.on_trigger_clicked(_StubWindow("w"))
-    assert displayed == ["库译文"]  # 直接上屏
+    assert displayed == ["库译文"]  # 首轮命中直接上屏
     assert submitted == []  # 未发 API
-    assert lookups == [sig]  # 查询恰一次
-    controller.on_trigger_clicked(_StubWindow("w"))  # 第二轮：内存回填命中
-    assert displayed == ["库译文", "库译文"]
-    assert lookups == [sig]  # 持久层仅首次查询（回填生效）
+    assert lookups == [sig]  # 持久层查询恰一次
+    assert controller._cache.lookup(sig) == "库译文"  # 回填内存（白盒验证）
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮：人工兜底
+    assert submitted == [sig]  # 跳过缓存强制发起 API
+    assert lookups == [sig]  # 持久层未被再次查询
+    assert displayed == ["库译文"]  # 无命中上屏（等待 API 回执）
+    controller.on_translation_result(sig, "API 新译文", screenshot_id=None)
+    assert displayed == ["库译文"]  # 回执上屏由宿主收尾链负责，控制器不直显
 
 
 def test_persistent_miss_submits_then_put_with_region_and_screenshot_id():
     """未命中：正常提交 API；成功回执触发恰一次持久化写入（含 region 与溯源 id）。"""
     displayed, submitted, puts, lookups = [], [], [], []
     sig = grid_signature(_gradient_image())
-    controller = _make_controller(
+    controller, _ = _make_controller(
         displayed,
         submitted,
         persistent_lookup=lambda signature: lookups.append(signature) or None,
@@ -974,7 +992,7 @@ def test_persistent_put_skipped_on_abort_or_missing_text():
     """中止/失败回执（text=None）：不触发持久化写入，pending_region 清空。"""
     submitted, puts = [], []
     sig = grid_signature(_gradient_image())
-    controller = _make_controller(
+    controller, _ = _make_controller(
         [],
         submitted,
         persistent_put=lambda signature, text, w, h, sid: puts.append(
@@ -993,7 +1011,7 @@ def test_pending_region_not_left_on_rejected_submit():
     """提交被拒：不残留区域尺寸；后续防御性回执 region 兜底 None。"""
     submitted, puts = [], []
     sig = grid_signature(_gradient_image())
-    controller = _make_controller(
+    controller, _ = _make_controller(
         [],
         submitted,
         persistent_put=lambda signature, text, w, h, sid: puts.append(
@@ -1104,6 +1122,108 @@ def test_manual_screenshot_path_never_touches_persistent_cache():
     ):
         source = inspect.getsource(getattr(ScreenshotFlowMixin, name))
         assert "persistent" not in source, f"{name} 不得触碰持久化缓存"
+
+
+# ---- 稳定窗口（settle_frames>1；打字机中间态过滤） ----------------------------------
+
+
+def test_settle_window_delays_submit_until_stable():
+    """settle_frames=3：首轮进入观察不提交；连续相似 tick 达 3 帧后提交。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 首轮进入观察（进入帧=第 1 帧）
+    assert submitted == []  # 观察期不提交
+    assert controller._settle_pending is True
+    assert controller._settle_count == 1
+    timer.on_tick()  # 第 2 帧相似
+    assert controller._settle_count == 2
+    assert submitted == []
+    timer.on_tick()  # 第 3 帧相似 → 达标提交
+    assert submitted == [sig]
+    assert controller._settle_pending is False  # 观察态已清
+
+
+def test_settle_window_refreshes_candidate_on_typewriter():
+    """打字机持续输出：每帧与候选不相似 → 候选刷新归 1，中间态永不提交。"""
+    frames = [
+        _gradient_image(offset=0),
+        _gradient_image(offset=40),
+        _gradient_image(offset=80),
+        _gradient_image(offset=120),
+        _gradient_image(offset=160),
+    ]
+    iterator = iter(frames * 3)
+    displayed, submitted = [], []
+    controller, timer = _make_controller(
+        displayed,
+        submitted,
+        settle_frames=3,
+        capture_fn=lambda bbox: next(iterator),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 帧 A 进入观察
+    for _ in range(5):
+        timer.on_tick()  # 每帧都与候选不相似 → 持续刷新候选
+    assert submitted == []  # 中间态零提交
+    assert controller._settle_pending is True  # 仍在观察（候选持续刷新）
+
+
+def test_settle_frames_one_keeps_legacy_immediate_submit():
+    """settle_frames=1：无稳定窗口，判变通过直接提交（现状行为回归）。"""
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=1)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 首轮直接提交
+    assert submitted == [grid_signature(_gradient_image())]
+    assert controller._settle_pending is False
+    timer.on_tick()  # 无变化：不重复提交
+    assert submitted == [grid_signature(_gradient_image())]
+
+
+def test_settle_observation_frozen_while_busy():
+    """busy 冻结：观察计数不推进、不丢失；恢复后继续计数直到达标。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    controller._is_busy = lambda: True  # 白盒置忙碌（观察态冻结）
+    timer.on_tick()
+    assert controller._settle_count == 1  # 冻结不推进
+    assert controller._settle_pending is True  # 不丢失
+    controller._is_busy = lambda: False
+    timer.on_tick()  # 恢复后继续
+    timer.on_tick()  # 达标提交
+    assert submitted == [sig]
+
+
+def test_restart_round_during_settle_forces_submit_and_clears():
+    """观察中再次点击 A：跳过观察与缓存强制提交，观察态清空（人工兜底）。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, _ = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._settle_pending is True
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮强制
+    assert submitted == [sig]
+    assert controller._settle_pending is False
+    assert controller._settle_candidate is None
+
+
+def test_stop_cycle_clears_settle_state():
+    """停止周期（菜单关/快捷键退出/B 离开）：稳定观察态一并清空。"""
+    displayed, submitted = [], []
+    controller, _ = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._settle_pending is True
+    controller.toggle_automation()  # 菜单关 → set_enabled(False) → _stop_cycle
+    assert controller._settle_pending is False
+    assert controller._settle_candidate is None
+    assert controller._settle_count == 0
 
 
 

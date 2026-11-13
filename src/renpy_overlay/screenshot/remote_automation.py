@@ -298,6 +298,7 @@ class RemoteAutomationController:
         timer_factory: Callable[[int, Callable[[], None]], object] | None = None,
         persistent_lookup: Callable[[Signature], str | None] | None = None,
         persistent_put: Callable[[Signature, str, int | None, int | None, int | None], None] | None = None,
+        settle_frames: int = 1,
     ) -> None:
         # 注入契约（构造期 fail-fast，同 HotkeyMode 构造校验先例）：宿主误把
         # property 取值当回调传入（如 windows_created 不加括号/不包 lambda）时，
@@ -345,6 +346,9 @@ class RemoteAutomationController:
             )
         self._persistent_lookup = persistent_lookup
         self._persistent_put = persistent_put
+        # 稳定窗口帧数（构造注入，修改需重启）：判变通过后连续 N 帧与候选
+        # 相似才提交，过滤打字机逐字输出的中间态；N=1 = 无稳定窗口（现状）
+        self._settle_frames = max(1, int(settle_frames))
         # ---- 状态机 ----
         self._enabled = False  # 菜单开关「遥控器自动化: 关/开」
         self._running = False  # 自动状态：周期运行中（A 单击后进入）
@@ -353,6 +357,9 @@ class RemoteAutomationController:
         self._pending_change = False  # 截图变化状态（忙碌期间保持，恢复后提交）
         self._in_flight = False  # 本控制器提交的翻译在途中（宿主回执清除）
         self._pending_region: tuple[int, int] | None = None  # 在途请求的抓屏区域尺寸（回执写入缓存用）
+        self._settle_pending = False  # 稳定观察中（判变通过后等待连续相似帧）
+        self._settle_candidate: Signature | None = None  # 观察候选帧签名（最后一张变化帧）
+        self._settle_count = 0  # 已确认与候选相似的帧数（含进入帧）
         self._timer: object | None = None
 
     # ---- 状态检视（QuickMenu 文案用） -------------------------------------------
@@ -446,21 +453,30 @@ class RemoteAutomationController:
         self._start_round()
 
     def _start_round(self) -> None:
-        """首轮/重启轮共用入口：立即截图一轮（先查缓存，未命中提交）并进入自动。"""
+        """首轮/重启轮共用入口：立即截图一轮并进入自动。
+
+        首轮先查缓存（未命中提交；settle_frames>1 时进入稳定观察后提交）；
+        重启轮（auto 态再次单击 A，决议 A5）作为缓存错误命中的人工兜底：
+        跳过两级缓存与稳定观察，强制发起一次 API 翻译。
+        """
         capture = self._capture_current()
         if capture is None:
             return  # 抓屏失败/目标失效：不进入自动状态，等候再次点击
         image, current = capture
         self._baseline = current
         self._pending_change = False
+        self._clear_settle()  # 首轮/重启轮都重置观察（重启轮强制翻译不进观察）
         if self._running:
-            logger.info("遥控器自动化：重启一轮截图翻译（周期继续）")
-        else:
-            self._running = True
-            self._ensure_timer().start()
-            logger.info(
-                "遥控器自动化：第一轮截图翻译已启动（周期 %d ms）", self._interval_ms
-            )
+            logger.info("遥控器自动化：重启一轮截图翻译（周期继续，跳过缓存强制翻译）")
+            self._process_change(image, current, use_cache=False)
+            return
+        self._running = True
+        self._ensure_timer().start()
+        logger.info(
+            "遥控器自动化：第一轮截图翻译已启动（周期 %d ms）", self._interval_ms
+        )
+        if self._begin_settle(current):
+            return
         self._process_change(image, current)
 
     # ---- 周期 tick 与变化判定 -------------------------------------------------------
@@ -472,7 +488,12 @@ class RemoteAutomationController:
         return self._timer
 
     def _on_tick(self) -> None:
-        """周期 tick（主线程）：忙碌保持变化状态；恢复后先查缓存再提交。"""
+        """周期 tick（主线程）：忙碌保持变化状态；恢复后先查缓存再提交。
+
+        稳定观察（settle_frames>1）：判变通过不立即提交，连续 N 帧与候选
+        相似才提交（过滤打字机逐字输出的中间态）；观察期以候选为参照推进
+        计数（与基准无关），画面持续变化则刷新候选。
+        """
         if not self._enabled or not self._running:
             self._stop_cycle()
             return
@@ -487,19 +508,31 @@ class RemoteAutomationController:
         if self._is_busy():
             # 需求：API 阻塞期间保持截图变化状态，继续周期性截图，不再比较。
             # 本控制器自己提交的在途请求不置挂起（结果回执后正常与基准比较，
-            # 避免每次翻译完成后多一次冗余的「恢复提交」）
+            # 避免每次翻译完成后多一次冗余的「恢复提交」）；稳定观察态冻结，
+            # 恢复后重新观察（画面稳定与否以恢复后为准）
             if not self._in_flight:
                 self._pending_change = True
             return
+        if self._settle_pending:
+            # 稳定观察优先于变化/无变化分支：观察计数以候选为参照推进，不受
+            # 基准相似性干扰（打字机完成后 current 仍远离基准，但与候选相似）
+            self._advance_settle(image, current)
+            return
         if self._pending_change:
             # 线路通畅后的第一 tick：把新的截图走变化路径（先查缓存，决议 A7）
+            if self._begin_settle(current):
+                return
             self._process_change(image, current)
             return
         if self._baseline is None:
+            if self._begin_settle(current):
+                return
             self._process_change(image, current)
             return
         ratio = signature_change_ratio(current, self._baseline)
         if ratio >= SIGNATURE_CHANGE_RATIO:
+            if self._begin_settle(current):
+                return
             self._process_change(image, current)
             return
         # 无变化（基准不随无变化的 tick 前移，缓慢漂移累计到阈值才翻译）；
@@ -510,24 +543,81 @@ class RemoteAutomationController:
             SIGNATURE_CHANGE_RATIO * 100,
         )
 
-    def _process_change(self, image: Image.Image, current: Signature) -> None:
-        """「画面已变化」的统一路径（首轮/重启轮/常规变化/恢复分支共用）：
+    # ---- 稳定观察（settle_frames>1；过滤打字机逐字输出中间态） ----------------------
 
-        先查缓存（决议 A7：命中直接上屏不发 API）；未命中且宿主空闲则提交
-        API（成功进入请求流程即重置变化状态，需求）；宿主恰好在途则保持
-        变化状态等待恢复分支重试（同时只允许一个在途）。
+    def _begin_settle(self, current: Signature) -> bool:
+        """画面变化后进入稳定观察（settle_frames>1）；返回 True=已拦截调用方。
+
+        进入帧计为第 1 帧；后续每 tick 与候选相似则计数推进、不相似（打字机
+        继续输出）则刷新候选归 1——中间态永不提交、永不写入缓存。
+        """
+        if self._settle_frames <= 1:
+            return False
+        self._settle_pending = True
+        self._settle_candidate = current
+        self._settle_count = 1
+        logger.debug(
+            "遥控器自动化：画面变化，进入稳定观察（1/%d 帧）", self._settle_frames
+        )
+        return True
+
+    def _advance_settle(self, image: Image.Image, current: Signature) -> None:
+        """稳定观察推进（观察态存在时的每个 tick）：以候选为参照。
+
+        与候选相似 → 计数推进，达 settle_frames 帧走变化路径（查缓存→提交）；
+        不相似（打字机继续输出）→ 刷新候选归 1，永不提交中间态。
+        """
+        if signatures_similar(current, self._settle_candidate):
+            self._settle_count += 1
+            if self._settle_count < self._settle_frames:
+                logger.debug(
+                    "遥控器自动化：稳定确认中（%d/%d 帧）",
+                    self._settle_count,
+                    self._settle_frames,
+                )
+                return
+            logger.info(
+                "遥控器自动化：画面已稳定 %d 帧，提交翻译", self._settle_frames
+            )
+            self._clear_settle()
+            self._process_change(image, current)
+            return
+        self._settle_candidate = current
+        self._settle_count = 1
+        logger.debug(
+            "遥控器自动化：画面持续变化，刷新稳定候选（1/%d 帧）", self._settle_frames
+        )
+
+    def _clear_settle(self) -> None:
+        """清除稳定观察状态（提交/取消/停止周期共用）。"""
+        self._settle_pending = False
+        self._settle_candidate = None
+        self._settle_count = 0
+
+    def _process_change(
+        self, image: Image.Image, current: Signature, *, use_cache: bool = True
+    ) -> None:
+        """「画面已变化」的统一路径（首轮/常规变化/恢复分支共用）：
+
+        use_cache=True（默认）先查缓存（决议 A7：命中直接上屏不发 API）；
+        use_cache=False 用于重启轮人工兜底（决议 A5 的自然延伸：auto 态
+        再次单击 A = 用户判定缓存命中错误，跳过两级缓存与回填强制翻译）。
+        未命中且宿主空闲则提交 API（成功进入请求流程即重置变化状态，需求）；
+        宿主恰好在途则保持变化状态等待恢复分支重试（同时只允许一个在途）。
         """
         self._baseline = current
         self._pending_change = False
-        hit = self._cache.lookup(current)
-        if hit is None and self._persistent_lookup is not None:
-            # 持久化二级命中（异常由存储层吞噬，None = 未命中）：命中直接上屏
-            # 并回填内存（同会话同画面再次出现走零 IO 路径）；不入历史库，
-            # 与内存命中语义一致（零写库：仅存储层内部刷 LRU 活性时间戳）
-            hit = self._persistent_lookup(current)
-            if hit is not None:
-                self._cache.put(current, hit)
-                logger.info("遥控器自动化：持久化缓存命中，直接上屏（不发 API、不入历史）")
+        hit = None
+        if use_cache:
+            hit = self._cache.lookup(current)
+            if hit is None and self._persistent_lookup is not None:
+                # 持久化二级命中（异常由存储层吞噬，None = 未命中）：命中直接上屏
+                # 并回填内存（同会话同画面再次出现走零 IO 路径）；不入历史库，
+                # 与内存命中语义一致（零写库：仅存储层内部刷 LRU 活性时间戳）
+                hit = self._persistent_lookup(current)
+                if hit is not None:
+                    self._cache.put(current, hit)
+                    logger.info("遥控器自动化：持久化缓存命中，直接上屏（不发 API、不入历史）")
         if hit is not None:
             logger.info("遥控器自动化：缓存命中，直接上屏（不发 API）")
             self._display(hit)
@@ -580,9 +670,10 @@ class RemoteAutomationController:
         return image, grid_signature(image)
 
     def _stop_cycle(self) -> None:
-        """停止周期截图（回到等待点击态）：清变化状态与基准签名。"""
+        """停止周期截图（回到等待点击态）：清变化状态、稳定观察与基准签名。"""
         self._running = False
         self._pending_change = False
+        self._clear_settle()
         self._baseline = None
         if self._timer is not None:
             self._timer.stop()
