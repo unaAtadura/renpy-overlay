@@ -567,7 +567,10 @@ class StreamOverlayCore:
            快照，顺序颠倒会记不到窗口；仅恢复模式开关（主开关恒为关）；
         4) 选项副作用日志窗口：跳过注入模式硬守卫——即便复制了别处的
            layout 文件也不显示（需求）；恢复位置/大小/锁定，不再从功能
-           图标右上角弹出。
+           图标右上角弹出；
+        5) 快捷菜单锚点：恢复直径/位置/锁定态（直径恢复优先于 config
+           初始默认值）；坐标离屏回退默认位置；layout 无锚点记录（如旧版
+           布局文件）时跳过恢复，保持启动初始位置。
         """
         stream = state.stream_window
         self.width = stream.width
@@ -606,9 +609,33 @@ class StreamOverlayCore:
             choice_restored = self._choice_log_window is not None
         elif choice.open and self.skip_injection:
             logger.info("跳过注入模式不恢复选项副作用日志窗口（需求：无此窗口）")
+        anchor_state = state.quick_menu_anchor
+        anchor_desc = "无记录（保持初始位置）"
+        if anchor_state is not None:
+            anchor_pos: tuple[int, int] | None = (anchor_state.x, anchor_state.y)
+            if not layout.rect_intersects_any_screen(
+                anchor_state.x,
+                anchor_state.y,
+                anchor_state.diameter,
+                anchor_state.diameter,
+                self._screen_rects_logical(),
+            ):
+                logger.warning(
+                    "layout 记录的快捷菜单锚点坐标 (%d, %d) 落到屏幕之外，保持默认位置",
+                    anchor_state.x,
+                    anchor_state.y,
+                )
+                anchor_pos = None
+            self._menu_anchor.apply_layout(
+                diameter=anchor_state.diameter, pos=anchor_pos, locked=anchor_state.locked
+            )
+            anchor_desc = (
+                f"pos={anchor_pos!r}，diameter={self._menu_anchor.diameter}，"
+                f"locked={self._menu_anchor.locked}"
+            )
         logger.info(
             "布局已恢复：流式窗口 %dx%d（锁定=%s，offset=%s），截图窗口 %d 个，"
-            "快捷键模式=%s，副作用日志=%s",
+            "快捷键模式=%s，副作用日志=%s，锚点（%s）",
             self.width,
             self.height,
             self._locked,
@@ -616,6 +643,7 @@ class StreamOverlayCore:
             self._quick_menu.window_count,
             self._hotkey_mode.enabled,
             choice_restored,
+            anchor_desc,
         )
 
     def _restore_screenshot_windows(
@@ -704,6 +732,8 @@ class StreamOverlayCore:
             geo = choice.geometry()
             choice_rect = (geo.x(), geo.y(), geo.width(), geo.height())
             choice_locked = choice.is_locked
+        # 快捷菜单锚点（Qt 全局逻辑坐标，与截图窗/日志窗同一保存口径）
+        anchor_geo = self._menu_anchor.geometry()
         payload = layout.collect_layout(
             stream_width=self.width,
             stream_height=self.height,
@@ -715,6 +745,10 @@ class StreamOverlayCore:
             choice_log_open=choice is not None,
             choice_log_rect=choice_rect,
             choice_log_locked=choice_locked,
+            anchor_x=anchor_geo.x(),
+            anchor_y=anchor_geo.y(),
+            anchor_diameter=self._menu_anchor.diameter,
+            anchor_locked=self._menu_anchor.locked,
         )
         layout.save_layout(path, payload)
 

@@ -28,6 +28,10 @@ def _snapshot(**overrides) -> dict:
         choice_log_open=True,
         choice_log_rect=(5, 6, 160, 320),
         choice_log_locked=True,
+        anchor_x=100,
+        anchor_y=150,
+        anchor_diameter=60,
+        anchor_locked=True,
     )
     kwargs.update(overrides)
     return layout.collect_layout(**kwargs)
@@ -68,6 +72,8 @@ def test_collect_parse_roundtrip_preserves_all_fields():
     assert (state.choice_log_window.x, state.choice_log_window.y) == (5, 6)
     assert (state.choice_log_window.width, state.choice_log_window.height) == (160, 320)
     assert state.choice_log_window.locked is True
+    anchor = state.quick_menu_anchor
+    assert (anchor.x, anchor.y, anchor.diameter, anchor.locked) == (100, 150, 60, True)
 
 
 def test_parse_ignores_unknown_fields_forward_compat():
@@ -146,6 +152,35 @@ def test_choice_log_missing_section_means_closed():
     del payload["choice_log_window"]
     state = layout.parse_layout(payload)
     assert state.choice_log_window.open is False
+
+
+def test_quick_menu_anchor_missing_section_means_no_record():
+    """节缺失（如旧版布局文件）→ None：宿主跳过恢复、保持锚点初始位置。"""
+    payload = _snapshot()
+    del payload["quick_menu_anchor"]
+    state = layout.parse_layout(payload)
+    assert state.quick_menu_anchor is None
+
+
+def test_quick_menu_anchor_non_dict_section_means_no_record():
+    """节类型不对：同“无有效记录”降级 → None（不把默认坐标当有效记录）。"""
+    payload = _snapshot()
+    payload["quick_menu_anchor"] = "anchor"
+    state = layout.parse_layout(payload)
+    assert state.quick_menu_anchor is None
+
+
+def test_quick_menu_anchor_invalid_fields_fall_back():
+    payload = _snapshot()
+    payload["quick_menu_anchor"]["diameter"] = 10  # 低于下限 20：回退默认（非钳制）
+    payload["quick_menu_anchor"]["locked"] = "yes"
+    payload["quick_menu_anchor"]["x"] = "left"
+    state = layout.parse_layout(payload)
+    anchor = state.quick_menu_anchor
+    assert anchor.diameter == layout.QuickMenuAnchorLayout().diameter  # config 默认 50
+    assert anchor.locked is False
+    assert anchor.x == 0
+    assert anchor.y == 150  # 合法字段不受同节非法字段影响
 
 
 def test_screenshot_entries_truncated_to_limit():

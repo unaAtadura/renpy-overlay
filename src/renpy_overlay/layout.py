@@ -20,7 +20,9 @@
   （``MAX_SCREENSHOT_WINDOWS``，与 QuickMenu 同源）截断保留前 8 个；
 - 截图快捷键模式开关（仅模式状态；主开关状态不记录——恢复后恒为关）；
 - 选项副作用日志窗口：是否打开、大小、位置、锁定状态（跳过注入模式由宿主
-  侧硬守卫不恢复，本模块照记不误）。
+  侧硬守卫不恢复，本模块照记不误）；
+- 快捷菜单锚点（future_右键快捷菜单_分离）：位置、直径、锁定状态
+  （直径恢复时优先于 config 的初始默认值，与布局优先于配置的既定规则一致）。
 
 坐标口径（保存 API = 恢复 API，规避一切 DPR 换算）：截图窗/日志窗存 Qt 全局
 逻辑坐标（``geometry()``，恢复用 ``move()/resize()``）；流式窗尺寸与偏移存
@@ -39,10 +41,12 @@ from pathlib import Path
 from .config import (
     DEFAULT_CHOICE_LOG_WINDOW_HEIGHT,
     DEFAULT_CHOICE_LOG_WINDOW_WIDTH,
+    DEFAULT_QUICK_MENU_ANCHOR_DIAMETER,
     DEFAULT_STREAM_WINDOW_HEIGHT,
     DEFAULT_STREAM_WINDOW_WIDTH,
     MIN_CHOICE_LOG_WINDOW_HEIGHT,
     MIN_CHOICE_LOG_WINDOW_WIDTH,
+    MIN_QUICK_MENU_ANCHOR_DIAMETER,
     MIN_STREAM_WINDOW_HEIGHT,
     MIN_STREAM_WINDOW_WIDTH,
 )
@@ -101,6 +105,16 @@ class ChoiceLogLayout:
 
 
 @dataclass(frozen=True)
+class QuickMenuAnchorLayout:
+    """快捷菜单锚点窗口的布局记录（Qt 全局逻辑坐标；直径恢复时优先于 config）。"""
+
+    x: int = 0
+    y: int = 0
+    diameter: int = DEFAULT_QUICK_MENU_ANCHOR_DIAMETER
+    locked: bool = False
+
+
+@dataclass(frozen=True)
 class LayoutState:
     """layout.json 的解析结果（版本 + 三组窗口状态）。"""
 
@@ -109,6 +123,9 @@ class LayoutState:
     screenshot_windows: tuple[ScreenshotWindowLayout, ...] = ()
     hotkey_mode: bool = False
     choice_log_window: ChoiceLogLayout = field(default_factory=ChoiceLogLayout)
+    #: None = layout 无有效锚点记录（如旧版布局文件）：宿主跳过恢复、
+    #: 锚点保持启动初始位置（主屏中心），而非应用数据类默认坐标 (0, 0)
+    quick_menu_anchor: QuickMenuAnchorLayout | None = None
 
 
 # ---- 字段级校验（回退默认并 WARNING，同 config.py 的 _read_* 风格） ----------
@@ -252,6 +269,28 @@ def _read_choice_log_window(raw: dict) -> ChoiceLogLayout:
     )
 
 
+def _read_quick_menu_anchor(raw: dict) -> QuickMenuAnchorLayout | None:
+    """快捷菜单锚点整节解析：节缺失/类型不对返回 None（无有效记录 →
+    宿主跳过恢复、保持锚点初始位置，避免旧版布局文件升级时把数据类默认
+    坐标 (0, 0) 当有效记录应用）；字段级非法逐项回退默认。"""
+    section = raw.get("quick_menu_anchor")
+    if not isinstance(section, dict):
+        if section is not None:
+            logger.warning("layout quick_menu_anchor 不是对象（%r），忽略锚点记录", section)
+        return None
+    return QuickMenuAnchorLayout(
+        x=_read_int(section, "x", 0),
+        y=_read_int(section, "y", 0),
+        diameter=_read_positive_int(
+            section,
+            "diameter",
+            DEFAULT_QUICK_MENU_ANCHOR_DIAMETER,
+            MIN_QUICK_MENU_ANCHOR_DIAMETER,
+        ),
+        locked=_read_bool(section, "locked", False),
+    )
+
+
 # ---- 解析与组装（纯函数） ----------------------------------------------------
 
 
@@ -282,6 +321,7 @@ def parse_layout(raw: object) -> LayoutState | None:
         screenshot_windows=_read_screenshot_windows(raw),
         hotkey_mode=_read_bool(raw, "hotkey_mode", False),
         choice_log_window=_read_choice_log_window(raw),
+        quick_menu_anchor=_read_quick_menu_anchor(raw),
     )
 
 
@@ -297,13 +337,18 @@ def collect_layout(
     choice_log_open: bool,
     choice_log_rect: tuple[int, int, int, int] | None,
     choice_log_locked: bool = False,
+    anchor_x: int,
+    anchor_y: int,
+    anchor_diameter: int,
+    anchor_locked: bool,
 ) -> dict:
     """把宿主现取的纯值快照组装为可写盘的 dict（纯函数，离线单测用）。
 
     ``screenshot_windows`` 为 ``(x, y, w, h, locked)`` 元组序列（池序即创建
     序）；``choice_log_rect`` 为 ``(x, y, w, h)`` 或 None（未打开）；
     ``stream_abs_rect`` 为 ``(left, top, right, bottom)``（win32 物理像素，
-    仅诊断与离屏校验）或 None。
+    仅诊断与离屏校验）或 None；``anchor_*`` 为快捷菜单锚点的 Qt 全局逻辑
+    坐标位置、直径与锁定态。
     """
     stream: dict = {
         "width": int(stream_width),
@@ -342,6 +387,12 @@ def collect_layout(
                 if choice_log_rect is not None
                 else {}
             ),
+        },
+        "quick_menu_anchor": {
+            "x": int(anchor_x),
+            "y": int(anchor_y),
+            "diameter": int(anchor_diameter),
+            "locked": bool(anchor_locked),
         },
     }
     return payload

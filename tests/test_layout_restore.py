@@ -10,6 +10,7 @@ restore_window 的守卫与几何、``_set_locked`` 与 ``_toggle_lock`` 共用�
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -162,6 +163,30 @@ def test_restore_window_without_pos_uses_cascade_like_create(monkeypatch):
 # ---- 宿主编排：_apply_layout / _restore_screenshot_windows ------------------------
 
 
+class _StubAnchor:
+    """快捷菜单锚点鸭子 stub：记录 apply_layout 调用与当前状态。"""
+
+    def __init__(self) -> None:
+        self.applied: list[dict] = []
+        self._diameter = 50
+        self._locked = True
+
+    def apply_layout(self, diameter, pos=None, locked=False) -> None:
+        self.applied.append(
+            {"diameter": diameter, "pos": pos, "locked": bool(locked)}
+        )
+        self._diameter = int(diameter)
+        self._locked = bool(locked)
+
+    @property
+    def diameter(self) -> int:
+        return self._diameter
+
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+
 class _RecordingHost:
     """鸭子接口宿主：绑定 StreamOverlayCore 的真实编排方法，记录调用序。"""
 
@@ -174,6 +199,7 @@ class _RecordingHost:
         self._user_offset = None
         self._layout_pending_position = False
         self._choice_log_window = None
+        self._menu_anchor = _StubAnchor()
         self.resized: list[tuple[int, int]] = []
         self.enabled_calls: list[bool] = []
         self.choice_log_calls: list[dict] = []
@@ -230,6 +256,10 @@ def _layout_state(**overrides) -> layout.LayoutState:
         choice_log_open=True,
         choice_log_rect=(10, 10, 150, 300),
         choice_log_locked=False,
+        anchor_x=12,
+        anchor_y=34,
+        anchor_diameter=70,
+        anchor_locked=True,
     )
     kwargs.update(overrides)
     return layout.parse_layout(layout.collect_layout(**kwargs))
@@ -298,6 +328,47 @@ def test_apply_layout_passes_layout_size_and_pos_to_choice_log():
     assert host.choice_log_calls == [
         {"width": 150, "height": 300, "pos": (10, 10), "locked": False}
     ]
+
+
+# ---- 快捷菜单锚点恢复（需求 future_右键快捷菜单_分离） ---------------------------
+
+
+def test_apply_layout_restores_anchor_diameter_pos_locked():
+    host = _RecordingHost()
+    StreamOverlayCore._apply_layout(host, _layout_state())
+    assert host._menu_anchor.applied == [
+        {"diameter": 70, "pos": (12, 34), "locked": True}
+    ]
+
+
+def test_apply_layout_anchor_offscreen_falls_back_to_default_pos():
+    host = _RecordingHost()
+    host.screen_rects = [(0, 0, 1920, 1080)]
+    StreamOverlayCore._apply_layout(
+        host,
+        _layout_state(
+            anchor_x=5000,
+            anchor_y=5000,
+            anchor_diameter=50,
+            anchor_locked=False,
+        ),
+    )
+    # 坐标落到屏幕之外：回退默认位置（不移动），直径与锁定态照常应用
+    assert host._menu_anchor.applied == [
+        {"diameter": 50, "pos": None, "locked": False}
+    ]
+
+
+def test_apply_layout_anchor_no_record_keeps_initial_pos():
+    """layout 无锚点记录（旧版布局文件）→ 跳过恢复，保持启动初始位置。
+
+    回归：解析层曾把节缺失降级为默认坐标 (0, 0) 并被无条件应用，锚点
+    被恢复到屏幕左上角（实测日志 20261113_181349：pos=(0, 0)）。
+    """
+    host = _RecordingHost()
+    state = dataclasses.replace(_layout_state(), quick_menu_anchor=None)
+    StreamOverlayCore._apply_layout(host, state)
+    assert host._menu_anchor.applied == []  # 未触碰锚点：初始位置保持
 
 
 def test_apply_layout_drops_offset_when_saved_rect_offscreen(monkeypatch):
@@ -704,6 +775,10 @@ def test_load_and_apply_layout_swallows_restore_failure(tmp_path):
             hotkey_mode=False,
             choice_log_open=False,
             choice_log_rect=None,
+            anchor_x=0,
+            anchor_y=0,
+            anchor_diameter=50,
+            anchor_locked=True,
         ),
     )
     host = _ExplodingApplyHost(str(tmp_path))
