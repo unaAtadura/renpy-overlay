@@ -809,7 +809,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "asr_rt（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d），"
+        "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，persist=%s，db_size=%d，diameterA=%d，diameterB=%d），"
         "prebuild（max=%d，initial=%d，increase_after=%d，latency_guard=%.1fs，"
         "circuit_break=%d，retries=%d，include_tl=%s，tl_langs=%s），"
         "last_game_dir=%s",
@@ -856,6 +856,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.remote_screenshot_hide,
         app_config.remote_screenshot_interval,
         app_config.remote_cache_size_count,
+        app_config.remote_cache_persist_enable,
+        app_config.remote_cache_db_size_count,
         app_config.remote_screenshot_diameter_a,
         app_config.remote_screenshot_diameter_b,
         app_config.max_concurrency,

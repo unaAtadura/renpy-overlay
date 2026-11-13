@@ -288,7 +288,9 @@ class ScreenshotStore:
                     (text, now, hit_id),
                 )
                 self._conn.commit()
-                logger.debug("签名缓存相似条目已覆盖（id=%d）", hit_id)
+                logger.info(
+                    "签名缓存相似条目已覆盖（id=%d，译文 %d 字）", hit_id, len(text)
+                )
                 return True
             cursor = self._conn.execute(
                 "INSERT INTO screenshot_signature_cache ("
@@ -312,7 +314,13 @@ class ScreenshotStore:
         except sqlite3.Error as exc:
             self._degrade("写入签名缓存", exc)
             return False
-        logger.debug("签名缓存已写入（id=%s）", cursor.lastrowid)
+        logger.info(
+            "签名缓存已写入（id=%s，译文 %d 字，现存 %d 条）：%s",
+            cursor.lastrowid,
+            len(text),
+            self.signature_cache_count(),
+            self._db_path,
+        )
         if capacity is not None:
             self.prune_cold_random(int(capacity))
         return True
@@ -424,8 +432,15 @@ def open_store(game_dir) -> ScreenshotStore | None:
         connection = sqlite3.connect(db_path)
         connection.executescript(_SCHEMA_SCRIPT)
         connection.commit()
+        cached = connection.execute(
+            "SELECT COUNT(*) FROM screenshot_signature_cache"
+        ).fetchone()
     except (OSError, sqlite3.Error) as exc:
         logger.warning("初始化截图数据库失败（%s），降级为不入库：%s", db_path, exc)
         return None
-    logger.info("截图数据库已就绪：%s", db_path)
+    logger.info(
+        "截图数据库已就绪：%s（签名缓存 %d 条）",
+        db_path,
+        int(cached[0]) if cached else 0,
+    )
     return ScreenshotStore(connection, db_path)
