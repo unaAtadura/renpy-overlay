@@ -181,6 +181,22 @@ DEFAULT_REMOTE_CACHE_SIZE_COUNT = 50
 MIN_REMOTE_SCREENSHOT_INTERVAL = MIN_AUTO_TRANSLATE_INTERVAL
 #: 缓存条数下限：0 条缓存无意义
 MIN_REMOTE_CACHE_SIZE_COUNT = 1
+#: 遥控器自动化持久化缓存（feat/remote-cache-persist）：数据库缓存开关与条数上限。
+#: 默认关闭 = 控制器不接线持久层，「内存缓存 + API」既有行为零变化；持久化是
+#: 显式可选增强。上限 40000 覆盖 30000+ 文本量游戏的完整画面空间（每条签名
+#: 512B + 译文 < 1KB，满库约 40MB），配合冷端随机水位淘汰使重玩旧章节的
+#: 条目不被集中挤出。
+DEFAULT_REMOTE_CACHE_PERSIST_ENABLE = False
+DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT = 40000
+#: 持久化缓存条数下限：0 条无意义（与内存缓存下限同口径）
+MIN_REMOTE_CACHE_DB_SIZE_COUNT = 1
+#: 遥控器自动化稳定窗口帧数（feat/remote-cache-persist）：判变通过后需连续
+#: N 帧与候选相似才提交翻译，过滤打字机逐字输出的中间态（半句翻译与无
+#: 价值缓存）。interval=0.5s 下确认窗 (N-1)*0.5s：N=3 → 1.0s，覆盖 Ren'Py
+#: 标点停顿 0.1~0.3s 防半句误触发；N=1 退化为现状立即提交。
+DEFAULT_REMOTE_SETTLE_FRAMES = 3
+#: 稳定帧数下限：1 帧 = 无稳定窗口（现状行为）
+MIN_REMOTE_SETTLE_FRAMES = 1
 # 预构建自适应并发默认值（移植自 renpy-overlay-batch-translator）
 DEFAULT_MAX_CONCURRENCY = 8
 DEFAULT_INITIAL_CONCURRENCY = 1
@@ -260,6 +276,11 @@ class AppConfig:
     # 遥控器自动化（周期截图翻译：间隔与内存缓存条数，紧跟 enable 之后，需求备注）
     remote_screenshot_interval: float = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     remote_cache_size_count: int = DEFAULT_REMOTE_CACHE_SIZE_COUNT
+    # 遥控器自动化持久化缓存（紧跟内存缓存条数）：数据库两级命中开关与上限
+    remote_cache_persist_enable: bool = DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+    remote_cache_db_size_count: int = DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT
+    # 稳定窗口帧数：判变通过后连续 N 帧相似才提交（过滤打字机中间态）
+    remote_settle_frames: int = DEFAULT_REMOTE_SETTLE_FRAMES
     remote_screenshot_diameter_a: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     remote_screenshot_diameter_b: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     # 预构建翻译缓存：自适应并发 / 重试 / 熔断 / 扫描范围 / 目录记忆
@@ -370,6 +391,9 @@ def _write_defaults(target: Path) -> None:
     payload["remote_screenshot_hide"] = DEFAULT_REMOTE_SCREENSHOT_HIDE
     payload["remote_screenshot_interval"] = DEFAULT_REMOTE_SCREENSHOT_INTERVAL
     payload["remote_cache_size_count"] = DEFAULT_REMOTE_CACHE_SIZE_COUNT
+    payload["remote_cache_persist_enable"] = DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+    payload["remote_cache_db_size_count"] = DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT
+    payload["remote_settle_frames"] = DEFAULT_REMOTE_SETTLE_FRAMES
     payload["remote_screenshot_diameterA"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["remote_screenshot_diameterB"] = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
     payload["max_concurrency"] = DEFAULT_MAX_CONCURRENCY
@@ -734,6 +758,21 @@ def load_config(path: Path | None = None) -> AppConfig:
             DEFAULT_REMOTE_CACHE_SIZE_COUNT,
             MIN_REMOTE_CACHE_SIZE_COUNT,
         ),
+        remote_cache_persist_enable=_read_bool(
+            raw, "remote_cache_persist_enable", DEFAULT_REMOTE_CACHE_PERSIST_ENABLE
+        ),
+        remote_cache_db_size_count=_read_positive_int(
+            raw,
+            "remote_cache_db_size_count",
+            DEFAULT_REMOTE_CACHE_DB_SIZE_COUNT,
+            MIN_REMOTE_CACHE_DB_SIZE_COUNT,
+        ),
+        remote_settle_frames=_read_positive_int(
+            raw,
+            "remote_settle_frames",
+            DEFAULT_REMOTE_SETTLE_FRAMES,
+            MIN_REMOTE_SETTLE_FRAMES,
+        ),
         remote_screenshot_diameter_a=_read_positive_int(
             raw,
             "remote_screenshot_diameterA",
@@ -786,7 +825,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         "asr_rt（base_url=%s，model=%s，api_key=%s），"
         "recording_duration=%ds（%s），"
         "hotkeys（main=%r，windows=%r，mouse_escape=%r），"
-        "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，diameterA=%d，diameterB=%d），"
+        "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，persist=%s，db_size=%d，settle=%d，diameterA=%d，diameterB=%d），"
         "prebuild（max=%d，initial=%d，increase_after=%d，latency_guard=%.1fs，"
         "circuit_break=%d，retries=%d，include_tl=%s，tl_langs=%s），"
         "last_game_dir=%s",
@@ -833,6 +872,9 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.remote_screenshot_hide,
         app_config.remote_screenshot_interval,
         app_config.remote_cache_size_count,
+        app_config.remote_cache_persist_enable,
+        app_config.remote_cache_db_size_count,
+        app_config.remote_settle_frames,
         app_config.remote_screenshot_diameter_a,
         app_config.remote_screenshot_diameter_b,
         app_config.max_concurrency,

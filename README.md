@@ -185,7 +185,10 @@ uv run renpy-overlay
   "screenshot_compress_percent": 10, // 截图发送前压缩比例（省流量）
   "recording_duration": 8,           // 听歌识曲录音秒数
   "hotkey_main": "alt+t",            // 快捷键模式主开关键
-  "remote_screenshot_enable": true   // 遥控截图小圆窗开关
+  "remote_screenshot_enable": true,  // 遥控截图小圆窗开关
+  "remote_cache_persist_enable": false, // 遥控器自动化持久化缓存（默认关）
+  "remote_cache_db_size_count": 40000, // 持久化缓存条数上限（冷端随机淘汰）
+  "remote_settle_frames": 3         // 稳定窗口帧数（打字机过滤，需重启生效）
 }
 ```
 
@@ -193,6 +196,8 @@ uv run renpy-overlay
 
 - **翻译 API 分三条独立链路**：文字翻译（主链路）、截图翻译（vision 三键）、语音识别（asr / asr_rt 各三键）。留空的键自动"跟随"主链路；唯独实时识别（asr_rt）三项**必须全部填写**才可用；
 - `enable_thinking: false` 时工具会按各平台的方言自动声明关闭思考（LM Studio 需要额外的 `reasoning_effort: "none"`，工具已代劳）；关闭后单句翻译约半秒，开启思考可能要 30 秒以上；
+- **遥控器自动化持久化缓存（可选，默认关）**：`remote_cache_persist_enable` 开启后，自动化截图翻译命中顺序为「内存 → 数据库 → API」，同一画面跨会话直接复用译文（命中直接上屏、不发 API 也不入历史）；缓存译文不对时再次单击触发器 A 即强制重新翻译；手动单击截图窗与快捷键截图翻译始终走 API 不查缓存，不受影响；
+- **打字机过滤**：`remote_settle_frames`（默认 3）让自动化等画面连续稳定后再翻译，避免逐字输出期间反复翻译半句；
 - 配置写错（类型不对、数值越界）不会导致程序崩溃：该项自动回退默认值并记入日志。
 
 ### 5.6 预构建翻译缓存

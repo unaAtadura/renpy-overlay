@@ -22,10 +22,19 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QWidget
+
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+
+    _HAS_QTSVG = True
+except ImportError:  # 打包缺 QtSvg DLL 等极端场景：停顿图标降级为无图标
+    QSvgRenderer = None
+    _HAS_QTSVG = False
 
 logger = logging.getLogger("renpy_overlay.screenshot.remote_screenshot_window")
 
@@ -39,6 +48,28 @@ ARM_BORDER_ALPHA = 180
 ARM_MASK_COLOR = QColor(0, 0, 0, 20)
 #: 判定"点击"的最大位移（像素）：超过视为拖动（与截图窗口同容差）
 CLICK_MOVE_TOLERANCE = 4
+#: 停顿（稳定观察）旋转图标：边长 = 窗口直径 × 0.36（直径 50 → 18px、
+#: 100 → 36px；矢量渲染任意直径不模糊，且小于半圆不遮中心视觉）
+SETTLE_ICON_RELATIVE_SIZE = 0.36
+#: 停顿图标不透明度：1.0（完全不透明）——对比度由深色衬圈保证，降透明度
+#: 只会损失对比（同色系粉图标在半透明粉底上实测对比仅 1.3~2.3:1 不可辨）
+SETTLE_ICON_OPACITY = 1.0
+#: 停顿图标撞色亮黄（H≈50°，与主题粉 #F7A8B8 H≈348° 高亮高饱和撞色；
+#: 配深色衬圈后暗/亮/白背景对比 4.5/2.5/2.3:1，均达可辨标准）
+SETTLE_ICON_COLOR = "#FDE047"
+#: 停顿图标深色衬圈：图标下垫半透明深蓝灰圆，把局部底压暗至与游戏背景
+#: 无关的稳定区间（任意背景下图标的可辨识性不再随画面亮度剧烈波动）；
+#: 直径 = 图标 × 1.4（18px 图标 → 25px 衬圈，不溢出最小窗口内切区）
+SETTLE_ICON_SCRIM_COLOR = QColor(31, 36, 48, 110)
+SETTLE_ICON_SCRIM_SCALE = 1.4
+#: 旋转动画帧间隔与每帧步长：30fps + 12°/帧 → 1.0 秒/圈（平滑且开销极小）
+SETTLE_SPIN_INTERVAL_MS = 33
+SETTLE_SPIN_STEP_DEG = 12
+#: 停顿图标资产（素材 stroke 为撞色亮黄 #FDE047；渲染时以 SETTLE_ICON_COLOR
+#: 运行时替换 stroke，调色只需改常量；路径基准同 stream/icons.py）
+SETTLE_ICON_PATH = (
+    Path(__file__).parent.parent / "assets" / "icons" / "刷新_refresh.svg"
+)
 
 
 def trigger_fill_color() -> QColor:
@@ -148,7 +179,12 @@ class _RemoteWindow(QWidget):
 
 
 class RemoteTriggerWindow(_RemoteWindow):
-    """窗口 A（触发器）：纯色半透明圆形，可拖拽，左键单击下发截图翻译请求。"""
+    """窗口 A（触发器）：纯色半透明圆形，可拖拽，左键单击下发截图翻译请求。
+
+    停顿（稳定观察）视觉提示：自动化稳定窗口期间叠加主题色刷新图标并
+    360° 持续循环旋转（``set_settle(True)``）；停顿结束立即停转并把角度
+    复位为 0，不残留中间角度。图标为纯叠加绘制，不触碰点击/拖拽事件。
+    """
 
     def __init__(
         self,
@@ -158,10 +194,95 @@ class RemoteTriggerWindow(_RemoteWindow):
     ) -> None:
         super().__init__(diameter, parent)
         self._on_click = on_click
+        self._settle_active = False  # 停顿提示显示中（旋转动画运行）
+        self._settle_angle = 0  # 旋转角度（0-359；停顿结束复位为 0，不残留）
+        self._settle_icon_pixmap: QPixmap | None = None  # 矢量渲染缓存（直径×0.36）
+        self._settle_timer = QTimer(self)  # 父对象=窗口：随销毁自动停止（生命周期兜底）
+        self._settle_timer.setInterval(SETTLE_SPIN_INTERVAL_MS)
+        self._settle_timer.timeout.connect(self._on_settle_spin)
+
+    def set_settle(self, active: bool) -> None:
+        """停顿提示开关：True 显示旋转图标，False 停转复位隐藏（幂等）。
+
+        图标缺失或 SVG 渲染不可用时降级为无图标（DEBUG 日志），不影响
+        自动化流程与窗口交互。
+        """
+        active = bool(active)
+        if active == self._settle_active:
+            return
+        if active:
+            self._settle_angle = 0
+            self._render_settle_icon()
+            if self._settle_icon_pixmap is None:
+                logger.debug("停顿图标不可用（缺失或渲染失败），降级为无图标提示")
+                self._settle_active = False
+                return
+            self._settle_active = True
+            self._settle_timer.start()
+        else:
+            self._settle_timer.stop()
+            self._settle_angle = 0  # 复位初始角度：不残留旋转中间角度
+            self._settle_active = False
+        self.update()
+
+    def _render_settle_icon(self) -> None:
+        """按当前窗口尺寸矢量渲染停顿图标（QSvgRenderer；失败置 None 降级）。"""
+        self._settle_icon_pixmap = None
+        if not _HAS_QTSVG:
+            logger.debug("QtSvg 不可用，停顿图标降级为无图标提示")
+            return
+        size = max(1, int(self.width() * SETTLE_ICON_RELATIVE_SIZE))
+        try:
+            # stroke 颜色以 SETTLE_ICON_COLOR 为单点真值（素材 #FDE047 运行时替换）
+            svg_data = SETTLE_ICON_PATH.read_bytes()
+            if SETTLE_ICON_COLOR != "#FDE047":
+                svg_data = svg_data.replace(b"#FDE047", SETTLE_ICON_COLOR.encode("ascii"))
+            renderer = QSvgRenderer(svg_data)
+        except Exception as exc:  # 文件缺失等：降级无图标，不抛出
+            logger.debug("停顿图标加载失败（%s）：%s", SETTLE_ICON_PATH, exc)
+            return
+        if not renderer.isValid():
+            logger.debug("停顿图标 SVG 无效，降级为无图标提示")
+            return
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.setOpacity(SETTLE_ICON_OPACITY)
+        renderer.render(painter)
+        painter.end()
+        self._settle_icon_pixmap = pixmap
+
+    def _on_settle_spin(self) -> None:
+        """旋转动画帧（仅停顿期间运行）：角度步进并触发重绘。"""
+        self._settle_angle = (self._settle_angle + SETTLE_SPIN_STEP_DEG) % 360
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """窗口尺寸变化：重渲染停顿图标（矢量渲染，任意尺寸自适应不模糊）。"""
+        super().resizeEvent(event)
+        if self._settle_active:
+            self._render_settle_icon()
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         draw_trigger_circle(painter, self.rect(), trigger_fill_color())
+        if self._settle_active and self._settle_icon_pixmap is not None:
+            # 停顿提示：深色衬圈先压暗局部底（对比不随游戏背景波动），再
+            # 居中旋转叠加撞色图标（纯绘制，不影响交互）
+            icon_size = self._settle_icon_pixmap.width()
+            scrim = int(icon_size * SETTLE_ICON_SCRIM_SCALE)
+            painter.save()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(SETTLE_ICON_SCRIM_COLOR)
+            painter.drawEllipse(self.rect().center(), scrim // 2, scrim // 2)
+            painter.restore()
+            painter.save()
+            painter.translate(self.rect().center())
+            painter.rotate(self._settle_angle)
+            painter.drawPixmap(-icon_size // 2, -icon_size // 2, self._settle_icon_pixmap)
+            painter.restore()
 
     def _on_release(self, press_global: QPoint | None, event) -> None:
         if press_global is None:

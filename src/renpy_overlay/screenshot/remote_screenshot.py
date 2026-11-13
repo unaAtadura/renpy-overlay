@@ -222,6 +222,15 @@ class RemoteScreenshotController:
             "遥控截图：已隐藏瞄准器 B（触发器 A 保持可见；「显示遥控器」可恢复）"
         )
 
+    def set_trigger_settle(self, active: bool) -> None:
+        """停顿（稳定观察）视觉提示开关（自动化控制器回调）：转发触发器 A。
+
+        窗口未生成时 no-op（销毁竞态安全）；仅影响 A 的叠加图标绘制与旋转
+        动画，不触碰点击/拖拽/装填逻辑、显隐三态与自动化状态。
+        """
+        if self._window_a is not None:
+            self._window_a.set_settle(active)
+
     # ---- 快捷键模式生命周期（HotkeyMode 模式开/关时通知） ---------------------
 
     def on_hotkey_mode_changed(self, enabled: bool) -> None:

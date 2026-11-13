@@ -24,17 +24,28 @@ import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from renpy_overlay.screenshot.remote_automation import (
+    CACHE_PRUNE_CANDIDATE_FRACTION,
+    CACHE_PRUNE_WATERMARK_RATIO,
     MSG_NEED_HOTKEY_MODE,
     REMOTE_AUTO_OFF_TEXT,
     REMOTE_AUTO_ON_TEXT,
     REMOTE_HIDE_TEXT,
     REMOTE_SHOW_TEXT,
+    SIGNATURE_CACHE_HIT_RATIO,
+    SIGNATURE_CACHE_INFORMATIVE_SPREAD,
+    SIGNATURE_CACHE_PRESCREEN_TOLERANCE,
+    SIGNATURE_CACHE_QUERY_LIMIT,
     SIGNATURE_CHANGE_RATIO,
     SIGNATURE_SIZE,
     RemoteAutoCache,
     RemoteAutomationController,
+    bytes_to_signature,
     grid_signature,
+    region_means,
     signature_change_ratio,
+    signature_is_informative,
+    signature_to_bytes,
+    signatures_match_for_cache,
     signatures_similar,
 )
 from renpy_overlay.stream import screenshot_flow as flow_module
@@ -152,6 +163,86 @@ def test_signature_change_ratio_and_thresholds():
     # 8/512 = 1.56% ≥ 1.5% 判变阈值 → 变化；7/512 ≈ 1.37% → 无变化
     assert not signatures_similar(base, perturbed(8))
     assert signatures_similar(base, perturbed(7))
+
+
+# ---- 持久化缓存纯函数：命中判定 / 区均值预筛 / 信息量护栏 / 序列化 ------------------
+
+
+def test_signatures_match_for_cache_zero_tolerance():
+    """零超阈格判据：逐格差恰 8 命中、恰 9 不命中（与判变阈值完全解耦）。"""
+    base = tuple([100] * 512)
+    at_threshold = tuple(v + 8 for v in base)  # 全部格 |Δ|=8：不超阈
+    over_threshold = tuple(v + 9 for v in base)  # 全部格 |Δ|=9：全超阈
+    assert signatures_match_for_cache(base, at_threshold) is True
+    assert signatures_match_for_cache(base, over_threshold) is False
+    assert signatures_match_for_cache(base, base) is True
+    # 长度不一致保守不命中（与 signature_change_ratio 的 1.0 语义一致）
+    assert signatures_match_for_cache(base, base[:256]) is False
+
+
+def test_region_means_partition_order_and_uniform():
+    """分区顺序：上排四区（区 0-3）后下排四区（区 4-7）；恒色签名各区等于该色。"""
+    uniform = tuple([128] * 512)
+    assert region_means(uniform) == (128,) * 8
+    # 区 k = row*4 + col（row/col 为 8 格分块的行/列）；行主序存储下每行
+    # 前 8 格属同一区，跨 8 行共 64 格/区
+    segmented = tuple(
+        ((y // 8) * 4 + (x // 8)) * 10 for y in range(16) for x in range(32)
+    )
+    assert region_means(segmented) == tuple(k * 10 for k in range(8))
+
+
+def test_region_means_prescreen_is_lossless_for_matches():
+    """无损性正向：零超阈命中对的全部区均值差 ≤ 预筛阈值（不会被误排斥）。"""
+    rng = random.Random(2026)
+    for _ in range(32):
+        base = tuple(rng.randrange(0, 256) for _ in range(512))
+        near = tuple(
+            max(0, min(255, v + rng.randint(-8, 8))) for v in base
+        )
+        assert signatures_match_for_cache(base, near)
+        for a_mean, b_mean in zip(region_means(base), region_means(near), strict=True):
+            assert abs(a_mean - b_mean) <= SIGNATURE_CACHE_PRESCREEN_TOLERANCE
+
+
+def test_region_means_prescreen_excludes_distant_pairs():
+    """无损性逆否：区均值差超预筛阈值的对必然不命中（排除是安全的）。"""
+    blank = tuple([10] * 512)
+    bright = tuple([250] * 512)
+    for a_mean, b_mean in zip(region_means(blank), region_means(bright), strict=True):
+        assert abs(a_mean - b_mean) > SIGNATURE_CACHE_PRESCREEN_TOLERANCE
+    assert not signatures_match_for_cache(blank, bright)
+
+
+def test_signature_is_informative_boundaries():
+    """信息量护栏：极差恰阈值可写入、低一档拒写、恒色拒写、空签名拒写。"""
+    informative = tuple([100] * 256 + [100 + SIGNATURE_CACHE_INFORMATIVE_SPREAD] * 256)
+    barely_blank = tuple([100] * 256 + [100 + SIGNATURE_CACHE_INFORMATIVE_SPREAD - 1] * 256)
+    assert signature_is_informative(informative)
+    assert not signature_is_informative(barely_blank)
+    assert not signature_is_informative(tuple([128] * 512))
+    assert not signature_is_informative(())
+
+
+def test_signature_bytes_roundtrip():
+    """序列化往返无损：512 格签名 → bytes → 签名完全相等。"""
+    rng = random.Random(7)
+    signature = tuple(rng.randrange(0, 256) for _ in range(512))
+    payload = signature_to_bytes(signature)
+    assert len(payload) == 512
+    assert bytes_to_signature(payload) == signature
+
+
+def test_cache_hit_ratio_is_stricter_than_change_ratio():
+    """命中阈值（0.0）必须严格严于判变阈值（0.015）：缓存宁漏命中不误命中。"""
+    assert SIGNATURE_CACHE_HIT_RATIO < SIGNATURE_CHANGE_RATIO
+
+
+def test_cache_prune_constants_in_range():
+    """水位与冷端候选比例的取值约束：水位 0<ratio<1、候选 0<ratio<=1。"""
+    assert 0 < CACHE_PRUNE_WATERMARK_RATIO < 1
+    assert 0 < CACHE_PRUNE_CANDIDATE_FRACTION <= 1
+    assert SIGNATURE_CACHE_QUERY_LIMIT > 0
 
 
 # ---- RemoteAutoCache：循环队列语义 -------------------------------------------------
@@ -630,13 +721,17 @@ class _StubStore:
 
 
 class _StubAutomation:
-    """RemoteAutomationController 替身：记录在途回执（签名, 译文）。"""
+    """RemoteAutomationController 替身：记录在途回执（签名, 译文）与溯源 id。"""
 
     def __init__(self) -> None:
         self.results: list[tuple[object, str | None]] = []
+        self.screenshot_ids: list[int | None] = []
 
-    def on_translation_result(self, signature: object, text: str | None) -> None:
+    def on_translation_result(
+        self, signature: object, text: str | None, screenshot_id: int | None = None
+    ) -> None:
         self.results.append((signature, text))
+        self.screenshot_ids.append(screenshot_id)
 
 
 class _AutoHost(ScreenshotFlowMixin):
@@ -772,6 +867,168 @@ def test_auto_cache_hit_writes_nothing(monkeypatch):
     assert store.inserts == []
 
 
+# ---- 持久化缓存接线（内存优先 → 数据库 → API；feat/remote-cache-persist） ----------
+
+
+def _make_controller(
+    displayed,
+    submitted,
+    *,
+    persistent_lookup=None,
+    persistent_put=None,
+    submit_ok=True,
+    settle_frames=1,
+    capture_fn=None,
+    settle_callback=None,
+):
+    """接线测试共用控制器：图像/签名确定，提交与持久化回调可观测。
+
+    返回 ``(controller, timer)``：timer 为手动驱动的 _StubTimer（tick 用）。
+    """
+    timer = _StubTimer()
+
+    def _make_timer(interval_ms: int, on_tick) -> _StubTimer:
+        timer.interval_ms = interval_ms
+        timer.on_tick = on_tick
+        return timer
+
+    controller = RemoteAutomationController(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=displayed.append,
+        submit=lambda window, image, hash_value: (
+            submitted.append(hash_value) or True
+        )
+        if submit_ok
+        else False,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+        bbox_provider=lambda window: (0, 0, 100, 100),
+        capture_fn=capture_fn or (lambda bbox: _gradient_image()),
+        timer_factory=_make_timer,
+        persistent_lookup=persistent_lookup,
+        persistent_put=persistent_put,
+        settle_frames=settle_frames,
+        settle_callback=settle_callback,
+    )
+    return controller, timer
+
+
+def test_constructor_rejects_non_callable_persistent_callbacks():
+    """持久化回调注入契约：非 callable 非 None 时构造期报错（None 合法=不接线）。"""
+    base = dict(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=lambda text: None,
+        submit=lambda window, image, hash_value: True,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+    )
+    with pytest.raises(TypeError, match="persistent_lookup"):
+        RemoteAutomationController(**base, persistent_lookup="bad")
+    with pytest.raises(TypeError, match="persistent_put"):
+        RemoteAutomationController(**base, persistent_put=123)
+    # None 合法：不接线，构造成功且行为与纯内存时代一致
+    RemoteAutomationController(**base)
+
+
+def test_persistent_hit_displays_without_api_and_restart_forces_api(monkeypatch):
+    """首轮持久化命中：直接上屏不发 API、不入历史、回填内存；
+
+    重启轮（auto 态再次单击 A）：跳过两级缓存强制发起 API（缓存错误命中
+    的人工兜底），持久层不被再次查询，也不产生缓存命中上屏。
+    """
+
+    displayed, submitted, lookups = [], [], []
+    sig = grid_signature(_gradient_image())
+    controller, _ = _make_controller(
+        displayed,
+        submitted,
+        persistent_lookup=lambda signature: (lookups.append(signature), "库译文")[1],
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert displayed == ["库译文"]  # 首轮命中直接上屏
+    assert submitted == []  # 未发 API
+    assert lookups == [sig]  # 持久层查询恰一次
+    assert controller._cache.lookup(sig) == "库译文"  # 回填内存（白盒验证）
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮：人工兜底
+    assert submitted == [sig]  # 跳过缓存强制发起 API
+    assert lookups == [sig]  # 持久层未被再次查询
+    assert displayed == ["库译文"]  # 无命中上屏（等待 API 回执）
+    controller.on_translation_result(sig, "API 新译文", screenshot_id=None)
+    assert displayed == ["库译文"]  # 回执上屏由宿主收尾链负责，控制器不直显
+
+
+def test_persistent_miss_submits_then_put_with_region_and_screenshot_id():
+    """未命中：正常提交 API；成功回执触发恰一次持久化写入（含 region 与溯源 id）。"""
+    displayed, submitted, puts, lookups = [], [], [], []
+    sig = grid_signature(_gradient_image())
+    controller, _ = _make_controller(
+        displayed,
+        submitted,
+        persistent_lookup=lambda signature: lookups.append(signature) or None,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert submitted == [sig]  # 未命中 → 提交
+    assert lookups == [sig]
+    assert displayed == []
+    controller.on_translation_result(sig, "API译文", screenshot_id=42)
+    assert puts == [(sig, "API译文", 64, 48, 42)]  # region 来自抓屏 image.size
+    assert displayed == []  # 写缓存不等于上屏（上屏由宿主收尾链负责）
+
+
+def test_persistent_put_skipped_on_abort_or_missing_text():
+    """中止/失败回执（text=None）：不触发持久化写入，pending_region 清空。"""
+    submitted, puts = [], []
+    sig = grid_signature(_gradient_image())
+    controller, _ = _make_controller(
+        [],
+        submitted,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._pending_region == (64, 48)  # 受理成功已记录
+    controller.on_translation_result(sig, None)  # 中止：无译文
+    assert puts == []
+    assert controller._pending_region is None
+
+
+def test_pending_region_not_left_on_rejected_submit():
+    """提交被拒：不残留区域尺寸；后续防御性回执 region 兜底 None。"""
+    submitted, puts = [], []
+    sig = grid_signature(_gradient_image())
+    controller, _ = _make_controller(
+        [],
+        submitted,
+        persistent_put=lambda signature, text, w, h, sid: puts.append(
+            (signature, text, w, h, sid)
+        ),
+        submit_ok=False,
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert submitted == []
+    assert controller._pending_region is None  # 被拒即清空
+    controller.on_translation_result(sig, "迟到的译文", 5)
+    assert puts == [(sig, "迟到的译文", None, None, 5)]
+
+
 def test_auto_store_degraded_keeps_display():
     """store 降级（insert 返回 None）：仅上屏不入库，回执照常送达。"""
     store = _StubStore(fail=True)
@@ -799,6 +1056,234 @@ def test_auto_store_missing_keeps_display():
     host._handle_remote_auto_done(_done_item())
     assert host.displayed == ["自动化译文\n"]
     assert host.titles == ["翻译完成"]
+
+
+# ---- 宿主持久化回调（开关短路 / 真实读写 / 回执透传 / 手动链路红线） ----------------
+
+
+def test_host_persistent_callbacks_short_circuit_and_passthrough(tmp_path):
+    """开关关闭恒未命中且零写入；开启后真实读写（每次读 config，热重载生效）。"""
+    from renpy_overlay.screenshot.store import open_store as open_real_store
+
+    store = open_real_store(str(tmp_path))
+    host = _AutoHost(store)
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=False, remote_cache_db_size_count=40000
+    )
+    sig = grid_signature(_gradient_image())
+    assert host._lookup_persistent_cache(sig) is None  # 关闭：恒未命中
+    host._put_persistent_cache(sig, "译文", 10, 20, None)  # 关闭：跳过写入
+    assert store.signature_cache_count() == 0
+    host._config.remote_cache_persist_enable = True  # 热重载：下次调用即生效
+    assert host._lookup_persistent_cache(sig) is None  # 空库未命中
+    host._put_persistent_cache(sig, "译文", 10, 20, None)
+    assert store.signature_cache_count() == 1
+    assert host._lookup_persistent_cache(sig) == "译文"
+    store.close()
+
+
+def test_host_persistent_lookup_tolerates_incompatible_store():
+    """store 缺少缓存接口（如旧替身）：异常吞噬按未命中处理，不波及主线程。"""
+    host = _AutoHost(_StubStore())
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=True, remote_cache_db_size_count=40000
+    )
+    assert host._lookup_persistent_cache(grid_signature(_gradient_image())) is None
+    host._put_persistent_cache(grid_signature(_gradient_image()), "译文", 1, 1, None)
+
+
+def test_auto_done_passes_record_id_to_controller(tmp_path):
+    """成功收尾链：落库 record_id 随回执透传控制器（持久化缓存溯源用）。"""
+    from renpy_overlay.screenshot.store import open_store as open_real_store
+
+    store = open_real_store(str(tmp_path))
+    host = _AutoHost(store)
+    host._config = SimpleNamespace(
+        remote_cache_persist_enable=True, remote_cache_db_size_count=40000
+    )
+    host._handle_remote_auto_done(_done_item())
+    assert host._remote_automation.screenshot_ids == [1]  # 首条插入记录 id
+    store.close()
+
+
+def test_manual_screenshot_path_never_touches_persistent_cache():
+    """范围红线：手动截图翻译链路源码不得引用持久化缓存（防将来误接线）。
+
+    手动单击与快捷键截图翻译的既有约定：不查缓存、始终调 API、成功不写
+    任何缓存——本断言从源码层锁定该边界（快捷键链路复用同一入口）。
+    """
+    import inspect
+
+    from renpy_overlay.stream.screenshot_flow import ScreenshotFlowMixin
+
+    for name in (
+        "request_screenshot_translation",
+        "_capture_restore_then",
+        "_screenshot_worker",
+        "_handle_screenshot_done",
+    ):
+        source = inspect.getsource(getattr(ScreenshotFlowMixin, name))
+        assert "persistent" not in source, f"{name} 不得触碰持久化缓存"
+
+
+# ---- 稳定窗口（settle_frames>1；打字机中间态过滤） ----------------------------------
+
+
+def test_settle_window_delays_submit_until_stable():
+    """settle_frames=3：首轮进入观察不提交；连续相似 tick 达 3 帧后提交。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 首轮进入观察（进入帧=第 1 帧）
+    assert submitted == []  # 观察期不提交
+    assert controller._settle_pending is True
+    assert controller._settle_count == 1
+    timer.on_tick()  # 第 2 帧相似
+    assert controller._settle_count == 2
+    assert submitted == []
+    timer.on_tick()  # 第 3 帧相似 → 达标提交
+    assert submitted == [sig]
+    assert controller._settle_pending is False  # 观察态已清
+
+
+def test_settle_window_refreshes_candidate_on_typewriter():
+    """打字机持续输出：每帧与候选不相似 → 候选刷新归 1，中间态永不提交。"""
+    frames = [
+        _gradient_image(offset=0),
+        _gradient_image(offset=40),
+        _gradient_image(offset=80),
+        _gradient_image(offset=120),
+        _gradient_image(offset=160),
+    ]
+    iterator = iter(frames * 3)
+    displayed, submitted = [], []
+    controller, timer = _make_controller(
+        displayed,
+        submitted,
+        settle_frames=3,
+        capture_fn=lambda bbox: next(iterator),
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 帧 A 进入观察
+    for _ in range(5):
+        timer.on_tick()  # 每帧都与候选不相似 → 持续刷新候选
+    assert submitted == []  # 中间态零提交
+    assert controller._settle_pending is True  # 仍在观察（候选持续刷新）
+
+
+def test_settle_frames_one_keeps_legacy_immediate_submit():
+    """settle_frames=1：无稳定窗口，判变通过直接提交（现状行为回归）。"""
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=1)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 首轮直接提交
+    assert submitted == [grid_signature(_gradient_image())]
+    assert controller._settle_pending is False
+    timer.on_tick()  # 无变化：不重复提交
+    assert submitted == [grid_signature(_gradient_image())]
+
+
+def test_settle_observation_frozen_while_busy():
+    """busy 冻结：观察计数不推进、不丢失；恢复后继续计数直到达标。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, timer = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    controller._is_busy = lambda: True  # 白盒置忙碌（观察态冻结）
+    timer.on_tick()
+    assert controller._settle_count == 1  # 冻结不推进
+    assert controller._settle_pending is True  # 不丢失
+    controller._is_busy = lambda: False
+    timer.on_tick()  # 恢复后继续
+    timer.on_tick()  # 达标提交
+    assert submitted == [sig]
+
+
+def test_restart_round_during_settle_forces_submit_and_clears():
+    """观察中再次点击 A：跳过观察与缓存强制提交，观察态清空（人工兜底）。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    controller, _ = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._settle_pending is True
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮强制
+    assert submitted == [sig]
+    assert controller._settle_pending is False
+    assert controller._settle_candidate is None
+
+
+def test_stop_cycle_clears_settle_state():
+    """停止周期（菜单关/快捷键退出/B 离开）：稳定观察态一并清空。"""
+    displayed, submitted = [], []
+    controller, _ = _make_controller(displayed, submitted, settle_frames=3)
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert controller._settle_pending is True
+    controller.toggle_automation()  # 菜单关 → set_enabled(False) → _stop_cycle
+    assert controller._settle_pending is False
+    assert controller._settle_candidate is None
+    assert controller._settle_count == 0
+
+
+def test_settle_callback_notified_on_enter_and_exit():
+    """停顿回调链：进入观察通知 True；稳定达标提交/重启轮/停止周期通知 False。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    settle_events: list[bool] = []
+    controller, timer = _make_controller(
+        displayed,
+        submitted,
+        settle_frames=3,
+        settle_callback=settle_events.append,
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 进入观察
+    assert settle_events == [True]
+    timer.on_tick()
+    timer.on_tick()  # 达标提交 → _clear_settle
+    assert submitted == [sig]
+    assert settle_events == [True, False]
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮强制：不进观察无新通知
+    assert submitted == [sig, sig]
+    assert settle_events == [True, False]
+    controller.toggle_automation()  # 停止周期（未在观察中）：静默不重复通知
+    assert settle_events == [True, False]
+
+
+def test_settle_callback_false_on_stop_cycle_while_observing():
+    """观察中停止周期（快捷键退出等）：通知 False 停图标（随后窗口销毁）。"""
+    settle_events: list[bool] = []
+    controller, timer = _make_controller(
+        [], [], settle_frames=3, settle_callback=settle_events.append
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert settle_events == [True]
+    controller.on_hotkey_mode_changed(False)  # 快捷键退出 → _stop_cycle → 清观察
+    assert settle_events == [True, False]
+
+
+def test_settle_callback_rejected_when_not_callable():
+    """停顿回调注入契约：非 callable 非 None 时构造期报错（None 合法=不接线）。"""
+    base = dict(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=lambda text: None,
+        submit=lambda window, image, hash_value: True,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+    )
+    with pytest.raises(TypeError, match="settle_callback"):
+        RemoteAutomationController(**base, settle_callback="bad")
+    RemoteAutomationController(**base)  # None 合法：不接线
+
 
 
 def test_auto_worker_success_encodes_original_and_thumbnail(monkeypatch):

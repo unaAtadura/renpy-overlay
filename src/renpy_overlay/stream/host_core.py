@@ -221,7 +221,8 @@ class StreamOverlayCore:
         )
         self._hotkey_mode.attach_remote_screenshot(self._remote_screenshot)
         # 遥控器自动化：周期截图 + 感知哈希变化检测 + 缓存命中（装填状态复用
-        # 遥控截图控制器）；提交走视觉链路但不隐藏窗口、不落 screenshot.db
+        # 遥控截图控制器）；提交走视觉链路但不隐藏窗口；API 成功落库
+        # screenshot.db 并回填持久化缓存，缓存命中（内存/数据库）零写库
         self._remote_automation = RemoteAutomationController(
             interval=self._config.remote_screenshot_interval,
             cache_size=self._config.remote_cache_size_count,
@@ -233,11 +234,15 @@ class StreamOverlayCore:
             suppress_frame=self._quick_menu.set_frame_suppressed,
             get_windows_hidden=lambda: self._remote_screenshot.user_hidden,
             set_windows_hidden=self._remote_screenshot.set_user_hidden,
+            persistent_lookup=self._lookup_persistent_cache,
+            persistent_put=self._put_persistent_cache,
             # 修订 A4 决议：每轮抓屏前隐藏瞄准器 B（仅 B，A 保持可见作缓存
             # 错误命中时的手动兜底）——手动拖动 B 的画面变化会污染感知
             # 签名与缓存命中；隐藏后不自动恢复（防反复隐藏/显示的爆闪），
             # 须用户「显示遥控器」手动恢复
             hide_arm_before_capture=self._remote_screenshot.hide_arm_window,
+            settle_frames=self._config.remote_settle_frames,
+            settle_callback=self._remote_screenshot.set_trigger_settle,
         )
         self._remote_screenshot.attach_automation(self._remote_automation)
         self._quick_menu.attach_remote_automation(self._remote_automation)

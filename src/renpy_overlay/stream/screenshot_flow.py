@@ -26,6 +26,7 @@ from ..screenshot import (
     make_thumbnail,
     scale_to_percent,
 )
+from ..screenshot.remote_automation import region_means, signature_to_bytes
 from ..screenshot.vision import translate_image_verified
 from .constants import SCREENSHOT_DWM_SETTLE_SECONDS
 
@@ -381,6 +382,7 @@ class ScreenshotFlowMixin:
         """
         seq = item.get("seq")
         current = seq == self._translation_seq
+        record_id: int | None = None  # 成功落库的记录 id（持久化缓存溯源用）
         if current:
             self._translating = False
         else:
@@ -397,26 +399,30 @@ class ScreenshotFlowMixin:
             logger.info(
                 "自动化截图翻译完成（seq=%d，译文 %d 字），已显示在正文窗", seq, len(text)
             )
-            self._store_remote_auto_record(item, text)
+            record_id = self._store_remote_auto_record(item, text)
         elif not aborted and current:
             logger.warning("自动化截图翻译失败：%s", item.get("error") or "返回空文本")
             self._update_title("翻译失败")
-        # 在途回执无条件回传（成功才回填缓存；中止/失败传 None 不污染缓存）
+        # 在途回执无条件回传（成功才回填缓存；中止/失败传 None 不污染缓存）；
+        # record_id 随回执透传：持久化缓存条目用它溯源来源截图记录
         self._remote_automation.on_translation_result(
-            item.get("signature"), text if not aborted and text else None
+            item.get("signature"),
+            text if not aborted and text else None,
+            screenshot_id=record_id if not aborted and text else None,
         )
 
-    def _store_remote_auto_record(self, item: dict, text: str) -> None:
+    def _store_remote_auto_record(self, item: dict, text: str) -> int | None:
         """自动化成功结果的落库（主线程）：字段规则与手动截图翻译一致。
 
         ts 为 13 位毫秒时间戳；img_original/img_thumbnail 为 worker 编码的
         原始抓屏与缩略图 JPEG bytes；视觉链路只返回译文（无独立原文），
         与手动一致把译文存入 ``ocr_text``。store 不可用或写入失败一律降级
         为「仅上屏不入库」：异常必须吞掉，保证在途回执一定送达控制器
-        （否则自动化永久停在「在途」态不再比较变化）。
+        （否则自动化永久停在「在途」态不再比较变化）。返回记录 id（持久化
+        缓存条目溯源用；降级时 None）。
         """
         if self._screenshot_store is None:
-            return  # 数据库不可用：仅显示不入库
+            return None  # 数据库不可用：仅显示不入库
         try:
             record_id = self._screenshot_store.insert(
                 ts=int(time.time() * 1000),  # 13 位毫秒时间戳（与手动一致）
@@ -426,6 +432,46 @@ class ScreenshotFlowMixin:
             )
         except Exception as exc:  # 防御：入库异常不得影响上屏与在途回执
             logger.warning("自动化截图记录入库异常，仅保留正文显示：%s", exc)
-            return
+            return None
         if record_id is None:
             logger.warning("自动化截图记录入库失败，仅保留正文显示")
+        return record_id
+
+    # ---- 遥控器自动化持久化缓存（feat/remote-cache-persist；控制器回调，主线程） --
+
+    def _lookup_persistent_cache(self, signature) -> str | None:
+        """持久化缓存查询（控制器回调）：开关关闭或 store 不可用恒 None。
+
+        返回 None 语义 = 未命中；任何异常在此吞噬（不得波及自动化 tick 主
+        线程），存储层自身也按 sqlite 错误降级短路。
+        """
+        if not self._config.remote_cache_persist_enable or self._screenshot_store is None:
+            return None
+        try:
+            return self._screenshot_store.lookup_signature(
+                signature_to_bytes(signature), region_means(signature)
+            )
+        except Exception as exc:  # 防御：缓存查询异常不得影响翻译主流程
+            logger.warning("持久化缓存查询异常，按未命中处理：%s", exc)
+            return None
+
+    def _put_persistent_cache(self, signature, text, width, height, screenshot_id) -> None:
+        """持久化缓存写入（控制器回执回调）：fire-and-forget，失败仅记日志。
+
+        开关关闭或 store 不可用时直接跳过；容量上限每次从 config 读取
+        （热重载即时生效）。
+        """
+        if not self._config.remote_cache_persist_enable or self._screenshot_store is None:
+            return
+        try:
+            self._screenshot_store.put_signature(
+                signature_to_bytes(signature),
+                region_means(signature),
+                text,
+                width,
+                height,
+                screenshot_id,
+                capacity=self._config.remote_cache_db_size_count,
+            )
+        except Exception as exc:  # 防御：缓存写入异常不得影响翻译主流程
+            logger.warning("持久化缓存写入异常（不影响翻译流程）：%s", exc)

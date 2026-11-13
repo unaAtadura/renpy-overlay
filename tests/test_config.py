@@ -70,6 +70,9 @@ def test_missing_file_creates_defaults(tmp_path):
         "remote_screenshot_hide": False,
         "remote_screenshot_interval": 0.5,
         "remote_cache_size_count": 50,
+        "remote_cache_persist_enable": False,
+        "remote_cache_db_size_count": 40000,
+        "remote_settle_frames": 3,
         "remote_screenshot_diameterA": 100,
         "remote_screenshot_diameterB": 100,
         "max_concurrency": 8,
@@ -142,6 +145,9 @@ def test_default_file_key_order_matches_target(tmp_path):
         "remote_screenshot_hide",
         "remote_screenshot_interval",
         "remote_cache_size_count",
+        "remote_cache_persist_enable",
+        "remote_cache_db_size_count",
+        "remote_settle_frames",
         "remote_screenshot_diameterA",
         "remote_screenshot_diameterB",
         "max_concurrency",
@@ -191,6 +197,9 @@ def test_remote_screenshot_defaults_loaded(tmp_path):
     assert loaded.remote_screenshot_hide is False  # 缺省键回退 False（保持既有行为）
     assert loaded.remote_screenshot_interval == 0.5
     assert loaded.remote_cache_size_count == 50
+    assert loaded.remote_cache_persist_enable is False  # 默认关（持久化是显式可选增强）
+    assert loaded.remote_cache_db_size_count == 40000
+    assert loaded.remote_settle_frames == 3  # 稳定窗口默认 3 帧（1.0s 确认窗）
     assert loaded.remote_screenshot_diameter_a == 100
     assert loaded.remote_screenshot_diameter_b == 100
 
@@ -277,6 +286,60 @@ def test_remote_automation_invalid_values_fall_back(tmp_path):
             f"interval={bad_interval!r} 应回退默认"
         )
         assert loaded.remote_cache_size_count == 50, f"count={bad_count!r} 应回退默认"
+
+
+# ---- 遥控器自动化持久化缓存（remote cache persist）两配置项 ----------------------
+
+
+def test_remote_cache_persist_values_loaded(tmp_path):
+    """持久化缓存两新键：合法值生效（开关 true、上限合法正整数）。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {"remote_cache_persist_enable": True, "remote_cache_db_size_count": 8000}
+        ),
+        encoding="utf-8",
+    )
+    loaded = config.load_config(target)
+    assert loaded.remote_cache_persist_enable is True
+    assert loaded.remote_cache_db_size_count == 8000
+
+
+def test_remote_cache_persist_invalid_values_fall_back(tmp_path):
+    """持久化缓存两新键：类型错/低于下限回退默认（开关 false，上限 40000）。"""
+    target = tmp_path / "config.json"
+    for bad_enable, bad_size in (
+        ("yes", "big"),  # 类型错
+        (1, 0),  # int 不是布尔 / 低于下限
+        (False, -5),  # enable 合法生效 False；size 低于下限回退默认
+    ):
+        target.write_text(
+            json.dumps(
+                {
+                    "remote_cache_persist_enable": bad_enable,
+                    "remote_cache_db_size_count": bad_size,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = config.load_config(target)
+        assert loaded.remote_cache_persist_enable is False, (
+            f"enable={bad_enable!r} 应回退或合法生效为 False"
+        )
+        assert loaded.remote_cache_db_size_count == 40000, (
+            f"size={bad_size!r} 应回退默认"
+        )
+
+
+def test_remote_settle_frames_loaded_and_fall_back(tmp_path):
+    """稳定窗口帧数：合法值生效；缺省/类型错/低于下限回退默认 3（下限 1）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"remote_settle_frames": 5}), encoding="utf-8")
+    assert config.load_config(target).remote_settle_frames == 5
+    for bad in ("fast", 0, -1, True):
+        target.write_text(json.dumps({"remote_settle_frames": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.remote_settle_frames == 3, f"{bad!r} 应回退默认 3"
 
 
 def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
