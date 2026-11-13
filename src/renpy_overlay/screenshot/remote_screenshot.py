@@ -35,10 +35,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 
-from PyQt6.QtGui import QColor
-
-from .. import layout
-
 logger = logging.getLogger("renpy_overlay.screenshot.remote_screenshot")
 
 #: A/B 初始摆放间隔（像素）：主屏可用区中心左右并排（需求未指定位置，默认值）
@@ -104,20 +100,6 @@ def _default_screen_center() -> tuple[int, int]:
     return 400, 300
 
 
-def _default_screen_rects() -> list[Rect]:
-    """全部屏幕可用区域（Qt 全局逻辑坐标，与 layout 恢复坐标同一口径）。"""
-    from PyQt6.QtWidgets import QApplication  # noqa: PLC0415 - 惰性导入
-
-    screens = QApplication.screens()
-    if not screens:
-        return [(0, 0, 1920, 1080)]
-    return [
-        (geo.x(), geo.y(), geo.width(), geo.height())
-        for screen in screens
-        for geo in (screen.availableGeometry(),)
-    ]
-
-
 class RemoteScreenshotController:
     """遥控截图控制器：A/B 窗口生命周期 + B 的装填状态 + A 的触发分发。
 
@@ -129,8 +111,6 @@ class RemoteScreenshotController:
       在途互斥与既有提示规则——本控制器不重复实现互斥）；
     - ``window_factory`` / ``screen_center_provider``：窗口工厂与屏幕中心
       源（离线测试注入 stub，缺省为真实实现）；
-    - ``screen_rects_provider``：全部屏幕可用区域源（layout 恢复坐标的
-      离屏校验用；离线测试注入 stub，缺省为真实实现）；
     - ``user_hidden``：「隐藏遥控器」用户级显隐初值（config.
       remote_screenshot_hide；true 时 A/B 生成后保持隐藏，此后以用户操作为准）。
 
@@ -146,7 +126,6 @@ class RemoteScreenshotController:
         trigger: Callable[[object], None] | None = None,
         window_factory: Callable[[str, int, object], object] | None = None,
         screen_center_provider: Callable[[], tuple[int, int]] | None = None,
-        screen_rects_provider: Callable[[], list[Rect]] | None = None,
         user_hidden: bool = False,
     ) -> None:
         self._enable = bool(enable)
@@ -156,7 +135,6 @@ class RemoteScreenshotController:
         self._trigger = trigger
         self._window_factory = window_factory or _default_window_factory
         self._screen_center = screen_center_provider or _default_screen_center
-        self._screen_rects = screen_rects_provider or _default_screen_rects
         self._window_a: object | None = None
         self._window_b: object | None = None
         self._armed: object | None = None  # B 当前装填的截图窗口（None = 圆形）
@@ -165,25 +143,10 @@ class RemoteScreenshotController:
         # 「隐藏遥控器」的用户级显隐态：抓屏恢复 show_windows 时尊重（不放出）；
         # 初值取配置 remote_screenshot_hide（true 时生成后保持隐藏，此后以用户操作为准）
         self._user_hidden = bool(user_hidden)
-        # layout 恢复基线（需求 future_恢复布局.txt 补充）：持久持有、每次
-        # 创建 A/B 都消费（快捷键模式关闭再开启的重建同样按 layout 摆放）；
-        # None = 无基线（默认屏幕中心并排，改动前行为）
-        self._layout_restore: layout.RemoteScreenshotLayout | None = None
 
     def attach_automation(self, automation) -> None:
         """注入遥控器自动化控制器（A 单击接管与 B 装填变化转发；同宿主附着约定）。"""
         self._automation = automation
-
-    def set_layout_restore(self, state: layout.RemoteScreenshotLayout | None) -> None:
-        """注入 layout 恢复基线（宿主启动时调用；None = 清除）。
-
-        基线持久持有、每次创建 A/B 都消费：启动恢复（快捷键模式开启时）与
-        运行期关闭再开启快捷键模式的重建均按基线摆放与重绑装填（需求五）。
-        是否生成仍由 config 的 remote_screenshot_enable 决定，生成后是否
-        立即显示仍由 remote_screenshot_hide 决定——本基线只覆盖几何与
-        装填状态，不写回 config（需求四.1）。
-        """
-        self._layout_restore = state
 
     @property
     def windows_created(self) -> bool:
@@ -237,10 +200,7 @@ class RemoteScreenshotController:
         if not self._user_hidden:
             for window in (self._window_a, self._window_b):
                 window.show()  # 先 show 再定位（Qt 渲染管线要求，同 QuickMenu）
-        if self._layout_restore is not None:
-            self._apply_layout_restore()
-        else:
-            self._place_windows()
+        self._place_windows()
         logger.info(
             "遥控截图窗口 A/B 已生成（直径 %d/%d，%s）",
             self._diameter_a,
@@ -271,66 +231,6 @@ class RemoteScreenshotController:
         a_x = cx - total // 2
         self._window_a.move(a_x, cy - a_rect[3] // 2)
         self._window_b.move(a_x + a_rect[2] + INITIAL_GAP, cy - b_rect[3] // 2)
-
-    # ---- layout 恢复基线（宿主启动时注入；创建时消费） ------------------------
-
-    def _apply_layout_restore(self) -> None:
-        """按 layout 基线摆放 A/B 并重绑装填（需求 future_恢复布局.txt 补充）。
-
-        直径：经 ``setFixedSize`` 应用记录的运行时值（窗口绘制按 rect 自
-        适应，几何语义不变）；离屏校验前先应用直径，回退摆放按新直径并排。
-        位置：任一窗记录坐标落到当前任一屏幕之外（分辨率/显示器变化）→
-        整体回退屏幕中心默认并排 + WARNING（避免 A/B 分居两处）。
-        装填：按记录边框色在锁定窗口列表中匹配（同快捷键模块"以色找窗"
-        模式），目标不存在或未锁定 → INFO 回退圆形待命；命中转发自动化
-        （与 :meth:`update_arm_state` 同一转发语义）。
-        """
-        state = self._layout_restore
-        if self._window_a is None or self._window_b is None:
-            return
-        screens = self._screen_rects()
-        on_screen = all(
-            layout.rect_intersects_any_screen(spec.x, spec.y, spec.diameter, spec.diameter, screens)
-            for spec in (state.a, state.b)
-        )
-        for spec, window in ((state.a, self._window_a), (state.b, self._window_b)):
-            window.setFixedSize(spec.diameter, spec.diameter)
-        if on_screen:
-            self._window_a.move(state.a.x, state.a.y)
-            self._window_b.move(state.b.x, state.b.y)
-        else:
-            logger.warning("layout 记录的遥控器坐标落到屏幕之外，回退屏幕中心默认摆放")
-            self._place_windows()
-        if state.loaded_color is not None:
-            self._restore_armed_by_color(state.loaded_color)
-        logger.info(
-            "遥控截图窗口 A/B 已按 layout 恢复（直径 %d/%d，装填=%s，%s）",
-            state.a.diameter,
-            state.b.diameter,
-            state.loaded_color or "待命",
-            "已显示" if not self._user_hidden else "保持隐藏（remote_screenshot_hide）",
-        )
-
-    def _restore_armed_by_color(self, color_name: str) -> None:
-        """按 layout 记录的边框色重绑 B 装填目标（目标缺失回退待命，不异常）。"""
-        wanted = color_name.strip().lower()
-        target = next(
-            (
-                window
-                for window in self._locked_windows_provider()
-                if getattr(window, "border_color", None) is not None
-                and QColor(window.border_color).name().lower() == wanted
-            ),
-            None,
-        )
-        if target is None:
-            logger.info("layout 记录的装填目标截图区域不存在，窗口 B 保持圆形待命")
-            return
-        self._armed = target
-        self._window_b.set_armed(target.border_color)
-        if self._automation is not None:
-            self._automation.on_armed_changed(target)
-        logger.info("遥控截图窗口 B 已按 layout 恢复装填（边框色 %s）", wanted)
 
     # ---- B 的装填状态机（B 拖拽移动时回调） -----------------------------------
 
@@ -409,22 +309,6 @@ class RemoteScreenshotController:
             for window in (self._window_a, self._window_b)
             if window is not None
         ]
-
-    def layout_snapshot(self):
-        """A/B 几何与装填目标色快照（宿主退出保存用）；未生成返回 None。
-
-        返回 ``(a_x, a_y, a_diameter, b_x, b_y, b_diameter, loaded_color)``
-        纯值元组。不读 isVisible：「隐藏遥控器」或托盘隐藏期间照常记录
-        几何与装填（需求二.4/三.3）；颜色经 ``QColor.name()`` 规范化
-        （#rrggbb，None = 圆形待命）。坐标与现有截图窗/日志窗同口径
-        （Qt 全局逻辑坐标，保存 API = 恢复 API）。
-        """
-        if not self.windows_created:
-            return None
-        a = window_rect(self._window_a)
-        b = window_rect(self._window_b)
-        color = self._armed.border_color.name() if self._armed is not None else None
-        return (a[0], a[1], a[2], b[0], b[1], b[2], color)
 
     def reassert_topmost(self) -> None:
         """把 A/B 重新压回最顶层（对抗独占全屏被激活时的覆盖）。"""

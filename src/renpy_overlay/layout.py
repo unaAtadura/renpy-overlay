@@ -37,15 +37,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import (
-    COLOR_HEX_PATTERN,
     DEFAULT_CHOICE_LOG_WINDOW_HEIGHT,
     DEFAULT_CHOICE_LOG_WINDOW_WIDTH,
-    DEFAULT_REMOTE_SCREENSHOT_DIAMETER,
     DEFAULT_STREAM_WINDOW_HEIGHT,
     DEFAULT_STREAM_WINDOW_WIDTH,
     MIN_CHOICE_LOG_WINDOW_HEIGHT,
     MIN_CHOICE_LOG_WINDOW_WIDTH,
-    MIN_REMOTE_SCREENSHOT_DIAMETER,
     MIN_STREAM_WINDOW_HEIGHT,
     MIN_STREAM_WINDOW_WIDTH,
 )
@@ -104,33 +101,14 @@ class ChoiceLogLayout:
 
 
 @dataclass(frozen=True)
-class RemoteWindowLayout:
-    """遥控器单窗（A 触发器 / B 瞄准器）的布局记录（Qt 全局逻辑坐标）。"""
-
-    x: int = 0
-    y: int = 0
-    diameter: int = DEFAULT_REMOTE_SCREENSHOT_DIAMETER
-
-
-@dataclass(frozen=True)
-class RemoteScreenshotLayout:
-    """遥控器 A/B 的布局记录（loaded_color=None = B 圆形待命态）。"""
-
-    a: RemoteWindowLayout = field(default_factory=RemoteWindowLayout)
-    b: RemoteWindowLayout = field(default_factory=RemoteWindowLayout)
-    loaded_color: str | None = None
-
-
-@dataclass(frozen=True)
 class LayoutState:
-    """layout.json 的解析结果（版本 + 各组窗口状态；遥控器节点缺失为 None）。"""
+    """layout.json 的解析结果（版本 + 三组窗口状态）。"""
 
     version: int = LAYOUT_VERSION
     stream_window: StreamLayout = field(default_factory=StreamLayout)
     screenshot_windows: tuple[ScreenshotWindowLayout, ...] = ()
     hotkey_mode: bool = False
     choice_log_window: ChoiceLogLayout = field(default_factory=ChoiceLogLayout)
-    remote_screenshot: RemoteScreenshotLayout | None = None
 
 
 # ---- 字段级校验（回退默认并 WARNING，同 config.py 的 _read_* 风格） ----------
@@ -277,82 +255,6 @@ def _read_choice_log_window(raw: dict) -> ChoiceLogLayout:
 # ---- 解析与组装（纯函数） ----------------------------------------------------
 
 
-def _valid_coordinate(value: object) -> bool:
-    """坐标字段合法性（整数，bool 不算；负值合法——多屏环境可为负）。"""
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, (int, float))
-        and value == int(value)
-    )
-
-
-def _read_remote_window(raw: dict, key: str) -> RemoteWindowLayout | None:
-    """遥控器单窗节解析：任一字段缺失或类型非法/直径低于下限 → None。
-
-    需求（future_恢复布局.txt 补充）：遥控器节点字段缺失或类型非法时
-    行为与改动前一致（屏幕中心默认摆放）——故字段级不降级，整窗放弃。
-    """
-    section = raw.get(key)
-    if not isinstance(section, dict):
-        logger.warning(
-            "layout remote_screenshot.%s 不是对象（%r），忽略遥控器恢复", key, section
-        )
-        return None
-    x = section.get("x")
-    y = section.get("y")
-    diameter = section.get("diameter")
-    if not _valid_coordinate(x) or not _valid_coordinate(y):
-        logger.warning(
-            "layout remote_screenshot.%s 坐标非法（x=%r，y=%r），忽略遥控器恢复",
-            key,
-            x,
-            y,
-        )
-        return None
-    if (
-        isinstance(diameter, bool)
-        or not isinstance(diameter, (int, float))
-        or diameter != int(diameter)
-        or int(diameter) < MIN_REMOTE_SCREENSHOT_DIAMETER
-    ):
-        logger.warning(
-            "layout remote_screenshot.%s.diameter 非法（%r，下限 %d），忽略遥控器恢复",
-            key,
-            diameter,
-            MIN_REMOTE_SCREENSHOT_DIAMETER,
-        )
-        return None
-    return RemoteWindowLayout(x=int(x), y=int(y), diameter=int(diameter))
-
-
-def _read_remote_screenshot(raw: dict) -> RemoteScreenshotLayout | None:
-    """遥控器节点解析：节点缺失/null → None（不恢复，改动前行为）。"""
-    section = raw.get("remote_screenshot")
-    if section is None:
-        return None
-    if not isinstance(section, dict):
-        logger.warning("layout remote_screenshot 不是对象（%r），忽略遥控器恢复", section)
-        return None
-    a = _read_remote_window(section, "a")
-    b = _read_remote_window(section, "b")
-    color = section.get("loaded_color")
-    if color is not None and (
-        not isinstance(color, str) or COLOR_HEX_PATTERN.match(color.strip()) is None
-    ):
-        logger.warning(
-            "layout remote_screenshot.loaded_color 非法（%r，需 #RGB/#RRGGBB），忽略遥控器恢复",
-            color,
-        )
-        return None
-    if a is None or b is None:
-        return None
-    return RemoteScreenshotLayout(
-        a=a,
-        b=b,
-        loaded_color=color.strip() if color is not None else None,
-    )
-
-
 def parse_layout(raw: object) -> LayoutState | None:
     """把 JSON 解析结果转成布局状态（纯函数，逐字段降级，绝不抛异常）。
 
@@ -380,26 +282,7 @@ def parse_layout(raw: object) -> LayoutState | None:
         screenshot_windows=_read_screenshot_windows(raw),
         hotkey_mode=_read_bool(raw, "hotkey_mode", False),
         choice_log_window=_read_choice_log_window(raw),
-        remote_screenshot=_read_remote_screenshot(raw),
     )
-
-
-def collect_remote_screenshot_layout(
-    *,
-    a_x: int,
-    a_y: int,
-    a_diameter: int,
-    b_x: int,
-    b_y: int,
-    b_diameter: int,
-    loaded_color: str | None,
-) -> dict:
-    """遥控器 A/B 快照组装（纯函数；坐标为 Qt 全局逻辑坐标，直径为运行时值）。"""
-    return {
-        "a": {"x": int(a_x), "y": int(a_y), "diameter": int(a_diameter)},
-        "b": {"x": int(b_x), "y": int(b_y), "diameter": int(b_diameter)},
-        "loaded_color": None if loaded_color is None else str(loaded_color),
-    }
 
 
 def collect_layout(
@@ -414,17 +297,14 @@ def collect_layout(
     choice_log_open: bool,
     choice_log_rect: tuple[int, int, int, int] | None,
     choice_log_locked: bool = False,
-    remote_screenshot: dict | None = None,
 ) -> dict:
     """把宿主现取的纯值快照组装为可写盘的 dict（纯函数，离线单测用）。
 
     ``screenshot_windows`` 为 ``(x, y, w, h, locked)`` 元组序列（池序即创建
     序）；``choice_log_rect`` 为 ``(x, y, w, h)`` 或 None（未打开）；
     ``stream_abs_rect`` 为 ``(left, top, right, bottom)``（win32 物理像素，
-    仅诊断与离屏校验）或 None；``remote_screenshot`` 为
-    :func:`collect_remote_screenshot_layout` 的结果，None = 本次运行遥控器
-    未创建（节点写 null；保存侧宿主会先以旧文件节点回填，见
-    :func:`load_layout_raw`）。"""
+    仅诊断与离屏校验）或 None。
+    """
     stream: dict = {
         "width": int(stream_width),
         "height": int(stream_height),
@@ -463,7 +343,6 @@ def collect_layout(
                 else {}
             ),
         },
-        "remote_screenshot": remote_screenshot,
     }
     return payload
 
@@ -494,23 +373,6 @@ def load_layout(path: Path) -> LayoutState | None:
         logger.warning("读取布局文件失败（%s），忽略整份布局：%s", target, exc)
         return None
     return parse_layout(raw)
-
-
-def load_layout_raw(path: Path) -> dict | None:
-    """读取 layout.json 的原始 dict（不做 schema 校验；缺失/损坏返回 None）。
-
-    保存侧合并专用：本次运行遥控器未创建时，宿主以旧文件中的遥控器节点
-    回填新 payload，避免一次未启用就把既有位置记录清空（需求三.2）。
-    """
-    target = Path(path)
-    if not target.is_file():
-        return None
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        logger.warning("读取布局文件失败（%s）：%s", target, exc)
-        return None
-    return raw if isinstance(raw, dict) else None
 
 
 def save_layout(path: Path, payload: dict) -> bool:

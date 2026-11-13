@@ -193,16 +193,6 @@ class _RecordingHost:
             enabled=False,
             set_enabled=self._record_hotkey_enable,
         )
-        self.remote_baselines: list = []
-        self._remote_screenshot = SimpleNamespace(
-            set_layout_restore=self._record_remote_baseline,
-            layout_snapshot=lambda: None,
-            windows_created=False,
-        )
-
-    def _record_remote_baseline(self, state) -> None:
-        self.restore_order.append("remote")
-        self.remote_baselines.append(state)
 
     def _make_pool_window(self, index, color, on_click=None, parent=None):
         self.restore_order.append(f"window{index}")
@@ -308,43 +298,6 @@ def test_apply_layout_passes_layout_size_and_pos_to_choice_log():
     assert host.choice_log_calls == [
         {"width": 150, "height": 300, "pos": (10, 10), "locked": False}
     ]
-
-
-def _remote_node() -> dict:
-    return layout.collect_remote_screenshot_layout(
-        a_x=10,
-        a_y=20,
-        a_diameter=80,
-        b_x=200,
-        b_y=300,
-        b_diameter=100,
-        loaded_color="#ff3232",
-    )
-
-
-def test_apply_layout_injects_remote_baseline_before_hotkey_mode():
-    """需求四.2：基线必须在快捷键模式开启之前注入（A/B 生成时消费）。"""
-    host = _RecordingHost()
-    StreamOverlayCore._apply_layout(
-        host, _layout_state(remote_screenshot=_remote_node())
-    )
-    assert host.restore_order == [
-        "window0",
-        "window1",
-        "remote",
-        "hotkeyTrue",
-        "choice",
-    ]
-    baseline = host.remote_baselines[-1]
-    assert baseline.a.diameter == 80
-    assert baseline.loaded_color == "#ff3232"
-
-
-def test_apply_layout_without_remote_node_does_not_touch_controller():
-    """需求四.5：节点缺失 → 不注入基线（控制器保持改动前默认摆放行为）。"""
-    host = _RecordingHost()
-    StreamOverlayCore._apply_layout(host, _layout_state())
-    assert host.remote_baselines == []
 
 
 def test_apply_layout_drops_offset_when_saved_rect_offscreen(monkeypatch):
@@ -766,108 +719,3 @@ def test_virtual_screen_rect_smoke_on_windows():
     left, top, right, bottom = win32api.virtual_screen_rect()
     assert right > left
     assert bottom > top
-
-
-# ---- _persist_layout：遥控器快照与未创建保留旧节点 --------------------------------
-
-
-class _PersistHost:
-    """_persist_layout 的鸭子宿主：固定各窗口状态，遥控器快照可配置。"""
-
-    def __init__(
-        self,
-        game_dir: str,
-        remote_created: bool,
-        remote_snapshot: tuple | None,
-    ) -> None:
-        self._game_dir = game_dir
-        self.width = 800
-        self.height = 200
-        self._locked = False
-        self._user_offset = None
-        self._title_hwnd = 0xA
-        self._body_hwnd = 0xB
-        self._choice_log_window = None
-        self._hotkey_mode = SimpleNamespace(enabled=False)
-        self._quick_menu = SimpleNamespace(screenshot_windows=lambda: [])
-        self._remote_screenshot = SimpleNamespace(
-            windows_created=remote_created,
-            layout_snapshot=(lambda: remote_snapshot)
-            if remote_created
-            else (lambda: None),
-        )
-
-
-def _persist_monkeypatch(monkeypatch):
-    """_persist_layout 读两窗物理矩形：换成固定值（离线不触真实窗口）。"""
-    monkeypatch.setattr(
-        "renpy_overlay.stream.host_core.win32api.window_rect",
-        lambda hwnd: (0, 0, 900, 400),
-    )
-
-
-def _base_payload_kwargs():
-    return dict(
-        stream_width=800,
-        stream_height=200,
-        stream_locked=False,
-        stream_user_offset=None,
-        stream_abs_rect=None,
-        screenshot_windows=[],
-        hotkey_mode=False,
-        choice_log_open=False,
-        choice_log_rect=None,
-    )
-
-
-def test_persist_layout_records_remote_snapshot(tmp_path, monkeypatch):
-    _persist_monkeypatch(monkeypatch)
-    host = _PersistHost(
-        str(tmp_path),
-        remote_created=True,
-        remote_snapshot=(10, 20, 60, 200, 300, 80, "#ff3232"),
-    )
-    StreamOverlayCore._persist_layout(host)
-    state = layout.load_layout(layout.layout_path_for(str(tmp_path)))
-    remote = state.remote_screenshot
-    assert remote is not None
-    assert (remote.a.x, remote.a.y, remote.a.diameter) == (10, 20, 60)
-    assert (remote.b.x, remote.b.y, remote.b.diameter) == (200, 300, 80)
-    assert remote.loaded_color == "#ff3232"
-
-
-def test_persist_layout_keeps_previous_remote_node_when_not_created(
-    tmp_path, monkeypatch
-):
-    """需求三.2：本次运行未启用遥控器，不得清空文件中已有的位置记录。"""
-    _persist_monkeypatch(monkeypatch)
-    path = layout.layout_path_for(str(tmp_path))
-    layout.save_layout(
-        path,
-        layout.collect_layout(
-            remote_screenshot=layout.collect_remote_screenshot_layout(
-                a_x=1,
-                a_y=2,
-                a_diameter=30,
-                b_x=3,
-                b_y=4,
-                b_diameter=40,
-                loaded_color=None,
-            ),
-            **_base_payload_kwargs(),
-        ),
-    )
-    host = _PersistHost(str(tmp_path), remote_created=False, remote_snapshot=None)
-    StreamOverlayCore._persist_layout(host)
-    state = layout.load_layout(path)
-    assert state.remote_screenshot is not None  # 旧记录保留
-    assert (state.remote_screenshot.a.x, state.remote_screenshot.a.y) == (1, 2)
-    assert state.remote_screenshot.b.diameter == 40
-
-
-def test_persist_layout_writes_null_remote_when_never_created(tmp_path, monkeypatch):
-    _persist_monkeypatch(monkeypatch)
-    host = _PersistHost(str(tmp_path), remote_created=False, remote_snapshot=None)
-    StreamOverlayCore._persist_layout(host)
-    raw = layout.load_layout_raw(layout.layout_path_for(str(tmp_path)))
-    assert raw["remote_screenshot"] is None
