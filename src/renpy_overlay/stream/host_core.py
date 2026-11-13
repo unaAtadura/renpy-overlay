@@ -24,6 +24,7 @@ from ..quick_menu_anchor import (
     default_anchor_position,
     menu_popup_position,
 )
+from ..restart import spawn_self
 from ..screenshot import (
     AIChatWindow,
     ChatHistoryWindow,
@@ -72,12 +73,16 @@ class StreamOverlayCore:
         app_config: config.AppConfig | None = None,
         game_dir: str = "",
         skip_injection: bool = False,
+        # 重启实参（设置窗口自动重启用）：cli 层组装（--pid / --data-dir），
+        # 宿主只透传给 restart.spawn_self；缺省时回退自组 --pid
+        restart_args: list[str] | None = None,
         on_quit=None,
     ):
         self.target_pid = target_pid
         # 跳过注入模式（需求 future_跳过注入.txt）：无游戏进程可定位/无文本捕获，
         # 以主屏为虚拟游戏窗口置顶摆放；单击/自动翻译不可用（入口禁用）
         self.skip_injection = bool(skip_injection)
+        self._restart_args = list(restart_args) if restart_args else None
         self.dock = dock if dock in DOCK_CHOICES else "top-center"
         self.width = width
         self.height = height
@@ -404,6 +409,7 @@ class StreamOverlayCore:
             return
         self._settings_window = SettingsWindow(
             on_reload=self.reload_config,
+            on_restart=self.request_restart,
             on_closed=lambda: setattr(self, "_settings_window", None),
         )
         self._settings_window.show()
@@ -453,6 +459,29 @@ class StreamOverlayCore:
             return QRect(0, 0, 1920, 1080)
         return screen.availableGeometry()
 
+    def request_restart(self) -> str | None:
+        """重启：分离拉起新实例，成功则经 on_quit 走既有退出链（设置窗口「重启」触发）。
+
+        新实例由 restart.spawn_self 以相同形态（frozen/源码）启动，携带 cli 层
+        组装的重启实参（注入模式 --pid、跳过注入模式 --data-dir），自行完成
+        「读最新 config.json → 重新注入 → 新悬浮窗」；本实例经 on_quit 进入
+        与普通退出同一汇聚点（卸载游戏端代理 → 停 IPC → 释放远程内存），
+        绝不二次注入不卸载（agent.start 重复调用不会停止旧 sender 线程）。
+
+        返回 None=已触发重启；错误字符串=拉起失败（调用方提示并保留当前会话）。
+        """
+        extra = self._restart_args or (
+            ["--pid", str(self.target_pid)] if self.target_pid else []
+        )
+        if not extra or not spawn_self(extra):
+            return "启动新实例失败，详见日志"
+        if callable(self.on_quit):
+            try:
+                self.on_quit()
+            except Exception:  # pragma: no cover - 退出回调失败不影响重启结果
+                logger.exception("重启退出回调失败")
+        return None
+
     def reload_config(self) -> str | None:
         """重新加载 config.json 并热应用到运行时（设置窗口「确定」触发）。
 
@@ -465,9 +494,10 @@ class StreamOverlayCore:
           当前选择不覆盖，下次启动读新值）；
         - 全局热键组 / 锁鼠标逃脱键：重建控制器并重注册；
 
-        需重启键（双窗样式与尺寸、对话窗尺寸、fullscreen_mode、内存缓存
-        容量、遥控截图参数）由设置窗口提示，不做热切换（风险点：运行中
-        单例持有字体/几何，双层控制器重建风险高）。
+        无法热应用的键（双窗样式与尺寸、对话窗尺寸、fullscreen_mode、
+        内存缓存容量、遥控截图参数）不做热切换（风险点：运行中单例持有
+        字体/几何，双层控制器重建风险高）——设置窗口在重载成功后弹
+        「是否重启载入配置？」二次确认，由用户决定是否重启统一载入。
         """
         try:
             new_cfg = config.load_config()
@@ -486,7 +516,7 @@ class StreamOverlayCore:
             message = "；".join(errors)
             logger.warning("配置热重载失败，已回退原配置：%s", message)
             return f"{message}（已回退原配置）"
-        logger.info("配置已热重载并生效（需重启键由设置窗口提示）")
+        logger.info("配置已热重载并生效（重启问询由设置窗口二次确认弹窗承担）")
         return None
 
     def _apply_runtime_config(self, cfg: config.AppConfig) -> list[str]:

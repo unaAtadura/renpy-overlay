@@ -81,7 +81,7 @@ EPILOG = """\
               超限时按冷端随机水位淘汰避免重玩旧章节整段未命中）/
               remote_settle_frames（稳定窗口帧数，默认 3：判变通过后连续 N
               帧画面不变才提交翻译，过滤打字机逐字输出的半句中间态；
-              N=1 退化为判变即提交；修改后需重启生效）
+              N=1 退化为判变即提交）
   听歌识曲    快捷菜单：录制 recording_duration（默认 8）
               秒系统音频交 Shazam 识别；标题窗显示录制倒计时（建议关闭游戏音效
               提升识别率）/录制失败/识曲中/成功/失败，成功时正文窗显示歌名与
@@ -159,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     target = parser.add_argument_group("目标选择")
     target.add_argument("--pid", type=int, help="直接指定目标进程 PID（跳过选择界面）")
+    target.add_argument(
+        "--data-dir",
+        default=None,
+        help="跳过注入模式：直接以指定数据目录运行（重启透传用，跳过选择界面）",
+    )
     target.add_argument("--list", action="store_true", help="只列出候选进程后退出")
     target.add_argument("--all", action="store_true", help="列出全部进程（含低分候选）")
     target.add_argument("--no-gui", action="store_true", help="不使用图形选择窗，改走命令行菜单")
@@ -323,6 +328,8 @@ class Session:
             height=app_config.stream_window_height,
             app_config=app_config,
             game_dir=game_dir,
+            # 重启实参（设置窗口自动重启用）：cli 层持有目标 PID，宿主只透传
+            restart_args=["--pid", str(self.target.pid)],
             on_quit=self._request_stop,
         )
         self._flush_pending_say()  # 补推就绪前捕获的台词（此窗口内丢失的根治）
@@ -633,6 +640,9 @@ def _run_skip_injection_mode(args: argparse.Namespace, selected_dir: str) -> int
         app_config=app_config,
         game_dir=game_dir,
         skip_injection=True,
+        # 重启透传用户原始选择的数据目录（不可用 game_dir 回推：
+        # resolve_cache_dir 对「直接选 renpy_overlay_cache 目录」不幂等）
+        restart_args=["--data-dir", selected_dir],
         on_quit=request_stop,
     )
     holder["overlay"] = overlay
@@ -686,6 +696,10 @@ def main(argv: list[str] | None = None) -> int:
         candidates = discovery.enumerate_candidates(include_all=args.all)
         discovery.print_candidates(candidates)
         return EXIT_OK
+
+    # --data-dir 直通跳过注入模式（重启透传入口，跳过目标选择界面）
+    if args.data_dir and not (args.pid or args.unload or args.status):
+        return _run_skip_injection_mode(args, args.data_dir)
 
     target = _select_target(args)
     if target is None:

@@ -229,3 +229,62 @@ def test_request_stop_is_idempotent():
     session._request_stop()
     assert session._stop.is_set()
     assert session.overlay.request_close_calls == 1
+
+
+# ---- 重启实参组装（--data-dir 直通与 overlay restart_args） -------------------
+
+
+def test_build_parser_accepts_data_dir():
+    """--data-dir 可解析（重启透传跳过注入模式的入口参数）。"""
+    args = cli.build_parser().parse_args(["--data-dir", "D:/game"])
+    assert args.data_dir == "D:/game"
+
+
+def test_main_data_dir_routes_to_skip_injection(monkeypatch):
+    """--data-dir 且无 --pid/--unload/--status：直通跳过注入模式。"""
+    captured: dict = {}
+
+    def _fake_skip(args, selected_dir):
+        captured["selected_dir"] = selected_dir
+        return 7
+
+    monkeypatch.setattr(cli, "_run_skip_injection_mode", _fake_skip)
+    monkeypatch.setattr(cli.logs, "force_utf8_stdio", lambda: None)
+    monkeypatch.setattr(cli.logs, "setup_logging", lambda **_kw: None)
+    monkeypatch.setattr(cli.win32api, "enable_dpi_awareness", lambda: None)
+    monkeypatch.setattr(cli.win32api, "IS_WINDOWS", True)
+
+    assert cli.main(["--data-dir", "D:/game"]) == 7
+    assert captured["selected_dir"] == "D:/game"
+
+
+def test_run_overlay_mode_passes_restart_args(monkeypatch):
+    """悬浮窗构造收到重启实参 --pid（cli 层持有目标 PID，宿主只透传）。"""
+    captured: dict = {}
+
+    class _StubWindow:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def set_status(self, _text) -> None:
+            pass
+
+        def hint(self, _text) -> None:
+            pass
+
+        def run(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(cli, "StreamOverlayWindow", _StubWindow)
+    monkeypatch.setattr(cli.psutil, "pid_exists", lambda _pid: False)
+    session = _make_session()
+    session.args.dock = "top-center"
+    session.target = Candidate(pid=1234, name="game")
+    session.link = SimpleNamespace(stop=lambda: None)
+    session.injector = SimpleNamespace(close=lambda: None)
+
+    assert session._run_overlay_mode() == cli.EXIT_OK
+    assert captured["restart_args"] == ["--pid", "1234"]
