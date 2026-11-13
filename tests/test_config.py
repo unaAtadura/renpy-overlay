@@ -84,6 +84,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "include_tl_strings": True,
         "tl_langs": [],
         "last_game_dir": "",
+        "quick_menu_anchor_diameter": 50,
     }
 
 
@@ -159,6 +160,7 @@ def test_default_file_key_order_matches_target(tmp_path):
         "include_tl_strings",
         "tl_langs",
         "last_game_dir",
+        "quick_menu_anchor_diameter",
     ]
 
 
@@ -1137,3 +1139,25 @@ def test_existing_keys_keep_user_values_when_prebuild_keys_added(tmp_path):
     assert loaded.auto_translate is False
     assert loaded.retries == 4
     assert loaded.tl_langs == ("russian",)
+
+
+def test_quick_menu_anchor_diameter_loaded_and_fall_back(tmp_path):
+    """快捷菜单锚点直径（需求 future_右键快捷菜单_分离）：合法值读取，
+    低于下限/非数字/bool 回退默认 50（沿 _read_positive_int 同款口径）。"""
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps({"quick_menu_anchor_diameter": 80}), encoding="utf-8"
+    )
+    assert config.load_config(target).quick_menu_anchor_diameter == 80
+    for bad in (19, 0, -5, "50", None, True):
+        target.write_text(
+            json.dumps({"quick_menu_anchor_diameter": bad}), encoding="utf-8"
+        )
+        loaded = config.load_config(target)
+        assert loaded.quick_menu_anchor_diameter == 50, bad
+
+
+def test_quick_menu_anchor_diameter_missing_means_default(tmp_path):
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"auto_translate": True}), encoding="utf-8")
+    assert config.load_config(target).quick_menu_anchor_diameter == 50

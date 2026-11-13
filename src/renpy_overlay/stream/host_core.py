@@ -14,11 +14,16 @@ import queue
 import threading
 import time
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QRect, QTimer
 from PyQt6.QtWidgets import QApplication
 
 from .. import config, layout, translation_store, win32api
 from ..quick_menu import QuickMenu
+from ..quick_menu_anchor import (
+    QuickMenuAnchorWindow,
+    default_anchor_position,
+    menu_popup_position,
+)
 from ..screenshot import (
     AIChatWindow,
     ChatHistoryWindow,
@@ -210,7 +215,7 @@ class StreamOverlayCore:
         # 遥控截图：快捷键模式期间存在的 A/B 触发/瞄准小圆窗（与主开关相互
         # 独立）；A 单击经 B 的装填状态复用截图翻译入口（含在途互斥与提示）；
         # remote_screenshot_hide 注入为「隐藏遥控器」用户级显隐初值（true 时
-        # 生成后保持隐藏，自动化与右键菜单文案经 user_hidden 回调同步感知）
+        # 生成后保持隐藏，自动化与快捷菜单文案经 user_hidden 回调同步感知）
         self._remote_screenshot = RemoteScreenshotController(
             enable=self._config.remote_screenshot_enable,
             diameter_a=self._config.remote_screenshot_diameter_a,
@@ -274,6 +279,22 @@ class StreamOverlayCore:
             on_state=self._on_asr_rt_state,
         )
         self._quick_menu.attach_asr_rt(self._asr_rt)
+        # 快捷菜单锚点（需求 future_右键快捷菜单_分离）：独立圆形半透明窗口
+        # 承载快捷菜单开关入口（标题/正文窗不再响应右键）；默认位置取主屏
+        # 可用区域中心（首次运行无 layout 记录时），直径取 config 初始默认值
+        screen = QApplication.primaryScreen()
+        anchor_pos = None
+        if screen is not None:
+            pos = default_anchor_position(
+                screen.availableGeometry(), self._config.quick_menu_anchor_diameter
+            )
+            anchor_pos = (pos.x(), pos.y())
+        self._menu_anchor = QuickMenuAnchorWindow(
+            diameter=self._config.quick_menu_anchor_diameter,
+            on_toggle_menu=self._open_menu_from_anchor,
+            initial_pos=anchor_pos,
+        )
+        self._menu_anchor.show()
         # 实时识别显示状态：已定稿句列表 + 当前句全文（同参考实现，
         # 每次事件全量重算显示文本后差分上屏）
         self._asr_rt_finals: list[str] = []
@@ -285,7 +306,7 @@ class StreamOverlayCore:
         self._chat_history_window: ChatHistoryWindow | None = None
         self._translation_history_window: TranslationHistoryWindow | None = None
         self._screenshot_suppress = False  # 截图瞬间抑制跟随循环重新显示
-        self._context_menu_open = False  # 右键菜单打开期间暂停周期性置顶重申
+        self._context_menu_open = False  # 快捷菜单打开期间暂停周期性置顶重申
         self._last_translation_input: str | None = None
         self._last_cache_hit_original: str | None = None  # 最近缓存命中原文（定位入口用）
         self._lock_started_at = 0.0
@@ -387,6 +408,50 @@ class StreamOverlayCore:
         )
         self._settings_window.show()
         logger.info("设置窗口已打开")
+
+    def _open_menu_from_anchor(self) -> None:
+        """快捷菜单锚点单击：开合快捷菜单（菜单构建与分发全在 QuickMenu）。
+
+        exec 阻塞期间置位 ``_context_menu_open``，暂停锁定态每 200ms 的
+        周期性置顶重申 —— 否则流式窗会被 reassert 到 TOPMOST 层组顶部，
+        反过来盖住刚弹出的菜单（与旧右键路径同一语义）。弹出位置由锚点
+        按菜单实际尺寸自适应选边（menu_popup_position：紧贴锚点边缘、
+        不覆盖锚点）。
+
+        双击切换锁定：单击松开即弹菜单后，双击的第二击会作为“菜单外点击”
+        立即关闭刚打开的菜单（模态 grab 下锚点收不到第二击与 DClick）——
+        打开到关闭（未选中任何项）的间隔在系统双击窗口内即判定为双击，
+        切换锚点锁定态（开合闪烁为已接受取舍，见 quick_menu_anchor）。
+        """
+        self._context_menu_open = True
+        try:
+            opened_at = time.monotonic()
+            anchor_rect = self._menu_anchor.geometry()
+            chosen = self._quick_menu.show_context_menu(
+                anchor_rect.topLeft(),
+                popup_positioner=lambda menu: menu_popup_position(
+                    anchor_rect, menu.sizeHint(), self._anchor_screen_rect()
+                ),
+            )
+            if (
+                chosen is None
+                and (time.monotonic() - opened_at) * 1000
+                < QApplication.instance().doubleClickInterval()
+            ):
+                # 菜单在双击窗口内被外部点击关闭：双击切换锁定态
+                self._menu_anchor.toggle_lock()
+        finally:
+            self._context_menu_open = False
+            self._reassert_topmost()  # 菜单关闭后立即恢复各窗的置顶层级
+
+    def _anchor_screen_rect(self) -> QRect:
+        """锚点所在屏幕的可用区域（QRect，Qt 全局逻辑坐标；选边定位参照系）。"""
+        screen = self._menu_anchor.window().screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:  # pragma: no cover - 无显示环境兜底
+            return QRect(0, 0, 1920, 1080)
+        return screen.availableGeometry()
 
     def reload_config(self) -> str | None:
         """重新加载 config.json 并热应用到运行时（设置窗口「确定」触发）。
@@ -556,7 +621,7 @@ class StreamOverlayCore:
     def _restore_screenshot_windows(
         self, entries: tuple[layout.ScreenshotWindowLayout, ...]
     ) -> None:
-        """按创建序恢复截图窗口（需求：自动依次创建、计入上限、效果与右键创建一致）。
+        """按创建序恢复截图窗口（需求：自动依次创建、计入上限、效果与快捷菜单创建一致）。
 
         记录坐标落到当前任一屏幕之外（分辨率/显示器数量变化）时该窗回退
         与新建相同的级联定位（尺寸钳制后保留）；restore_window 返回 None
@@ -756,6 +821,8 @@ class StreamOverlayCore:
                 pass
             self._choice_log_window = None
         self._quick_menu.close_all()
+        self._menu_anchor.close()  # 快捷菜单锚点随退出销毁
+        self._menu_anchor.deleteLater()
         if self._history_window is not None:
             try:
                 self._history_window.deleteLater()

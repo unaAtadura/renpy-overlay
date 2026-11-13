@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from PyQt6.QtCore import QPoint, QRect
+from PyQt6.QtCore import QPoint, QRect, QSize
 from PyQt6.QtGui import QColor
 
 from renpy_overlay import quick_menu as quick_menu_module
@@ -424,14 +424,19 @@ class _FakeMenuAction:
 
 
 class _FakeMenu:
-    """QMenu 替身：记录构建顺序，exec 返回预置文案对应的当次选中项。"""
+    """QMenu 替身：记录构建顺序与 exec 弹出位置，exec 返回预置文案对应的当次选中项。"""
 
     def __init__(self) -> None:
         self.items: list[object] = []
         self.choose_text: str | None = None  # exec 返回该文案对应的 action（当次构建）
+        self.exec_positions: list[QPoint] = []  # 每次调用 exec 的弹出位置
 
     def windowFlags(self) -> int:
         return 0
+
+    def sizeHint(self) -> QSize:
+        """与真实 QMenu 同接口：定位钩子按菜单实际尺寸计算弹出坐标。"""
+        return QSize(200, 300)
 
     def setWindowFlags(self, flags) -> None:  # noqa: ANN001 - 测试替身
         pass
@@ -451,6 +456,7 @@ class _FakeMenu:
         return sub
 
     def exec(self, pos) -> object | None:  # noqa: N802, ANN001 - Qt 约定
+        self.exec_positions.append(QPoint(pos))
         # show_context_menu 每次调用都重建 action，按文案取本次构建的最后一项
         matches = [
             item
@@ -559,3 +565,46 @@ def test_menu_without_remote_automation_has_no_items(monkeypatch):
     labels = _menu_labels(fake_menu)
     assert "遥控器自动化: 关" not in labels
     assert "隐藏遥控器" not in labels
+
+
+# ---- 弹出位置钩子（需求 future_右键快捷菜单_分离：锚点自适应选边定位） ------------
+
+
+def test_menu_popup_positioner_hook_overrides_exec_pos(monkeypatch):
+    """锚点选边定位：传入钩子时 exec 收到钩子按菜单实际尺寸计算的坐标。"""
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    received_sizes: list[int] = []
+
+    def positioner(menu_obj) -> QPoint:
+        received_sizes.append(menu_obj.sizeHint().width())
+        return QPoint(123, 456)
+
+    menu.show_context_menu(QPoint(0, 0), popup_positioner=positioner)
+    assert fake_menu.exec_positions == [QPoint(123, 456)]
+    assert len(received_sizes) == 1  # 钩子收到已构建的菜单（可取 sizeHint）
+
+
+def test_menu_without_positioner_pops_at_global_pos(monkeypatch):
+    """未传钩子（默认）：exec 在原 global_pos 弹出（既有行为不变）。"""
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    menu.show_context_menu(QPoint(11, 22))
+    assert fake_menu.exec_positions == [QPoint(11, 22)]
+
+
+def test_menu_returns_chosen_action_for_host_double_click_check(monkeypatch):
+    """返回 exec 的选中项：宿主据此判定“菜单快速开合”（锚点双击兜底）。
+
+    选中菜单项 → 返回对应 action；外部点击/Esc 关闭 → 返回 None。
+    """
+    fake_menu = _FakeMenu()
+    monkeypatch.setattr(quick_menu_module, "QMenu", lambda: fake_menu)
+    menu = _menu_with(True)
+    fake_menu.choose_text = None  # 外部点击关闭：exec 返回 None
+    assert menu.show_context_menu(QPoint(0, 0)) is None
+    fake_menu.choose_text = "设置"  # 用户选中菜单项：返回对应 action
+    chosen = menu.show_context_menu(QPoint(0, 0))
+    assert chosen is not None and chosen.text == "设置"

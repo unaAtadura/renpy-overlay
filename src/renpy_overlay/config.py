@@ -68,6 +68,7 @@ JSON 非法、字段类型不对时逐项回退默认值并记录日志（不回
       "include_tl_strings": true,         # 预构建是否把 game/tl/ 下的翻译文件纳入扫描
       "tl_langs": [],                     # 预构建 tl 语言过滤；空列表 = 全部语言
       "last_game_dir": "",                # 预构建上次选择的游戏目录（启动时预填）
+      "quick_menu_anchor_diameter": 50,   # 快捷菜单锚点圆形窗口直径（像素）
     }
 """
 
@@ -152,7 +153,7 @@ DEFAULT_HOTKEY_WINDOWS = DEFAULT_WINDOW_HOTKEYS
 DEFAULT_HOTKEY_MOUSE_ESCAPE = "alt+o"
 #: 遥控截图：快捷键模式期间生成的 A/B 触发/瞄准小圆窗（开关 + 各自直径，像素）
 DEFAULT_REMOTE_SCREENSHOT_ENABLE = True
-#: 用户级显隐初值：true 时进入快捷键模式生成 A/B 后保持隐藏（右键菜单初始
+#: 用户级显隐初值：true 时进入快捷键模式生成 A/B 后保持隐藏（快捷菜单初始
 #: 「显示遥控器」）；默认 false 保持既有行为（生成即自动显示）。紧跟 enable（需求）
 DEFAULT_REMOTE_SCREENSHOT_HIDE = False
 DEFAULT_REMOTE_SCREENSHOT_DIAMETER = 100
@@ -211,6 +212,12 @@ DEFAULT_LAST_GAME_DIR = ""
 #: 预构建并发相关字段的合法范围（越界回退默认值）
 MAX_CONCURRENCY_LIMIT = 64
 MAX_RETRIES_LIMIT = 10
+#: 快捷菜单锚点（future_右键快捷菜单_分离）：独立圆形半透明窗口直径（像素）。
+#: 直径为初始默认值，layout.json 记录的直径在恢复时优先（与布局优先于配置的
+#: 既定冲突规则一致）
+DEFAULT_QUICK_MENU_ANCHOR_DIAMETER = 50
+#: 直径下限：再小无法承载图标与点击，低于回退默认（与遥控截图小圆窗同口径）
+MIN_QUICK_MENU_ANCHOR_DIAMETER = 20
 
 
 @dataclass(frozen=True)
@@ -293,6 +300,8 @@ class AppConfig:
     include_tl_strings: bool = DEFAULT_INCLUDE_TL_STRINGS
     tl_langs: tuple[str, ...] = DEFAULT_TL_LANGS
     last_game_dir: str = DEFAULT_LAST_GAME_DIR
+    # 快捷菜单锚点：直径初始默认值（layout.json 记录值恢复时优先）
+    quick_menu_anchor_diameter: int = DEFAULT_QUICK_MENU_ANCHOR_DIAMETER
 
 
 def default_path() -> Path:
@@ -405,6 +414,7 @@ def _write_defaults(target: Path) -> None:
     payload["include_tl_strings"] = DEFAULT_INCLUDE_TL_STRINGS
     payload["tl_langs"] = list(DEFAULT_TL_LANGS)
     payload["last_game_dir"] = DEFAULT_LAST_GAME_DIR
+    payload["quick_menu_anchor_diameter"] = DEFAULT_QUICK_MENU_ANCHOR_DIAMETER
     try:
         target.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -811,6 +821,12 @@ def load_config(path: Path | None = None) -> AppConfig:
         include_tl_strings=_read_bool(raw, "include_tl_strings", DEFAULT_INCLUDE_TL_STRINGS),
         tl_langs=_read_tl_langs(raw),
         last_game_dir=_read_str(raw, "last_game_dir", DEFAULT_LAST_GAME_DIR),
+        quick_menu_anchor_diameter=_read_positive_int(
+            raw,
+            "quick_menu_anchor_diameter",
+            DEFAULT_QUICK_MENU_ANCHOR_DIAMETER,
+            MIN_QUICK_MENU_ANCHOR_DIAMETER,
+        ),
     )
     logger.info(
         "配置已加载：auto_translate=%s，interval=%.1fs，show_original_text=%s，"
@@ -828,7 +844,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         "remote_screenshot（enable=%s，hide=%s，interval=%.2fs，cache_count=%d，persist=%s，db_size=%d，settle=%d，diameterA=%d，diameterB=%d），"
         "prebuild（max=%d，initial=%d，increase_after=%d，latency_guard=%.1fs，"
         "circuit_break=%d，retries=%d，include_tl=%s，tl_langs=%s），"
-        "last_game_dir=%s",
+        "last_game_dir=%s，"
+        "anchor_diameter=%d",
         app_config.auto_translate,
         app_config.auto_translate_interval,
         app_config.show_original_text,
@@ -886,5 +903,6 @@ def load_config(path: Path | None = None) -> AppConfig:
         app_config.include_tl_strings,
         list(app_config.tl_langs) or "<全部>",
         app_config.last_game_dir or "<无>",
+        app_config.quick_menu_anchor_diameter,
     )
     return app_config

@@ -304,7 +304,7 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
             SettingSpec(
                 "remote_screenshot_hide", "初始隐藏遥控器", KIND_BOOL,
                 config.DEFAULT_REMOTE_SCREENSHOT_HIDE,
-                note="开启后右键菜单初始显示为“显示遥控器”，且开启快捷键模式时不自动显示 A/B 窗口；修改后需重启生效",
+                note="开启后快捷菜单初始显示为“显示遥控器”，且开启快捷键模式时不自动显示 A/B 窗口；修改后需重启生效",
                 restart=True,
             ),
             SettingSpec(
@@ -434,12 +434,15 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
 #: 不进入设置窗口（消费入口仅 injection_flow._toggle_choice_log）；
 #: 遥控器自动化持久化缓存两键（feat/remote-cache-persist）一期仅由
 #: config.json 手改（cli.py 已有说明），设置窗口暂不加 UI；稳定窗口帧数
-#:（remote_settle_frames）随构造注入需重启生效，同口径登记
+#:（remote_settle_frames）随构造注入需重启生效，同口径登记；
+#: 快捷菜单锚点直径（future_右键快捷菜单_分离）属锚点自身启动参数，
+#: layout.json 记录值恢复时优先，同口径登记
 _HIDDEN_KEYS: frozenset[str] = frozenset(
     {
         "last_game_dir",
         "choice_log_window_width",
         "choice_log_window_height",
+        "quick_menu_anchor_diameter",
         "remote_cache_persist_enable",
         "remote_cache_db_size_count",
         "remote_settle_frames",

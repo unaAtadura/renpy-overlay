@@ -1,14 +1,14 @@
-"""鼠标交互的门面 Mixin：整体拖动、位置锁定、单击/双击延迟判定、右键转发。
+"""鼠标交互的门面 Mixin：整体拖动、位置锁定、单击/双击延迟判定、八向拉伸。
 
 宿主依赖（经 ``self`` 访问，由 :class:`StreamOverlayCore.__init__` 初始化）：
 ``_closed`` / ``_locked`` / ``_dragging`` / ``_drag_grab`` / ``_drag_size`` /
 ``_drag_origin`` / ``_press_pos`` / ``_click_suppress_until`` /
 ``_body_window`` / ``_body_hwnd`` / ``_title_hwnd`` / ``_title_h`` /
 ``_title_gap`` / ``_user_offset`` / ``skip_injection`` / ``_click_timer`` /
-``_context_menu_open`` / ``_quick_menu`` / ``_remote_screenshot`` /
 ``_last_topmost_log``，以及 ``_resolve_target`` / ``_reassert_topmost`` /
 ``_abort_translation`` / ``_abort_song_recognition`` / ``_start_translation`` /
-``_virtual_screen_rect``。
+``_virtual_screen_rect``。快捷菜单入口在锚点窗口（quick_menu_anchor），
+不经本 Mixin。
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ logger = logging.getLogger("renpy_overlay.stream_window")
 
 
 class MouseInteractionMixin:
-    """窗口拖动、锁定态拖拽滚动喂入、八向拉伸、单双击判定与右键菜单转发。
+    """窗口拖动、锁定态拖拽滚动喂入、八向拉伸、单双击判定。
 
     八向拉伸（未锁定专属）：按下落在任一窗的边缘/角热区（6px → 12px）
     即进入拉伸手势——两窗整体几何按边/角增量调整（标题窗管北向/上角、
@@ -379,17 +379,3 @@ class MouseInteractionMixin:
             return
         logger.debug("锁定状态下的单击：请求翻译当前对话原文")
         self._start_translation()
-
-    def on_window_context_menu(self, window: QWidget, event) -> None:
-        """右键转发终点：菜单构建与动作分发全部在 QuickMenu 内。
-
-        exec 阻塞期间置位 ``_context_menu_open``，暂停锁定态每 200ms 的
-        周期性置顶重申 —— 否则流式窗会被 reassert 到 TOPMOST 层组顶部，
-        反过来盖住刚弹出的菜单。
-        """
-        self._context_menu_open = True
-        try:
-            self._quick_menu.show_context_menu(event.globalPos())
-        finally:
-            self._context_menu_open = False
-            self._reassert_topmost()  # 菜单关闭后立即恢复两窗的置顶层级

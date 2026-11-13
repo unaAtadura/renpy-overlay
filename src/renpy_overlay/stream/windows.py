@@ -129,11 +129,6 @@ class _StreamWindowBase(QWidget):
         self._host.on_window_double_click(self, event)
         event.accept()
 
-    def contextMenuEvent(self, event) -> None:  # noqa: N802
-        """右键（标题/正文文字处）：转发宿主弹快捷菜单（创建/销毁截图窗等）。"""
-        self._host.on_window_context_menu(self, event)
-        event.accept()
-
     # ---- 八向拉伸提示（未锁定；interaction 驱动） ---------------------------
 
     def set_hover_highlight(self, edge: str | None) -> None:

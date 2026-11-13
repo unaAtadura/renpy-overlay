@@ -1,12 +1,12 @@
-"""流式悬浮窗右键快捷菜单管理器：菜单入口的唯一扩展点。
+"""快捷菜单管理器：菜单入口的唯一扩展点。
 
-管理右键菜单的构建与动作分发，并托管截图窗口池（最多 8 个，创建顺序依次
+管理快捷菜单的构建与动作分发，并托管截图窗口池（最多 8 个，创建顺序依次
 分配红橙黄绿青蓝紫黑边框，销毁按堆栈优先最新）。设计约束：
 
 - 不依赖宿主类型：宿主能力（截图翻译、打开历史）全部经构造回调注入，
   后续新功能 = 在此加菜单项 + 注入对应回调，宿主零改动；
-- 所有方法仅在 Qt 主线程调用（右键事件本就在主线程，菜单动作就地分发，
-  不经过宿主的消息队列）；
+- 所有方法仅在 Qt 主线程调用（锚点单击事件本就在主线程，菜单动作就地
+  分发，不经过宿主的消息队列）；
 - 布局锁定（lock_layout/unlock_layout）与窗口双击锁定相互独立：前者
   整体隐藏/恢复全部截图窗口并屏蔽创建/销毁入口，不改任何窗口的
   ``is_locked``；“已锁定窗口”（locked_windows）特指双击锁定（可识别）的窗口。
@@ -15,8 +15,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import QApplication, QMenu
 
 from .layout import MAX_SCREENSHOT_WINDOWS
@@ -43,7 +45,7 @@ RECORD_LABEL_REFRESH_MS = 1000
 
 
 class QuickMenu:
-    """右键快捷菜单 + 截图窗口池（仅 Qt 主线程使用）。"""
+    """快捷菜单 + 截图窗口池（仅 Qt 主线程使用）。"""
 
     def __init__(
         self,
@@ -99,10 +101,15 @@ class QuickMenu:
         # 测试用 stub，同 frame_overlay_factory 的宿主注入约定）
         self._window_factory = window_factory or ScreenshotWindow
 
-    # ---- 右键菜单 -----------------------------------------------------------
+    # ---- 快捷菜单 -----------------------------------------------------------
 
-    def show_context_menu(self, global_pos: QPoint) -> None:
-        """构建并弹出右键菜单（标题窗 / 正文窗文字处右键触发）。
+    def show_context_menu(
+        self,
+        global_pos: QPoint,
+        popup_positioner: Callable[[QMenu], QPoint] | None = None,
+    ) -> QAction | None:
+        """构建并弹出快捷菜单（快捷菜单锚点单击触发；需求
+        future_右键快捷菜单_分离：菜单已从流式双窗右键拆出）。
 
         菜单项顺序与分组按需求（.raw_plans/future_修改快捷菜单按键排序.txt +
         future_视频录制补充_实时asr.txt，含预构建入口与设置入口）：
@@ -111,9 +118,18 @@ class QuickMenu:
         听歌识曲 → 分隔线 → 对话 → 预构建翻译缓存 → 分隔线 → 查看历史
         （二级菜单）→ 分隔线 → 设置 → 退出（设置与退出间无分隔线）。
 
+        ``popup_positioner``：菜单构建完成后、exec 前的弹出位置钩子（传入
+        已构建的 QMenu、返回弹出 QPoint）——锚点据此按菜单实际尺寸自适应
+        选边定位（见 quick_menu_anchor.menu_popup_position）；None 时在
+        ``global_pos`` 原位弹出。
+
         菜单带 ``WindowStaysOnTopHint``：与流式双窗同属 TOPMOST 层组且后显示，
         保证菜单始终完整可见（配合宿主在菜单打开期间暂停周期性置顶重申，
         避免流式窗被 reassert 后反盖住菜单）。
+
+        返回 exec 的选中项：用户选中菜单项时为对应 ``QAction``；菜单外点击
+        /Esc 关闭时为 ``None``（宿主据此区分关闭原因，如锚点双击的“菜单
+        快速开合”判定）。
         """
         menu = QMenu()
         menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -201,7 +217,11 @@ class QuickMenu:
             refresh_timer.timeout.connect(_refresh_record_label)
             refresh_timer.start()
         try:
-            chosen = menu.exec(global_pos)
+            pos = global_pos
+            if popup_positioner is not None:
+                # 锚点按菜单实际尺寸自适应选边（紧贴锚点边缘、不覆盖锚点）
+                pos = popup_positioner(menu)
+            chosen = menu.exec(pos)
         finally:
             if refresh_timer is not None:
                 refresh_timer.stop()
@@ -245,6 +265,7 @@ class QuickMenu:
             self._on_open_asr_history()
         elif chosen is quit_action and callable(self._on_quit):
             self._on_quit()
+        return chosen
 
     # ---- 截图窗口池 ---------------------------------------------------------
 
