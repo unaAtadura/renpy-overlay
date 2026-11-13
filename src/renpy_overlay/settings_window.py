@@ -433,7 +433,8 @@ _SECTIONS: tuple[tuple[str, tuple[SettingSpec, ...]], ...] = (
 #: 副作用日志弹窗尺寸属于该弹窗自身的启动参数（choice_log_window.py），
 #: 不进入设置窗口（消费入口仅 injection_flow._toggle_choice_log）；
 #: 遥控器自动化持久化缓存两键（feat/remote-cache-persist）一期仅由
-#: config.json 手改（cli.py 已有说明），设置窗口暂不加 UI
+#: config.json 手改（cli.py 已有说明），设置窗口暂不加 UI；稳定窗口帧数
+#:（remote_settle_frames）随构造注入需重启生效，同口径登记
 _HIDDEN_KEYS: frozenset[str] = frozenset(
     {
         "last_game_dir",
@@ -441,6 +442,7 @@ _HIDDEN_KEYS: frozenset[str] = frozenset(
         "choice_log_window_height",
         "remote_cache_persist_enable",
         "remote_cache_db_size_count",
+        "remote_settle_frames",
     }
 )
 

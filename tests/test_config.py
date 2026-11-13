@@ -72,6 +72,7 @@ def test_missing_file_creates_defaults(tmp_path):
         "remote_cache_size_count": 50,
         "remote_cache_persist_enable": False,
         "remote_cache_db_size_count": 40000,
+        "remote_settle_frames": 3,
         "remote_screenshot_diameterA": 100,
         "remote_screenshot_diameterB": 100,
         "max_concurrency": 8,
@@ -146,6 +147,7 @@ def test_default_file_key_order_matches_target(tmp_path):
         "remote_cache_size_count",
         "remote_cache_persist_enable",
         "remote_cache_db_size_count",
+        "remote_settle_frames",
         "remote_screenshot_diameterA",
         "remote_screenshot_diameterB",
         "max_concurrency",
@@ -197,6 +199,7 @@ def test_remote_screenshot_defaults_loaded(tmp_path):
     assert loaded.remote_cache_size_count == 50
     assert loaded.remote_cache_persist_enable is False  # 默认关（持久化是显式可选增强）
     assert loaded.remote_cache_db_size_count == 40000
+    assert loaded.remote_settle_frames == 3  # 稳定窗口默认 3 帧（1.0s 确认窗）
     assert loaded.remote_screenshot_diameter_a == 100
     assert loaded.remote_screenshot_diameter_b == 100
 
@@ -326,6 +329,17 @@ def test_remote_cache_persist_invalid_values_fall_back(tmp_path):
         assert loaded.remote_cache_db_size_count == 40000, (
             f"size={bad_size!r} 应回退默认"
         )
+
+
+def test_remote_settle_frames_loaded_and_fall_back(tmp_path):
+    """稳定窗口帧数：合法值生效；缺省/类型错/低于下限回退默认 3（下限 1）。"""
+    target = tmp_path / "config.json"
+    target.write_text(json.dumps({"remote_settle_frames": 5}), encoding="utf-8")
+    assert config.load_config(target).remote_settle_frames == 5
+    for bad in ("fast", 0, -1, True):
+        target.write_text(json.dumps({"remote_settle_frames": bad}), encoding="utf-8")
+        loaded = config.load_config(target)
+        assert loaded.remote_settle_frames == 3, f"{bad!r} 应回退默认 3"
 
 
 def test_screenshot_compress_percent_out_of_range_falls_back(tmp_path):
