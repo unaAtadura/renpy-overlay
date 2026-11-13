@@ -47,7 +47,7 @@ uv run pyinstaller renpy_overlay.spec --noconfirm   # 打包
 3. **SDL2 手动收集**：pysdl2-dll 无 PyInstaller hook，其 `sdl2dll/dll/SDL2.dll` 必须手动加入 binaries；只收 SDL2 本体（render/audio/events），SDL2_image/mixer/ttf/gfx 扩展及第三方依赖链不打包；
 4. **excludes 只做保险**（运行链真实依赖：psutil / pywin32 / sqlite3 / PyQt6 / requests+websocket / PIL / numpy / aiohttp 等）：剔除 scipy、pandas、matplotlib、cv2、torch、PyQt5/PySide、tkinter（进程选择窗已改用 PyQt6，不再依赖）、IPython、lxml、pytest、unittest 等；
 5. **Analysis 后按名单过滤**：剔 Qt 翻译文件（~180 个 .qm，界面硬编码中文）、Tcl 时区库 tzdata（~600 文件；tkinter 已移出运行链，此过滤仅为防连带收集的保险）、二进制黑名单（`opengl32sw.dll` 软件渲染 OpenGL ~20MB、`qt6pdf.dll`/`qpdf.dll`、罕见图像格式插件 qtiff/qtga/qwbmp/qicns；qsvgicon + Qt6Svg 保留——assets SVG 图标依赖）；
-6. **EXE 选项**：`console=True`（命令行参数、日志与控制台命令都依赖控制台）、**`upx=False`**（压缩会加剧杀软对远程注入工具的误报）。
+6. **EXE 选项**：`console=False`（GUI 子系统：双击或命令行启动不弹控制台窗口；打包版无控制台输出——`--no-overlay` 控制台模式与 h/d/q 控制台命令在打包版不可用，源码运行不受影响，日志仍写 `logs/` 文件）、**`upx=False`**（压缩会加剧杀软对远程注入工具的误报）。
 
 ## 4. 打包后的运行时行为
 
