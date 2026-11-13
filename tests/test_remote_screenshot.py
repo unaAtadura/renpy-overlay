@@ -16,6 +16,7 @@ import pytest
 from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtGui import QColor
 
+from renpy_overlay import layout
 from renpy_overlay.screenshot.remote_screenshot import (
     INITIAL_GAP,
     RemoteScreenshotController,
@@ -86,6 +87,11 @@ class _StubWindow:
     def move(self, x: int, y: int) -> None:
         self._geo = _FakeGeometry(x, y, self._geo.width(), self._geo.height())
 
+    def setFixedSize(self, width: int, height: int) -> None:  # noqa: N802 - Qt 约定
+        self._geo = _FakeGeometry(
+            self._geo.x(), self._geo.y(), int(width), int(height)
+        )
+
     def set_armed(self, color: QColor | None) -> None:
         self.armed = color
 
@@ -105,7 +111,14 @@ class _Factory:
         return window
 
 
-def _make_controller(enable=True, locked=None, factory=None, trigger=None, user_hidden=False):
+def _make_controller(
+    enable=True,
+    locked=None,
+    factory=None,
+    trigger=None,
+    user_hidden=False,
+    screen_rects=None,
+):
     locked_windows = list(locked or [])
     controller = RemoteScreenshotController(
         enable=enable,
@@ -115,6 +128,7 @@ def _make_controller(enable=True, locked=None, factory=None, trigger=None, user_
         trigger=trigger,
         window_factory=factory,
         screen_center_provider=lambda: _CENTER,
+        screen_rects_provider=(lambda: screen_rects) if screen_rects else None,
         user_hidden=user_hidden,
     )
     return controller, locked_windows
@@ -483,3 +497,149 @@ def test_initial_user_hidden_flows_to_automation_menu_state():
 
     default_controller, _ = _make_controller(factory=_Factory())
     assert _make_automation(default_controller).remote_hidden is False  # 默认初值
+
+
+# ---- layout 恢复基线（需求 future_恢复布局.txt 补充） ---------------------------
+
+
+#: 离屏校验用的屏幕矩形（Qt 全局逻辑坐标；覆盖 _CENTER 附近的默认摆放区）
+_SCREENS = [(0, 0, 1000, 800)]
+
+
+def _remote_baseline(a=(10, 20, 60), b=(200, 300, 80), loaded=None):
+    return layout.RemoteScreenshotLayout(
+        a=layout.RemoteWindowLayout(*a),
+        b=layout.RemoteWindowLayout(*b),
+        loaded_color=loaded,
+    )
+
+
+def test_restore_applies_recorded_position_and_diameter():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.set_layout_restore(_remote_baseline(a=(10, 20, 60), b=(200, 300, 80)))
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    assert (a.geometry().x(), a.geometry().y(), a.geometry().width()) == (10, 20, 60)
+    assert (b.geometry().x(), b.geometry().y(), b.geometry().width()) == (200, 300, 80)
+
+
+def test_restore_arms_locked_window_by_color_and_forwards():
+    factory = _Factory()
+    target = _StubWindow((500, 400, 300, 200), border=QColor("#ff3232"))
+    automation = _StubAutomation()
+    controller, _ = _make_controller(
+        factory=factory, locked=[target], screen_rects=_SCREENS
+    )
+    controller.attach_automation(automation)
+    controller.set_layout_restore(_remote_baseline(loaded=" #FF3232 "))
+    controller.on_hotkey_mode_changed(True)
+    # 需求：按记录边框色绑定装填态（解析层已 strip/匹配不区分大小写）
+    assert controller._armed is target
+    assert factory.created[1].armed == QColor("#ff3232")
+    assert automation.armed_events == [target]
+
+
+def test_restore_missing_target_falls_back_idle():
+    """记录的装填目标不存在/未锁定 → 回退圆形待命，不异常退出。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.set_layout_restore(_remote_baseline(loaded="#123456"))
+    controller.on_hotkey_mode_changed(True)
+    assert controller._armed is None
+    assert factory.created[1].armed == "unset"  # set_armed 未被调用
+
+
+def test_restore_offscreen_falls_back_to_default_placement():
+    """记录坐标落到任一屏幕之外 → 整体回退屏幕中心默认并排（直径仍应用）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.set_layout_restore(_remote_baseline(a=(5000, 100, 60), b=(200, 300, 80)))
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    assert (a.geometry().width(), b.geometry().width()) == (60, 80)
+    total = 60 + INITIAL_GAP + 80
+    assert (a.geometry().x(), a.geometry().y()) == (
+        _CENTER[0] - total // 2,
+        _CENTER[1] - 60 // 2,
+    )
+    assert (b.geometry().x(), b.geometry().y()) == (
+        _CENTER[0] - total // 2 + 60 + INITIAL_GAP,
+        _CENTER[1] - 80 // 2,
+    )
+
+
+def test_no_baseline_keeps_default_placement():
+    """无 layout 基线（缺失节点/无文件）：保持改动前行为（屏幕中心并排）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    total = 100 + INITIAL_GAP + 100
+    assert a.geometry().x() == _CENTER[0] - total // 2
+    assert b.geometry().x() == a.geometry().x() + 100 + INITIAL_GAP
+
+
+def test_baseline_reapplied_on_mode_recreate():
+    """需求五：关闭再重新开启快捷键模式，A/B 重建仍回到 layout 记录位置。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.set_layout_restore(_remote_baseline(a=(10, 20, 60), b=(200, 300, 80)))
+    controller.on_hotkey_mode_changed(True)
+    controller.on_hotkey_mode_changed(False)
+    controller.on_hotkey_mode_changed(True)
+    a2, b2 = factory.created[2], factory.created[3]
+    assert (a2.geometry().x(), a2.geometry().y()) == (10, 20)
+    assert (b2.geometry().x(), b2.geometry().y()) == (200, 300)
+
+
+def test_enable_false_creates_nothing_even_with_baseline():
+    """remote_screenshot_enable=false：模式开启不生成 A/B，基线自然不消费。"""
+    factory = _Factory()
+    controller, _ = _make_controller(
+        enable=False, factory=factory, screen_rects=_SCREENS
+    )
+    controller.set_layout_restore(_remote_baseline())
+    controller.on_hotkey_mode_changed(True)
+    assert factory.created == []
+    assert controller.layout_snapshot() is None
+
+
+def test_layout_snapshot_records_when_user_hidden():
+    """需求二.4/三.3：remote_screenshot_hide=true 生成后保持隐藏，但退出
+    快照照常记录几何与装填（保存不读可见性）；显隐由 config 决定。"""
+    factory = _Factory()
+    target = _StubWindow((500, 400, 300, 200), border=QColor("#ff3232"))
+    controller, _ = _make_controller(
+        factory=factory, locked=[target], user_hidden=True, screen_rects=_SCREENS
+    )
+    controller.set_layout_restore(_remote_baseline(loaded="#ff3232"))
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    assert a.calls == [] and b.calls == []  # 生成后保持隐藏
+    assert controller.layout_snapshot() == (10, 20, 60, 200, 300, 80, "#ff3232")
+
+
+def test_layout_snapshot_reflects_current_geometry_and_idle():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.on_hotkey_mode_changed(True)
+    factory.created[0].move(500, 600)
+    snapshot = controller.layout_snapshot()
+    assert snapshot[:3] == (500, 600, 100)
+    assert snapshot[6] is None  # 未装填：圆形待命态
+
+
+def test_layout_snapshot_none_when_not_created():
+    controller, _ = _make_controller()
+    assert controller.layout_snapshot() is None
+
+
+def test_set_layout_restore_none_clears_baseline():
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, screen_rects=_SCREENS)
+    controller.set_layout_restore(_remote_baseline())
+    controller.set_layout_restore(None)  # 清除基线：回到默认摆放
+    controller.on_hotkey_mode_changed(True)
+    total = 100 + INITIAL_GAP + 100
+    assert factory.created[0].geometry().x() == _CENTER[0] - total // 2

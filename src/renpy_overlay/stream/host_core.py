@@ -520,6 +520,12 @@ class StreamOverlayCore:
             logger.info("布局恢复：流式窗口恢复为锁定态（与双击锁定同一状态位）")
         self._layout_pending_position = True
         self._restore_screenshot_windows(state.screenshot_windows)
+        if state.remote_screenshot is not None:
+            # 遥控器基线在快捷键模式开启之前注入：A/B 于模式开启时生成并消费
+            # （需求四.2）；基线持久持有——运行期关闭再开启模式的重建同样
+            # 按 layout 摆放（需求五）；remote_screenshot_enable=false 时不
+            # 生成、基线自然不消费；显隐仍由 remote_screenshot_hide 决定
+            self._remote_screenshot.set_layout_restore(state.remote_screenshot)
         if state.hotkey_mode and not self._hotkey_mode.enabled:
             self._hotkey_mode.set_enabled(True)
         choice = state.choice_log_window
@@ -632,6 +638,27 @@ class StreamOverlayCore:
             geo = choice.geometry()
             choice_rect = (geo.x(), geo.y(), geo.width(), geo.height())
             choice_locked = choice.is_locked
+        # 遥控器：已创建则照常记录（不读可见性——被「隐藏遥控器」或托盘
+        # 隐藏的 A/B 照记几何与装填）；本次运行未创建（未开快捷键模式/开关
+        # 关闭）则保留文件中上次有效记录，不因一次未启用清掉既有位置
+        # （需求三.2）；显隐本身不持久化，恢复后由 remote_screenshot_hide
+        # 决定（需求二.4）
+        remote_snapshot = self._remote_screenshot.layout_snapshot()
+        remote_payload = None
+        if remote_snapshot is not None:
+            remote_payload = layout.collect_remote_screenshot_layout(
+                a_x=remote_snapshot[0],
+                a_y=remote_snapshot[1],
+                a_diameter=remote_snapshot[2],
+                b_x=remote_snapshot[3],
+                b_y=remote_snapshot[4],
+                b_diameter=remote_snapshot[5],
+                loaded_color=remote_snapshot[6],
+            )
+        else:
+            previous = layout.load_layout_raw(path)
+            if previous is not None:
+                remote_payload = previous.get("remote_screenshot")
         payload = layout.collect_layout(
             stream_width=self.width,
             stream_height=self.height,
@@ -643,6 +670,7 @@ class StreamOverlayCore:
             choice_log_open=choice is not None,
             choice_log_rect=choice_rect,
             choice_log_locked=choice_locked,
+            remote_screenshot=remote_payload,
         )
         layout.save_layout(path, payload)
 

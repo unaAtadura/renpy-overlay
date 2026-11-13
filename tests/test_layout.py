@@ -233,3 +233,92 @@ def test_save_write_failure_returns_false_without_raise(tmp_path, monkeypatch):
 
     monkeypatch.setattr(type(path), "write_text", _boom)
     assert layout.save_layout(path, _snapshot()) is False
+
+
+# ---- 遥控器节点（A/B 直径、位置与装填态；需求 future_恢复布局.txt 补充） ----------
+
+
+def _remote_payload() -> dict:
+    return layout.collect_remote_screenshot_layout(
+        a_x=100,
+        a_y=200,
+        a_diameter=80,
+        b_x=300,
+        b_y=400,
+        b_diameter=100,
+        loaded_color="#ff3232",
+    )
+
+
+def test_remote_node_roundtrip_preserves_fields():
+    state = layout.parse_layout(_snapshot(remote_screenshot=_remote_payload()))
+    remote = state.remote_screenshot
+    assert remote is not None
+    assert (remote.a.x, remote.a.y, remote.a.diameter) == (100, 200, 80)
+    assert (remote.b.x, remote.b.y, remote.b.diameter) == (300, 400, 100)
+    assert remote.loaded_color == "#ff3232"
+
+
+def test_remote_node_missing_or_null_means_no_restore():
+    """节点缺失 / null → 不恢复（改动前行为：屏幕中心默认摆放）。"""
+    assert layout.parse_layout(_snapshot()).remote_screenshot is None
+    payload = _snapshot(remote_screenshot=None)
+    assert layout.parse_layout(payload).remote_screenshot is None
+
+
+def test_remote_node_non_dict_rejected():
+    state = layout.parse_layout(_snapshot(remote_screenshot="a/b"))
+    assert state.remote_screenshot is None
+
+
+def test_remote_node_invalid_field_rejects_entire_node():
+    """需求四.5：字段缺失或类型非法 → 改动前行为（整节点放弃，不做字段级降级）。"""
+    mutations = (
+        lambda p: p["a"].update(x="left"),
+        lambda p: p["a"].update(y=None),
+        lambda p: p["a"].pop("diameter"),
+        lambda p: p["a"].update(diameter=10),  # 低于下限 20
+        lambda p: p["a"].update(diameter=True),  # bool 不是合法数字
+        lambda p: p.pop("a"),
+        lambda p: p.pop("b"),
+        lambda p: p.update(loaded_color="red"),  # 颜色格式非法
+        lambda p: p.update(loaded_color=3),
+    )
+    for mutate in mutations:
+        payload = _snapshot(remote_screenshot=_remote_payload())
+        mutate(payload["remote_screenshot"])
+        state = layout.parse_layout(payload)
+        assert state.remote_screenshot is None, mutate
+
+
+def test_remote_node_idle_color_null_is_valid():
+    payload = _snapshot(remote_screenshot=_remote_payload())
+    payload["remote_screenshot"]["loaded_color"] = None
+    state = layout.parse_layout(payload)
+    assert state.remote_screenshot.loaded_color is None  # 圆形待命态
+
+
+def test_remote_node_color_stripped_on_parse():
+    payload = _snapshot(remote_screenshot=_remote_payload())
+    payload["remote_screenshot"]["loaded_color"] = " #FF3232 "
+    state = layout.parse_layout(payload)
+    assert state.remote_screenshot.loaded_color == "#FF3232"  # 大小写保留，控制器侧归一比较
+
+
+def test_remote_node_unknown_fields_ignored():
+    payload = _snapshot(remote_screenshot=_remote_payload())
+    payload["remote_screenshot"]["future"] = 1
+    assert layout.parse_layout(payload).remote_screenshot is not None
+
+
+def test_load_layout_raw_missing_or_corrupt_returns_none(tmp_path):
+    assert layout.load_layout_raw(tmp_path / "nope.json") is None
+    path = tmp_path / "layout.json"
+    path.write_text("{broken", encoding="utf-8")
+    assert layout.load_layout_raw(path) is None
+
+
+def test_load_layout_raw_returns_plain_dict_without_validation(tmp_path):
+    path = tmp_path / "layout.json"
+    path.write_text('{"remote_screenshot": {"a": {"x": 1}}}', encoding="utf-8")
+    assert layout.load_layout_raw(path) == {"remote_screenshot": {"a": {"x": 1}}}
