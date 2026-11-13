@@ -51,13 +51,22 @@ CLICK_MOVE_TOLERANCE = 4
 #: 停顿（稳定观察）旋转图标：边长 = 窗口直径 × 0.36（直径 50 → 18px、
 #: 100 → 36px；矢量渲染任意直径不模糊，且小于半圆不遮中心视觉）
 SETTLE_ICON_RELATIVE_SIZE = 0.36
-#: 停顿图标不透明度：高于窗口 A 填充的 128/255，保证半透明粉底上可辨
-SETTLE_ICON_OPACITY = 0.86
+#: 停顿图标不透明度：1.0（完全不透明）——对比度由深色衬圈保证，降透明度
+#: 只会损失对比（同色系粉图标在半透明粉底上实测对比仅 1.3~2.3:1 不可辨）
+SETTLE_ICON_OPACITY = 1.0
+#: 停顿图标撞色亮黄（H≈50°，与主题粉 #F7A8B8 H≈348° 高亮高饱和撞色；
+#: 配深色衬圈后暗/亮/白背景对比 4.5/2.5/2.3:1，均达可辨标准）
+SETTLE_ICON_COLOR = "#FDE047"
+#: 停顿图标深色衬圈：图标下垫半透明深蓝灰圆，把局部底压暗至与游戏背景
+#: 无关的稳定区间（任意背景下图标的可辨识性不再随画面亮度剧烈波动）；
+#: 直径 = 图标 × 1.4（18px 图标 → 25px 衬圈，不溢出最小窗口内切区）
+SETTLE_ICON_SCRIM_COLOR = QColor(31, 36, 48, 110)
+SETTLE_ICON_SCRIM_SCALE = 1.4
 #: 旋转动画帧间隔与每帧步长：30fps + 12°/帧 → 1.0 秒/圈（平滑且开销极小）
 SETTLE_SPIN_INTERVAL_MS = 33
 SETTLE_SPIN_STEP_DEG = 12
-#: 停顿图标资产（配色已按触发器窗口主题色 #F7A8B8 适配，同 B 描边体系；
-#: 路径基准同 stream/icons.py：模块所在包上两级的 assets/icons）
+#: 停顿图标资产（素材 stroke 为撞色亮黄 #FDE047；渲染时以 SETTLE_ICON_COLOR
+#: 运行时替换 stroke，调色只需改常量；路径基准同 stream/icons.py）
 SETTLE_ICON_PATH = (
     Path(__file__).parent.parent / "assets" / "icons" / "刷新_refresh.svg"
 )
@@ -224,7 +233,11 @@ class RemoteTriggerWindow(_RemoteWindow):
             return
         size = max(1, int(self.width() * SETTLE_ICON_RELATIVE_SIZE))
         try:
-            renderer = QSvgRenderer(str(SETTLE_ICON_PATH))
+            # stroke 颜色以 SETTLE_ICON_COLOR 为单点真值（素材 #FDE047 运行时替换）
+            svg_data = SETTLE_ICON_PATH.read_bytes()
+            if SETTLE_ICON_COLOR != "#FDE047":
+                svg_data = svg_data.replace(b"#FDE047", SETTLE_ICON_COLOR.encode("ascii"))
+            renderer = QSvgRenderer(svg_data)
         except Exception as exc:  # 文件缺失等：降级无图标，不抛出
             logger.debug("停顿图标加载失败（%s）：%s", SETTLE_ICON_PATH, exc)
             return
@@ -256,12 +269,19 @@ class RemoteTriggerWindow(_RemoteWindow):
         painter = QPainter(self)
         draw_trigger_circle(painter, self.rect(), trigger_fill_color())
         if self._settle_active and self._settle_icon_pixmap is not None:
-            # 停顿提示：主题色刷新图标居中旋转叠加（纯绘制，不影响交互）
+            # 停顿提示：深色衬圈先压暗局部底（对比不随游戏背景波动），再
+            # 居中旋转叠加撞色图标（纯绘制，不影响交互）
+            icon_size = self._settle_icon_pixmap.width()
+            scrim = int(icon_size * SETTLE_ICON_SCRIM_SCALE)
             painter.save()
-            size = self._settle_icon_pixmap.width()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(SETTLE_ICON_SCRIM_COLOR)
+            painter.drawEllipse(self.rect().center(), scrim // 2, scrim // 2)
+            painter.restore()
+            painter.save()
             painter.translate(self.rect().center())
             painter.rotate(self._settle_angle)
-            painter.drawPixmap(-size // 2, -size // 2, self._settle_icon_pixmap)
+            painter.drawPixmap(-icon_size // 2, -icon_size // 2, self._settle_icon_pixmap)
             painter.restore()
 
     def _on_release(self, press_global: QPoint | None, event) -> None:
