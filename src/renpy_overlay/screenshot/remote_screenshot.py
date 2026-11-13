@@ -18,6 +18,14 @@ attach_automation 注入自动化控制器后，本控制器把 A 单击与 B �
 显隐初值取配置 ``remote_screenshot_hide``：true 时进入快捷键模式生成
 A/B 后保持隐藏（右键菜单初始「显示遥控器」），此后以用户操作为准。
 
+显隐三态（需求：自动化截图前自动隐藏瞄准器 B，修订原 A4「全程不隐藏」
+决议——手动拖动 B 引起的画面变化会污染感知签名与缓存命中判定）：
+全部显示 / 全部隐藏 / 仅瞄准器隐藏。自动化每次抓屏前经
+:meth:`hide_arm_window` 隐藏 B（仅 B，A 保持可见作缓存错误命中时的手动
+兜底），且不得自动恢复（防反复隐藏/显示的爆闪）；用户「显示遥控器」
+= 全部显示并清除中间态，「隐藏遥控器」= 全部隐藏。决策抽为纯函数
+:func:`resolve_window_visibility` 便于离线单测。
+
 与截图窗口池的隔离（同 mouse_lock 约定）：A/B 由本控制器自持，不进
 QuickMenu 截图窗口池 —— lock_layout / unlock_layout / locked_windows /
 close_all 均不触及本功能窗口。
@@ -78,6 +86,24 @@ def resolve_armed(
         if rects_intersect(b_rect, rect):
             return window
     return None
+
+
+def resolve_window_visibility(
+    user_hidden: bool,
+    arm_hidden: bool,
+) -> tuple[bool, bool]:
+    """遥控器 A/B 显隐三态决策（纯函数，离线单测用）。
+
+    返回 ``(显示A, 显示B)``：
+
+    - 用户「隐藏遥控器」（``user_hidden``）→ 全部隐藏；
+    - 自动化「仅瞄准器隐藏」（``arm_hidden``）→ A 保持可见（缓存错误命中
+      时用户单击 A 触发截图翻译的手动兜底），B 隐藏；
+    - 其余 → 全部显示。
+    """
+    if user_hidden:
+        return False, False
+    return True, not arm_hidden
 
 
 def _default_window_factory(kind: str, diameter: int, on_event) -> object:
@@ -143,6 +169,10 @@ class RemoteScreenshotController:
         # 「隐藏遥控器」的用户级显隐态：抓屏恢复 show_windows 时尊重（不放出）；
         # 初值取配置 remote_screenshot_hide（true 时生成后保持隐藏，此后以用户操作为准）
         self._user_hidden = bool(user_hidden)
+        # 「仅瞄准器隐藏」中间态（自动化截图前自动置位，用户「显示遥控器」
+        # 清除）：只影响 B 的显示，不改装填状态/命中区域/自动化周期；隐藏
+        # 后不自动恢复（防反复隐藏/显示的爆闪，须用户手动恢复）
+        self._arm_hidden = False
 
     def attach_automation(self, automation) -> None:
         """注入遥控器自动化控制器（A 单击接管与 B 装填变化转发；同宿主附着约定）。"""
@@ -162,12 +192,35 @@ class RemoteScreenshotController:
         """「隐藏遥控器/显示遥控器」：用户级显隐（自动化继续运行，需求决议 A6）。
 
         菜单点击后的显隐以本入口为准，配置初值仅在控制器构造时生效一次。
+        「隐藏遥控器」= 全部隐藏；「显示遥控器」= 全部显示并清除自动化的
+        「仅瞄准器隐藏」中间态（需求：显示即全显示，用户最多点击两次达到
+        期望效果）。注意：清除中间态后，自动化周期若在运行，下一轮截图
+        会再次隐藏 B——需 B 常显应先关闭自动化。
         """
         self._user_hidden = bool(hidden)
+        self._arm_hidden = False  # 用户接管显隐：清除自动化中间态
         if self._user_hidden:
             self.hide_windows()
         else:
             self.show_windows()
+
+    def hide_arm_window(self) -> None:
+        """自动化截图开始前隐藏瞄准器 B（仅 B；触发器 A 保持可见）。
+
+        由自动化控制器在每轮抓屏前调用（含首轮与周期）：只影响 B 的显示
+        ——装填状态、命中区域（Qt 隐藏不破坏 geometry，相交判定照常）、
+        自动化周期与缓存逻辑全部不变；隐藏后**不自动恢复**（防止反复
+        隐藏/显示的爆闪），须用户点击「显示遥控器」手动恢复（该点击清除
+        本状态并全量显示）。幂等：已是中间态时 no-op，不重复 hide 刷日志。
+        """
+        if self._arm_hidden:
+            return
+        self._arm_hidden = True
+        if self._window_b is not None:
+            self._window_b.hide()
+        logger.info(
+            "遥控截图：已隐藏瞄准器 B（触发器 A 保持可见；「显示遥控器」可恢复）"
+        )
 
     # ---- 快捷键模式生命周期（HotkeyMode 模式开/关时通知） ---------------------
 
@@ -188,6 +241,9 @@ class RemoteScreenshotController:
             if self._automation is not None:
                 # 遥控器自动化：A/B 随模式退出销毁，自动化复位为关（用户决议 A3）
                 self._automation.on_hotkey_mode_changed(False)
+            # 自动化复位连带清除「仅瞄准器隐藏」中间态：重建后 B 的显隐由
+            # 用户态（remote_screenshot_hide/最近操作）决定，与改动前一致
+            self._arm_hidden = False
             self._destroy_windows()
 
     def _create_windows(self) -> None:
@@ -197,9 +253,11 @@ class RemoteScreenshotController:
         self._window_b = self._window_factory(
             "B", self._diameter_b, self.update_arm_state
         )
-        if not self._user_hidden:
-            for window in (self._window_a, self._window_b):
-                window.show()  # 先 show 再定位（Qt 渲染管线要求，同 QuickMenu）
+        show_a, show_b = resolve_window_visibility(self._user_hidden, self._arm_hidden)
+        if show_a:
+            self._window_a.show()  # 先 show 再定位（Qt 渲染管线要求，同 QuickMenu）
+        if show_b:
+            self._window_b.show()
         self._place_windows()
         logger.info(
             "遥控截图窗口 A/B 已生成（直径 %d/%d，%s）",
@@ -284,16 +342,17 @@ class RemoteScreenshotController:
             self._window_b.hide()
 
     def show_windows(self) -> None:
-        """抓屏后恢复显示 A/B（不受布局锁定分支影响）；未生成时 no-op。
+        """抓屏后恢复显示（不受布局锁定分支影响）；未生成时 no-op。
 
-        用户已通过「隐藏遥控器」隐藏时不放出（尊重用户态，防止一次手动
-        抓屏把用户刻意隐藏的 A/B 放出来）。
+        显隐按 :func:`resolve_window_visibility` 决策：用户「隐藏遥控器」
+        期间不放出（尊重用户态，防止一次手动抓屏把用户刻意隐藏的 A/B 放
+        出来）；「仅瞄准器隐藏」中间态下只恢复 A——自动化隐藏 B 后不得
+        自动恢复（防反复隐藏/显示的爆闪，须用户「显示遥控器」手动恢复）。
         """
-        if self._user_hidden:
-            return
-        if self._window_a is not None:
+        show_a, show_b = resolve_window_visibility(self._user_hidden, self._arm_hidden)
+        if show_a and self._window_a is not None:
             self._window_a.show()
-        if self._window_b is not None:
+        if show_b and self._window_b is not None:
             self._window_b.show()
 
     def managed_windows(self) -> list[object]:

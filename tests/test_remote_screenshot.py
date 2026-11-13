@@ -21,6 +21,7 @@ from renpy_overlay.screenshot.remote_screenshot import (
     RemoteScreenshotController,
     rects_intersect,
     resolve_armed,
+    resolve_window_visibility,
 )
 
 #: 摆放参照点（注入的屏幕中心源返回值）
@@ -483,3 +484,105 @@ def test_initial_user_hidden_flows_to_automation_menu_state():
 
     default_controller, _ = _make_controller(factory=_Factory())
     assert _make_automation(default_controller).remote_hidden is False  # 默认初值
+
+
+# ---- 显隐三态（需求：自动化截图前自动隐藏瞄准器 B，修订 A4 决议） ----------------
+
+
+def test_resolve_window_visibility_three_states():
+    """三态决策纯函数：全显示 / 仅瞄准器隐藏 / 全部隐藏（用户态优先）。"""
+    assert resolve_window_visibility(False, False) == (True, True)
+    assert resolve_window_visibility(False, True) == (True, False)  # A 保持可见兜底
+    assert resolve_window_visibility(True, False) == (False, False)
+    assert resolve_window_visibility(True, True) == (False, False)
+
+
+def test_hide_arm_window_hides_only_b_and_idempotent():
+    """需求三.1：自动化截图前仅隐藏 B，触发器 A 保持可见；幂等不重复 hide。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    controller.hide_arm_window()
+    assert a.calls == ["show"]  # A 保持可见
+    assert b.calls == ["show", "hide"]  # 仅 B 隐藏
+    controller.hide_arm_window()  # 幂等：已是中间态时 no-op
+    assert b.calls == ["show", "hide"]
+
+
+def test_show_windows_in_arm_hidden_state_restores_only_a():
+    """需求五.5：自动化隐藏 B 后不得自动恢复（防爆闪），抓屏恢复只放 A。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    controller.hide_arm_window()
+    controller.hide_windows()  # 模拟手动抓屏前（双窗隐藏，不清除中间态）
+    controller.show_windows()  # 抓屏后恢复：仅 A，B 不放出
+    assert a.calls == ["show", "hide", "show"]
+    assert b.calls == ["show", "hide", "hide"]  # hide_arm 与抓屏前各 hide 一次，未放出
+
+
+def test_show_remote_clears_arm_hidden_and_shows_both():
+    """需求四.1/四.3：「显示遥控器」全量显示并清除中间态（最多点击两次）。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    controller.hide_arm_window()        # 自动化中间态（仅 B 隐藏）
+    controller.set_user_hidden(True)    # 「隐藏遥控器」：全部隐藏
+    assert a.calls == ["show", "hide"]  # hide_arm 不动 A
+    assert b.calls == ["show", "hide", "hide"]  # hide_arm 与抓屏前各 hide 一次
+    controller.set_user_hidden(False)   # 「显示遥控器」：全部显示 + 清中间态
+    assert a.calls == ["show", "hide", "show"]
+    assert b.calls == ["show", "hide", "hide", "show"]
+    controller.hide_windows()
+    controller.show_windows()           # 中间态已清：抓屏恢复双窗
+    assert b.calls[-1] == "show"
+
+
+def test_arm_state_and_click_survive_arm_hidden():
+    """需求三.3：隐藏 B 只影响显示——装填状态、命中判定与 A 单击兜底不变。"""
+    factory = _Factory()
+    red = QColor(255, 50, 50)
+    locked_window = _StubWindow((100, 100, 300, 200), border=red)
+    triggered: list[object] = []
+    controller, _ = _make_controller(
+        factory=factory, locked=[locked_window], trigger=triggered.append
+    )
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    b.move(150, 150)
+    b.on_event()  # 装填
+    assert b.armed == red
+    controller.hide_arm_window()  # 自动化隐藏 B
+    assert controller._armed is locked_window  # 装填状态不变
+    b.on_event()  # B 隐藏期间状态重估（Qt 隐藏不破坏 geometry，驻留照常）
+    assert b.armed == red
+    a.on_event()  # A 单击兜底路径照常触发截图翻译
+    assert triggered == [locked_window]
+
+
+def test_mode_off_clears_arm_hidden_for_recreate():
+    """模式退出复位自动化连带清除中间态：重建后显隐回到用户态决定。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.on_hotkey_mode_changed(True)
+    controller.hide_arm_window()
+    controller.on_hotkey_mode_changed(False)
+    controller.on_hotkey_mode_changed(True)
+    a2, b2 = factory.created[2], factory.created[3]
+    assert a2.calls == ["show"] and b2.calls == ["show"]  # 重建后全显示
+    controller.hide_arm_window()
+    assert b2.calls == ["show", "hide"]  # 中间态在重建后仍可正常置位
+
+
+def test_user_hidden_true_blocks_show_windows_even_with_arm_hidden():
+    """用户「隐藏遥控器」全隐藏态优先：抓屏恢复不放出任何窗口。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory, user_hidden=True)
+    controller.on_hotkey_mode_changed(True)
+    a, b = factory.created
+    controller.hide_arm_window()  # B 本就未显示：置中间态（hide 幂等无害）
+    controller.show_windows()
+    assert a.calls == [] and b.calls == ["hide"]

@@ -338,6 +338,7 @@ class _Harness:
         self.displayed: list[str] = []
         self.submitted: list[tuple[object, int]] = []
         self.frames: list[tuple[object, bool]] = []
+        self.arm_hides = 0  # 抓屏前隐藏瞄准器 B 的调用次数（修订 A4 决议）
         self.controller = RemoteAutomationController(
             interval=0.5,
             cache_size=3,
@@ -349,10 +350,14 @@ class _Harness:
             suppress_frame=lambda window, suppressed: self.frames.append((window, suppressed)),
             get_windows_hidden=lambda: self.windows_hidden,
             set_windows_hidden=self._set_windows_hidden,
+            hide_arm_before_capture=self._record_arm_hide,
             bbox_provider=self._bbox,
             capture_fn=self._capture,
             timer_factory=self._make_timer,
         )
+
+    def _record_arm_hide(self) -> None:
+        self.arm_hides += 1
 
     def _submit(self, window, image, hash_value: int) -> bool:
         if not self.submit_ok:
@@ -1151,3 +1156,52 @@ def test_auto_worker_failure_reports_error_without_images(monkeypatch):
     assert item["text"] is None
     assert item["original_jpeg"] is None
     assert item["thumb_jpeg"] is None
+
+
+# ---- 截图前隐藏瞄准器 B（修订 A4 决议：拖动 B 污染感知签名与缓存命中） ------
+
+
+def test_hide_arm_called_before_first_round_capture():
+    """需求三.1：首轮截图开始前隐藏瞄准器 B（回调先于抓屏执行）。"""
+    harness = _Harness()
+    order: list[str] = []
+    original_capture = harness._capture
+
+    def _capture_recording(bbox):
+        order.append("capture")
+        return original_capture(bbox)
+
+    harness.controller._capture_fn = _capture_recording
+    original_hide = harness._record_arm_hide
+
+    def _hide_recording():
+        order.append("hide_arm")
+        original_hide()
+
+    harness.controller._hide_arm = _hide_recording
+    window = _StubWindow("red")
+    harness.controller.set_enabled(True)
+    harness.controller.on_trigger_clicked(window)
+    assert order == ["hide_arm", "capture"]  # 抓屏前先隐藏 B
+    assert harness.arm_hides == 1
+
+
+def test_hide_arm_called_every_cycle_tick():
+    """需求三.1：周期截图每轮开始前都隐藏 B（连续两轮各一次，累计计数）。"""
+    harness = _Harness()
+    window = _StubWindow("red")
+    harness.controller.set_enabled(True)
+    harness.controller.on_trigger_clicked(window)  # 首轮
+    harness.tick()  # 周期第一轮（画面同基准：无变化路径）
+    harness.tick()  # 周期第二轮
+    assert harness.arm_hides == 3  # 首轮 + 两个周期 tick 各一次
+
+
+def test_hide_arm_defaults_to_none_safely():
+    """缺省不注入回调：抓屏路径不受影响（既有宿主/测试形态不回归）。"""
+    harness = _Harness()
+    harness.controller._hide_arm = None
+    window = _StubWindow("red")
+    harness.controller.set_enabled(True)
+    harness.controller.on_trigger_clicked(window)
+    assert harness.submitted  # 首轮抓屏与提交照常

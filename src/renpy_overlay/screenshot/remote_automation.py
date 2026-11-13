@@ -17,8 +17,11 @@
 - API 忙碌（任意在途翻译/识曲/对话）期间保持截图变化状态、继续周期截图
   但不再比较；线路通畅后把新的截图先查缓存、未命中才提交（用户决议 A7），
   同时只允许一个在途 API 请求（经宿主互斥槽）；
-- 自动化全程不隐藏任何窗口（防止反复隐藏/显示的爆闪；A/B 半透明像素入镜
-  为已确认取舍，用户决议 A4）；「隐藏遥控器」不停止自动化（决议 A6）；
+- 自动化每轮截图开始前隐藏瞄准器 B（仅 B；触发器 A 保持可见作缓存错误
+  命中时用户单击 A 的手动兜底）——修订原 A4「全程不隐藏」决议：手动拖动
+  B 引起的画面变化会污染感知签名与缓存命中判定；隐藏后不得自动恢复
+  （防反复隐藏/显示的爆闪），须用户点击「显示遥控器」手动恢复；
+  「隐藏遥控器」不停止自动化（决议 A6）；
 - 译文进内存循环队列缓存（``remote_cache_size_count``，默认 50，仅存感知
   签名与译文，命中移尾），命中直接上屏（不发 API，自然不重复写库）；
   成功翻译与手动截图翻译同规则落库 screenshot.db（库操作在宿主侧）。
@@ -264,6 +267,9 @@ class RemoteAutomationController:
     - ``suppress_frame``：提示框单帧压制回调 ``(window, suppressed)``；
     - ``get_windows_hidden`` / ``set_windows_hidden``：A/B 用户级显隐
       （「隐藏遥控器/显示遥控器」，RemoteScreenshotController 提供）；
+    - ``hide_arm_before_capture``：每轮抓屏前隐藏瞄准器 B 的回调
+      （RemoteScreenshotController.hide_arm_window；修订 A4 决议：手动拖动
+      B 的画面变化会污染感知签名与缓存命中；可选，缺省 None 不隐藏）；
     - ``capture_fn`` / ``bbox_provider`` / ``timer_factory``：截图函数、
       区域换算与计时器工厂（离线测试注入 stub，缺省为真实实现）；
     - ``persistent_lookup`` / ``persistent_put``：数据库持久化缓存查询/写入
@@ -286,6 +292,7 @@ class RemoteAutomationController:
         suppress_frame: Callable[[object, bool], None],
         get_windows_hidden: Callable[[], bool],
         set_windows_hidden: Callable[[bool], None],
+        hide_arm_before_capture: Callable[[], None] | None = None,
         capture_fn: Callable[[Rect], Image.Image] | None = None,
         bbox_provider: Callable[[object], Rect] | None = None,
         timer_factory: Callable[[int, Callable[[], None]], object] | None = None,
@@ -321,6 +328,7 @@ class RemoteAutomationController:
         self._suppress_frame = suppress_frame
         self._get_windows_hidden = get_windows_hidden
         self._set_windows_hidden = set_windows_hidden
+        self._hide_arm = hide_arm_before_capture
         self._capture_fn = capture_fn or _default_capture
         self._bbox_provider = bbox_provider or _default_bbox_provider
         self._timer_factory = timer_factory or _default_timer_factory
@@ -550,7 +558,14 @@ class RemoteAutomationController:
 
         装填目标区域不可用（窗口销毁竞态）时安全停止周期（需求：目标失效
         → 停止自动）；普通抓屏失败（锁屏等）保持周期，下一 tick 重试。
+
+        抓屏前先经注入回调隐藏瞄准器 B（修订 A4 决议：手动拖动 B 引起的
+        画面变化会污染感知签名与缓存命中判定；仅隐藏 B，触发器 A 保持
+        可见；首轮与周期路径共用本入口，隐藏后不自动恢复——防反复隐藏/
+        显示的爆闪，须用户「显示遥控器」手动恢复）。
         """
+        if self._hide_arm is not None:
+            self._hide_arm()
         try:
             bbox = self._bbox_provider(self._armed)
         except Exception:  # pragma: no cover - 窗口销毁竞态（真实路径）

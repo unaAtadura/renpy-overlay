@@ -236,6 +236,11 @@ class StreamOverlayCore:
             set_windows_hidden=self._remote_screenshot.set_user_hidden,
             persistent_lookup=self._lookup_persistent_cache,
             persistent_put=self._put_persistent_cache,
+            # 修订 A4 决议：每轮抓屏前隐藏瞄准器 B（仅 B，A 保持可见作缓存
+            # 错误命中时的手动兜底）——手动拖动 B 的画面变化会污染感知
+            # 签名与缓存命中；隐藏后不自动恢复（防反复隐藏/显示的爆闪），
+            # 须用户「显示遥控器」手动恢复
+            hide_arm_before_capture=self._remote_screenshot.hide_arm_window,
         )
         self._remote_screenshot.attach_automation(self._remote_automation)
         self._quick_menu.attach_remote_automation(self._remote_automation)
