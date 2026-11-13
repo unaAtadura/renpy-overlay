@@ -68,6 +68,7 @@ class _StubWindow:
         self.calls: list[str] = []
         self.on_event = None  # 工厂注入的事件回调（A 单击 / B 拖动）
         self.armed = "unset"  # set_armed 未被调用过的哨兵
+        self.settle_calls: list[bool] = []  # set_settle 转发记录（A 触发器）
 
     def geometry(self) -> _FakeGeometry:
         return self._geo
@@ -89,6 +90,9 @@ class _StubWindow:
 
     def set_armed(self, color: QColor | None) -> None:
         self.armed = color
+
+    def set_settle(self, active: bool) -> None:
+        self.settle_calls.append(active)
 
 
 class _Factory:
@@ -362,6 +366,22 @@ def test_trigger_stays_manual_when_automation_disabled():
     a.on_event()
     assert triggered == [locked_window]
     assert automation.clicks == []
+
+
+def test_set_trigger_settle_forwards_to_window_a_and_tolerates_absent():
+    """停顿提示开关：转发给窗口 A 的 set_settle；窗口未生成时 no-op 不抛。"""
+    factory = _Factory()
+    controller, _ = _make_controller(factory=factory)
+    controller.set_trigger_settle(True)  # 未生成：no-op（销毁竞态安全）
+    controller.on_hotkey_mode_changed(True)
+    a, _b = factory.created
+    controller.set_trigger_settle(True)
+    controller.set_trigger_settle(False)
+    controller.set_trigger_settle(False)  # 幂等转发由窗口侧处理，转发层不拦截
+    assert a.settle_calls == [True, False, False]
+    controller.on_hotkey_mode_changed(False)  # 窗口销毁后再转发：no-op
+    controller.set_trigger_settle(True)
+    assert a.settle_calls == [True, False, False]
 
 
 def test_mode_off_forwards_to_automation():

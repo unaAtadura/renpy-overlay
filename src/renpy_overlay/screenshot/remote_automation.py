@@ -299,6 +299,7 @@ class RemoteAutomationController:
         persistent_lookup: Callable[[Signature], str | None] | None = None,
         persistent_put: Callable[[Signature, str, int | None, int | None, int | None], None] | None = None,
         settle_frames: int = 1,
+        settle_callback: Callable[[bool], None] | None = None,
     ) -> None:
         # 注入契约（构造期 fail-fast，同 HotkeyMode 构造校验先例）：宿主误把
         # property 取值当回调传入（如 windows_created 不加括号/不包 lambda）时，
@@ -346,6 +347,14 @@ class RemoteAutomationController:
             )
         self._persistent_lookup = persistent_lookup
         self._persistent_put = persistent_put
+        # 停顿（稳定观察）视觉提示回调（可选注入；None = 不接线）：进入观察
+        # 传 True、退出观察传 False（宿主转发给触发器窗口 A 显示旋转图标）
+        if settle_callback is not None and not callable(settle_callback):
+            raise TypeError(
+                "RemoteAutomationController 注入参数 settle_callback 必须可调用"
+                f"或 None（收到 {type(settle_callback).__name__}）"
+            )
+        self._settle_callback = settle_callback
         # 稳定窗口帧数（构造注入，修改需重启）：判变通过后连续 N 帧与候选
         # 相似才提交，过滤打字机逐字输出的中间态；N=1 = 无稳定窗口（现状）
         self._settle_frames = max(1, int(settle_frames))
@@ -549,13 +558,16 @@ class RemoteAutomationController:
         """画面变化后进入稳定观察（settle_frames>1）；返回 True=已拦截调用方。
 
         进入帧计为第 1 帧；后续每 tick 与候选相似则计数推进、不相似（打字机
-        继续输出）则刷新候选归 1——中间态永不提交、永不写入缓存。
+        继续输出）则刷新候选归 1——中间态永不提交、永不写入缓存。进入时
+        经 settle_callback 通知宿主（触发器 A 显示停顿旋转图标）。
         """
         if self._settle_frames <= 1:
             return False
         self._settle_pending = True
         self._settle_candidate = current
         self._settle_count = 1
+        if self._settle_callback is not None:
+            self._settle_callback(True)
         logger.debug(
             "遥控器自动化：画面变化，进入稳定观察（1/%d 帧）", self._settle_frames
         )
@@ -589,10 +601,17 @@ class RemoteAutomationController:
         )
 
     def _clear_settle(self) -> None:
-        """清除稳定观察状态（提交/取消/停止周期共用）。"""
+        """清除稳定观察状态（提交/取消/停止周期共用）。
+
+        此前确在观察中时经 settle_callback 通知宿主（触发器 A 停转并复位
+        图标角度）；未在观察中时静默（幂等，不产生冗余通知）。
+        """
+        was_pending = self._settle_pending
         self._settle_pending = False
         self._settle_candidate = None
         self._settle_count = 0
+        if was_pending and self._settle_callback is not None:
+            self._settle_callback(False)
 
     def _process_change(
         self, image: Image.Image, current: Signature, *, use_cache: bool = True

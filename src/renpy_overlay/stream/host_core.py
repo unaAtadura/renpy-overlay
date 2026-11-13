@@ -242,6 +242,7 @@ class StreamOverlayCore:
             # 须用户「显示遥控器」手动恢复
             hide_arm_before_capture=self._remote_screenshot.hide_arm_window,
             settle_frames=self._config.remote_settle_frames,
+            settle_callback=self._remote_screenshot.set_trigger_settle,
         )
         self._remote_screenshot.attach_automation(self._remote_automation)
         self._quick_menu.attach_remote_automation(self._remote_automation)

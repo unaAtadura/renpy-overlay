@@ -879,6 +879,7 @@ def _make_controller(
     submit_ok=True,
     settle_frames=1,
     capture_fn=None,
+    settle_callback=None,
 ):
     """接线测试共用控制器：图像/签名确定，提交与持久化回调可观测。
 
@@ -912,6 +913,7 @@ def _make_controller(
         persistent_lookup=persistent_lookup,
         persistent_put=persistent_put,
         settle_frames=settle_frames,
+        settle_callback=settle_callback,
     )
     return controller, timer
 
@@ -1224,6 +1226,63 @@ def test_stop_cycle_clears_settle_state():
     assert controller._settle_pending is False
     assert controller._settle_candidate is None
     assert controller._settle_count == 0
+
+
+def test_settle_callback_notified_on_enter_and_exit():
+    """停顿回调链：进入观察通知 True；稳定达标提交/重启轮/停止周期通知 False。"""
+    sig = grid_signature(_gradient_image())
+    displayed, submitted = [], []
+    settle_events: list[bool] = []
+    controller, timer = _make_controller(
+        displayed,
+        submitted,
+        settle_frames=3,
+        settle_callback=settle_events.append,
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))  # 进入观察
+    assert settle_events == [True]
+    timer.on_tick()
+    timer.on_tick()  # 达标提交 → _clear_settle
+    assert submitted == [sig]
+    assert settle_events == [True, False]
+    controller.on_trigger_clicked(_StubWindow("w"))  # 重启轮强制：不进观察无新通知
+    assert submitted == [sig, sig]
+    assert settle_events == [True, False]
+    controller.toggle_automation()  # 停止周期（未在观察中）：静默不重复通知
+    assert settle_events == [True, False]
+
+
+def test_settle_callback_false_on_stop_cycle_while_observing():
+    """观察中停止周期（快捷键退出等）：通知 False 停图标（随后窗口销毁）。"""
+    settle_events: list[bool] = []
+    controller, timer = _make_controller(
+        [], [], settle_frames=3, settle_callback=settle_events.append
+    )
+    controller.toggle_automation()
+    controller.on_trigger_clicked(_StubWindow("w"))
+    assert settle_events == [True]
+    controller.on_hotkey_mode_changed(False)  # 快捷键退出 → _stop_cycle → 清观察
+    assert settle_events == [True, False]
+
+
+def test_settle_callback_rejected_when_not_callable():
+    """停顿回调注入契约：非 callable 非 None 时构造期报错（None 合法=不接线）。"""
+    base = dict(
+        interval=0.5,
+        cache_size=3,
+        has_windows=lambda: True,
+        is_busy=lambda: False,
+        display=lambda text: None,
+        submit=lambda window, image, hash_value: True,
+        notify=lambda text: None,
+        suppress_frame=lambda window, suppressed: None,
+        get_windows_hidden=lambda: False,
+        set_windows_hidden=lambda value: None,
+    )
+    with pytest.raises(TypeError, match="settle_callback"):
+        RemoteAutomationController(**base, settle_callback="bad")
+    RemoteAutomationController(**base)  # None 合法：不接线
 
 
 
