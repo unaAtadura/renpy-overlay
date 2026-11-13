@@ -1,6 +1,6 @@
 # 悬浮窗渲染与交互
 
-对应源码：`src/renpy_overlay/stream_window.py`（门面 + 兼容 re-export）与 `src/renpy_overlay/stream/` 子包；右键菜单 `quick_menu.py`；标题入口条 `bound_window.py`。测试：`tests/test_stream_window.py`、`test_stream_window_style2.py`、`test_quick_menu_control.py`、`test_quick_menu_video.py`。
+对应源码：`src/renpy_overlay/stream_window.py`（门面 + 兼容 re-export）与 `src/renpy_overlay/stream/` 子包；快捷菜单 `quick_menu.py`；快捷菜单锚点 `quick_menu_anchor.py`；标题入口条 `bound_window.py`。测试：`tests/test_stream_window.py`、`test_stream_window_style2.py`、`test_quick_menu_control.py`、`test_quick_menu_video.py`、`test_quick_menu_anchor.py`。
 
 ## 1. 模块拆分（stream/ 子包）
 
@@ -92,7 +92,7 @@
 
 ## 8. 标题入口条（bound_window.py：TitleEntryStrip）
 
-注入成功（`t=hooks` 确认 → `mark_injected()`）后，标题窗标题文本右侧出现自绘图标入口条（**跳过注入模式不出现**；可脱离注入运行的功能仍在右键快捷菜单）。入口随标题文本长度实时移动、同一渲染帧内同步绘制（避免跨窗口定位的滞后/偏移）：
+注入成功（`t=hooks` 确认 → `mark_injected()`）后，标题窗标题文本右侧出现自绘图标入口条（**跳过注入模式不出现**；可脱离注入运行的功能仍在快捷菜单）。入口随标题文本长度实时移动、同一渲染帧内同步绘制（避免跨窗口定位的滞后/偏移）：
 
 | 入口 | 图标 | 行为 |
 | --- | --- | --- |
@@ -113,9 +113,15 @@
 - **内容与双态区分**：数据来自 `t=choice` 的 `effects` 字段（agent 端 AST 采集，见 [dialogue-capture.md](dialogue-capture.md) §4）与 `choice_pick` 的状态翻转，经 `ChoiceEffectLog` 独立累积（同指纹 0.5s 内合并去重；effects 长度与选项数不齐时整体降级为仅选项文本，绝不错位展示）。每菜单一块：时间 + 上文预览 + 各选项；语句行条件单栏——解析成功（`+=`/`-=`/`= True|False` 三类）仅显示极简摘要，未命中（函数调用/条件表达式等动态行）显示完整原文并标注「动态」语义；「预测」（灰）与「已发生」（淡蓝）用前缀徽标 + 文字色双重标识；
 - **与翻译/去重解耦**：该数据是纯旁路——不进 `choice_translation_text` 翻译键、不写 `_last_say` / `_last_translation_input`、不参与 say 去重，正文窗展示完全不受影响（钉子测试 `test_choice_log.py::test_effects_never_enter_choice_translation_key`）。
 
-## 9. 右键快捷菜单（quick_menu.py）
+## 9. 快捷菜单与锚点（quick_menu.py / quick_menu_anchor.py）
 
-标题/正文窗文字处右键弹出（`QuickMenu` 管理器，截图窗口池 + 各功能菜单扩展点）。菜单项集合：创建截图窗口（`n/8`）/ 销毁截图窗口、快捷键模式开关、锁鼠标区域开关、录制视频（录制中显示「录制视频 mm:ss」）、视频剪辑、实时语音识别开关、遥控器自动化开关与隐藏遥控器（快捷键模式未开启时点击提示先开启）、听歌识曲、对话、预构建翻译缓存、查看历史（翻译 / 截图 / 识曲 / 对话 / 语音识别）、设置（位于退出正上方）、退出。开关型菜单项文案随状态切换（如「实时语音识别: 关/开」）。
+快捷菜单由独立锚点窗口触发（需求 future_右键快捷菜单_分离：原标题/正文窗右键入口已移除，避免流式窗与截图区域同时居中时菜单误入截图区域）。`QuickMenu` 管理器负责菜单构建与动作分发（截图窗口池 + 各功能菜单扩展点）；`quick_menu_anchor.QuickMenuAnchorWindow` 为独立圆形半透明悬浮钮（设置图标）：
+
+- **锚点交互**：双击切换锁定/解锁（默认锁定）；解锁态左键按住拖动移动；锁定态左键单击打开/关闭快捷菜单（等一个双击间隔判定，与流式窗单击翻译同模式）；窗口内无全透明区域（全窗垫底 alpha≥1，命中测试不穿透）；
+- **菜单定位**：弹出位置按锚点与屏幕边缘距离自适应选边（`menu_popup_position` 纯函数：右侧优先、否则左侧，紧贴锚点边缘 1px、不覆盖锚点；垂直与锚点顶对齐并钳在屏内）；菜单打开期间宿主置位 `_context_menu_open` 暂停周期性置顶重申，关闭后立即恢复（与旧右键路径同一语义）；
+- **持久化**：锚点位置/直径/锁定状态随退出写入 layout.json，启动恢复（直径恢复优先于 `quick_menu_anchor_diameter` 配置默认值 50，下限 20）。
+
+菜单项集合：创建截图窗口（`n/8`）/ 销毁截图窗口、快捷键模式开关、锁鼠标区域开关、录制视频（录制中显示「录制视频 mm:ss」）、视频剪辑、实时语音识别开关、遥控器自动化开关与隐藏遥控器（快捷键模式未开启时点击提示先开启）、听歌识曲、对话、预构建翻译缓存、查看历史（翻译 / 截图 / 识曲 / 对话 / 语音识别）、设置（位于退出正上方）、退出。开关型菜单项文案随状态切换（如「实时语音识别: 关/开」）。
 
 ## 10. 线程模型
 

@@ -11,7 +11,7 @@
   普通翻译固定显示第一行（start 锚点），实时语音识别保留 tail 锚点
   （已确认决议：实时识别体验与 style=1 一致）；
 - **交互**：全部继承 style=1（拖拽移动/双击锁定解锁/单击翻译/滚轮回看/
-  锁定态拖拽滚动/右键快捷菜单/标题窗入口条图标/**八向拉伸与悬停边缘
+  锁定态拖拽滚动/标题窗入口条图标/**八向拉伸与悬停边缘
   高亮**——拉伸状态机与几何换算在 interaction/geometry，悬停高亮经
   ``paint_hover_highlight`` 绘制），仅重写视觉与上屏方式；
 - **配置复用**：窗口尺寸/字号/行距/标题字号/间距沿用 ``stream_window_*``
@@ -50,7 +50,7 @@ def _draw_style2_backdrop(painter: QPainter, widget) -> None:
 class Style2TitleWindow(TitleWindow):
     """标题窗 style=2 变体：整窗半透明黑圆角 + 白色标题（仅重写绘制）。
 
-    排版（set_text）、入口条注入与命中分发、单双击/右键事件转发、
+    排版（set_text）、入口条注入与命中分发、单双击事件转发、
     ``fm``/``hwnd``/``dpr`` 全部继承 style=1；空标题时也绘制背景，
     保证标题条常驻可见（区别于 style=1 的空标题全透明）。
     """

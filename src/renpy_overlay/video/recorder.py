@@ -1,6 +1,6 @@
 """全屏录制控制器：PyAV gdigrab 录屏 + 环回录音双流，停止时合并。
 
-需求（.raw_plans/future_视频录制.txt）：右键菜单「录制视频」开关式录制，
+需求（.raw_plans/future_视频录制.txt）：快捷菜单「录制视频」开关式录制，
 全屏保存为 ``renpy_overlay_cache/video/yyyyMMdd-hhmmss.mp4``（自动建目录）；
 录制中菜单显示「录制视频 mm:ss」；开始 / 每 10 分钟 / 结束经标题窗提示。
 
@@ -190,7 +190,7 @@ class VideoRecorder(QObject):
     def menu_label(self) -> str:
         return menu_label(self.elapsed_seconds())
 
-    # ---- 开关（右键菜单项调用） -----------------------------------------------
+    # ---- 开关（快捷菜单项调用） -----------------------------------------------
 
     def toggle(self) -> None:
         if self._recording:

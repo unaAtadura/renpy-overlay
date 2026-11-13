@@ -22,7 +22,7 @@
                         注入由工具端发起                        └──────────────────────────┘
 ```
 
-另有一个**跳过注入模式**（非 Ren'Py 游戏）：不经注入直接打开悬浮窗，右键菜单中不依赖游戏文本的功能（截图翻译 / 听歌识曲 / AI 对话 / 各历史窗口）全部可用；单击翻译与自动翻译不可用。入口在 `picker.choose_target` 的 `SkipSelection` 结果，实现在 `cli._run_skip_injection_mode`。
+另有一个**跳过注入模式**（非 Ren'Py 游戏）：不经注入直接打开悬浮窗，快捷菜单中不依赖游戏文本的功能（截图翻译 / 听歌识曲 / AI 对话 / 各历史窗口）全部可用；单击翻译与自动翻译不可用。入口在 `picker.choose_target` 的 `SkipSelection` 结果，实现在 `cli._run_skip_injection_mode`。
 
 ## 2. 端到端数据流（以一句对话为例）
 
@@ -84,7 +84,8 @@ src/renpy_overlay/
 ├─ song_recognition/       听歌识曲包                      → song-recognition.md
 ├─ video/                  录制 / ASR / 剪辑               → video.md, asr.md
 ├─ config.py / settings_window.py                          → config.md
-├─ quick_menu.py           右键快捷菜单管理器               → overlay-window.md
+├─ quick_menu.py           快捷菜单管理器                   → overlay-window.md
+├─ quick_menu_anchor.py    快捷菜单锚点窗口                 → overlay-window.md
 ├─ bound_window.py         绑定窗口 / 标题入口条            → overlay-window.md
 └─ 5 个 SQLite store       数据库                          → history-and-storage.md
 ```

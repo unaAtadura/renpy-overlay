@@ -3,7 +3,7 @@
 需求（future_截图翻译功能补充_遥控截图自动化）：基于遥控截图实现的自动化
 截屏翻译——
 
-- 右键快捷菜单「遥控器自动化: 关/开」开关：开启前提为 A/B 已生成（快捷键
+- 快捷菜单「遥控器自动化: 关/开」开关：开启前提为 A/B 已生成（快捷键
   模式开启中），否则经宿主提示并保持关闭；退出快捷键模式自动复位为关
   （用户决议 A3：菜单项始终可点 + 点击提示）；
 - A（触发器）左键单击启动第一轮截图翻译并进入自动状态；自动状态中再次
@@ -303,7 +303,7 @@ class RemoteAutomationController:
     ) -> None:
         # 注入契约（构造期 fail-fast，同 HotkeyMode 构造校验先例）：宿主误把
         # property 取值当回调传入（如 windows_created 不加括号/不包 lambda）时，
-        # 在启动即报错而非等到菜单点击时 TypeError（曾致右键菜单 CRITICAL）
+        # 在启动即报错而非等到菜单点击时 TypeError（曾致快捷菜单 CRITICAL）
         for _name, _callback in (
             ("has_windows", has_windows),
             ("is_busy", is_busy),

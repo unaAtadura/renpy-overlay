@@ -65,7 +65,7 @@ class VideoFlowMixin:
             return
         self._video_recorder.toggle()
 
-    # -- 实时语音识别（右键菜单开关；占用互斥槽阻塞其余 API 请求；不入 asr.db） --
+    # -- 实时语音识别（快捷菜单开关；占用互斥槽阻塞其余 API 请求；不入 asr.db） --
 
     def _on_asr_rt_state(self, enabled: bool) -> None:
         """控制器状态回调（主线程）：重置显示状态并切换正文窗锚点。

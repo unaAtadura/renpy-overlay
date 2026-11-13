@@ -21,7 +21,7 @@
 - :mod:`viewer_window`  —— 原图全尺寸查看弹窗（拖拽移动，单击关闭）
 - :mod:`chat_window`    —— AI 对话窗口（复选框 + 锁定窗口下拉 + OCR / 发送）
 
-窗口池与右键菜单管理在包根 :mod:`renpy_overlay.quick_menu`（后续新功能的
+窗口池与快捷菜单管理在包根 :mod:`renpy_overlay.quick_menu`（后续新功能的
 菜单入口统一扩展点），不在本包内。
 """
 

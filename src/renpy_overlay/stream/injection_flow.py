@@ -65,7 +65,7 @@ class InjectionFlowMixin:
         )
 
     def request_prebuild(self) -> None:
-        """预构建入口回调（标题窗入口条 / 右键菜单共用）：打开或唤回主窗口。
+        """预构建入口回调（标题窗入口条 / 快捷菜单共用）：打开或唤回主窗口。
 
         注入模式：game_dir 是进程 exe 所在目录（如 ``<根>/lib/windows-i686``），
         经 :func:`prebuild_initial_dir` 向上定位含 ``game/`` 子目录的游戏根后
@@ -165,7 +165,7 @@ class InjectionFlowMixin:
         打开 = 创建单例半透明弹窗并锚定到本图标右上角（仅打开时计算一次，
         打开期间不自动跟随标题窗移动，拖动位置保持到关闭）；关闭 = 销毁
         弹窗并清空日志历史，下次打开从空白重新累积。打开动作在
-        :meth:`_open_choice_log`（右键入口与 layout 启动恢复共用）。
+        :meth:`_open_choice_log`（快捷菜单入口与 layout 启动恢复共用）。
         """
         if self._closed:
             return
@@ -190,7 +190,7 @@ class InjectionFlowMixin:
         pos: tuple[int, int] | None = None,
         locked: bool = False,
     ) -> None:
-        """打开选项副作用日志窗口（右键入口与 layout 启动恢复共用；需求
+        """打开选项副作用日志窗口（快捷菜单入口与 layout 启动恢复共用；需求
         future_恢复布局.txt）。
 
         ``pos`` 为 None：锚定到入口图标右上角（既有行为）；提供时按恢复

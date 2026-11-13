@@ -51,7 +51,7 @@ class WindowFollowMixin:
     def _follow_once(self) -> None:
         if self._screenshot_suppress or self._context_menu_open:
             # 截图瞬间：不定位不重显示，防跟随循环把隐藏窗口拉回；
-            # 右键菜单打开期间（无论锁定/解锁）：解锁态的周期定位也带
+            # 快捷菜单打开期间（无论锁定/解锁）：解锁态的周期定位也带
             # move_window(HWND_TOPMOST)，会把流式窗重新提到菜单之上遮住菜单
             return
         if self._tray is not None and self._tray.hidden:
@@ -213,7 +213,7 @@ class WindowFollowMixin:
     def _reassert_topmost(self) -> None:
         """把两窗重新压回最顶层（不改位置/尺寸/焦点）；日志节流避免刷屏。"""
         if self._context_menu_open:
-            return  # 右键菜单打开期间不与菜单竞争 TOPMOST 层组的顶部位置
+            return  # 快捷菜单打开期间不与菜单竞争 TOPMOST 层组的顶部位置
         try:
             win32api.set_topmost(self._body_hwnd)
             win32api.set_topmost(self._title_hwnd)

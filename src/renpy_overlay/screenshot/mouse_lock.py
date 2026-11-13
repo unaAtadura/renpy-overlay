@@ -199,7 +199,7 @@ class MouseLockController(QAbstractNativeEventFilter):
     def engaged(self) -> bool:
         return self._engaged
 
-    # ---- 开关（右键菜单项调用） -----------------------------------------------
+    # ---- 开关（快捷菜单项调用） -----------------------------------------------
 
     def set_enabled(self, enable: bool) -> None:
         """切换功能开关：创建/销毁范围窗口，注册/注销逃脱热键。

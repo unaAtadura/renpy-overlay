@@ -63,6 +63,7 @@
 | `hotkey_main` | `"alt+t"` | 合法键位 | 快捷键模式主开关（不含 Ctrl 以规避 Ren'Py 持续快进） |
 | `hotkey_window_1..8` | `"1".."8"` | 合法键位 | 八色截图窗口热键（红橙黄绿青蓝紫黑） |
 | `hotkey_mouse_escape` | `"alt+o"` | 合法键位 | 锁鼠标逃脱键 |
+| `quick_menu_anchor_diameter` | `50` | 20 | 快捷菜单锚点圆形窗口直径（像素）；layout.json 记录的直径恢复时优先 |
 | `remote_screenshot_enable` | `true` | — | 遥控截图 A/B 小圆窗开关 |
 | `remote_screenshot_diameterA` / `diameterB` | `100` | 20 | 触发器 / 瞄准器直径（像素） |
 | `remote_screenshot_interval` | `0.5` | 0.1 | 遥控器自动化周期截图间隔秒 |

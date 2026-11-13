@@ -260,7 +260,7 @@ class ScreenshotFlowMixin:
         logger.warning("截图翻译失败：%s", item.get("error"))
         self._update_title("翻译失败")
 
-    # -- 遥控器自动化（右键菜单开关；提交走视觉链路不隐藏窗口；成功即落库） ------
+    # -- 遥控器自动化（快捷菜单开关；提交走视觉链路不隐藏窗口；成功即落库） ------
 
     def _is_translation_busy(self) -> bool:
         """自动化互斥查询（主线程）：存在任意在途翻译/识曲/对话即忙碌。"""
